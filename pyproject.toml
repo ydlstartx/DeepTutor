@@ -206,8 +206,15 @@ graphrag = ["graphrag>=3.0.1,<4.0.0; python_version < '3.14'"]
 # `mineru[core]`, which is capped at python <3.14, so this carries the same
 # `python_version` marker as graphrag to avoid a silent backtrack/downgrade on
 # 3.14+. Floor is 1.0.1 (no 1.0.0 was ever published) with a <2.0.0 ceiling so
-# a future API-breaking 2.x isn't pulled in silently.
-rag-lightrag = ["raganything>=1.0.1,<2.0.0; python_version < '3.14'"]
+# a future API-breaking 2.x isn't pulled in silently. lightrag-hku is pinned
+# separately because raganything declares it unpinned: 1.5.x moved
+# `role_llm_funcs` out of the dataclass fields, which breaks raganything's
+# multimodal processors (KeyError: 'role_llm_funcs'). Cap at <1.5.0 until
+# raganything catches up with the 1.5 role-based LLM refactor.
+rag-lightrag = [
+    "raganything>=1.0.1,<2.0.0; python_version < '3.14'",
+    "lightrag-hku>=1.4.0,<1.5.0; python_version < '3.14'",
+]
 
 # Dev/test tooling. Mirrors requirements/dev.txt.
 dev = [
