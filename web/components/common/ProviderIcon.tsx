@@ -30,6 +30,7 @@ const PROVIDER_ICONS: Record<string, { file: string; mono?: boolean }> = {
   dashscope: { file: "qwen-color.svg" },
   aliyun: { file: "qwen-color.svg" },
   moonshot: { file: "moonshot.svg", mono: true },
+  kimi_coding_plan: { file: "moonshot.svg", mono: true },
   minimax: { file: "minimax-color.svg" },
   minimax_anthropic: { file: "minimax-color.svg" },
   mistral: { file: "mistral-color.svg" },

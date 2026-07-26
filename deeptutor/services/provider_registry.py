@@ -89,6 +89,8 @@ PROVIDER_ALIASES = {
     "volcengineCodingPlan": "volcengine_coding_plan",
     "bytepluscodingplan": "byteplus_coding_plan",
     "byteplusCodingPlan": "byteplus_coding_plan",
+    "kimicodingplan": "kimi_coding_plan",
+    "kimiCodingPlan": "kimi_coding_plan",
     "github-copilot": "github_copilot",
     "openai-codex": "openai_codex",
     "lm-studio": "lm_studio",
@@ -238,6 +240,24 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://ark.ap-southeast.bytepluses.com/api/coding/v3",
         strip_model_prefix=True,
         thinking_style="thinking_type",
+    ),
+    ProviderSpec(
+        name="kimi_coding_plan",
+        keywords=("kimi-plan",),
+        env_key="KIMI_API_KEY",
+        display_name="Kimi Coding Plan",
+        backend="openai_compat",
+        is_gateway=True,
+        detect_by_base_keyword="kimi.com/coding",
+        default_api_base="https://api.kimi.com/coding/v1",
+        strip_model_prefix=True,
+        # Every model served on this endpoint (k3, kimi-k2.5, …) locks
+        # temperature server-side: any explicit value is rejected with
+        # HTTP 400 ("invalid temperature: only 1 is allowed for this
+        # model"). The empty pattern matches all model names, so the
+        # parameter is always dropped and the API applies its fixed
+        # default — Moonshot's own recommendation.
+        model_overrides=(("", {"temperature": None}),),
     ),
     # === Standard providers (matched by model-name keywords) ===============
     ProviderSpec(
@@ -521,11 +541,37 @@ def strip_provider_prefix(model: str, spec: ProviderSpec | None) -> str:
     return model
 
 
+def apply_model_overrides(
+    spec: ProviderSpec | None,
+    model: str | None,
+    kwargs: dict[str, Any],
+) -> None:
+    """Apply ``spec.model_overrides`` to a request payload dict in place.
+
+    A None override value means "drop this parameter" — e.g. Kimi models
+    reject any explicit temperature and must be sent none. Shared by every
+    request-construction path (services provider, raw agentic kwargs,
+    executors) so they all honor the same per-model constraints.
+    """
+    if not spec or not model:
+        return
+    model_lower = model.lower()
+    for pattern, overrides in spec.model_overrides:
+        if pattern in model_lower:
+            for key, value in overrides.items():
+                if value is None:
+                    kwargs.pop(key, None)
+                else:
+                    kwargs[key] = value
+            break
+
+
 __all__ = [
     "ProviderSpec",
     "PROVIDERS",
     "NANOBOT_LLM_PROVIDERS",
     "PROVIDER_ALIASES",
+    "apply_model_overrides",
     "canonical_provider_name",
     "find_by_name",
     "find_by_model",

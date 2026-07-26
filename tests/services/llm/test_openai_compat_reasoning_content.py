@@ -147,3 +147,13 @@ def test_services_moonshot_v1_keeps_temperature() -> None:
     kwargs = _build_services_kwargs("moonshot", None, model="moonshot-v1-8k")
 
     assert kwargs["temperature"] == 0.7
+
+
+@pytest.mark.parametrize("model", ["k3", "kimi-k3", "kimi-k2.5"])
+def test_services_kimi_coding_plan_drops_temperature(model: str) -> None:
+    # The Kimi Coding Plan endpoint locks temperature for every model it
+    # serves, so the parameter is dropped unconditionally (empty override
+    # pattern) regardless of whether the model name contains "kimi".
+    kwargs = _build_services_kwargs("kimi_coding_plan", None, model=model)
+
+    assert "temperature" not in kwargs

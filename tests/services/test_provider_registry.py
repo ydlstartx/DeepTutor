@@ -57,3 +57,16 @@ def test_github_copilot_is_oauth_backed() -> None:
     assert spec is not None
     assert spec.auth_mode == "oauth"
     assert spec.env_key == ""
+
+
+def test_kimi_coding_plan_aliases_and_base_detection() -> None:
+    spec = find_by_name("kimi_coding_plan")
+
+    assert spec is not None
+    assert spec.display_name == "Kimi Coding Plan"
+    assert spec.backend == "openai_compat"
+    assert spec.mode == "gateway"
+    assert spec.default_api_base == "https://api.kimi.com/coding/v1"
+    assert find_by_name("kimi-coding-plan") == spec
+    assert find_by_name("KimiCodingPlan") == spec
+    assert find_gateway(api_base="https://api.kimi.com/coding/v1") == spec

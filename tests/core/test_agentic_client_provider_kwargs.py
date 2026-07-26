@@ -88,6 +88,32 @@ def test_agentic_kwargs_preserve_legacy_shape_without_binding() -> None:
     assert kwargs == {"temperature": 0.2, "max_tokens": 256}
 
 
+def test_agentic_kwargs_drop_temperature_for_kimi_coding_plan() -> None:
+    # The Kimi Coding Plan endpoint locks temperature for every model it
+    # serves; the raw agentic path must honor the same model_overrides as
+    # the services provider, or k3 replies HTTP 400.
+    for model in ("k3", "kimi-k3", "kimi-k2.5"):
+        kwargs = build_completion_kwargs(
+            temperature=0.2,
+            model=model,
+            max_tokens=256,
+            binding="kimi_coding_plan",
+        )
+
+        assert "temperature" not in kwargs
+
+
+def test_agentic_kwargs_drop_temperature_for_moonshot_kimi() -> None:
+    kwargs = build_completion_kwargs(
+        temperature=0.2,
+        model="kimi-k2.6",
+        max_tokens=256,
+        binding="moonshot",
+    )
+
+    assert "temperature" not in kwargs
+
+
 def test_native_tool_backends_all_have_adapter_builders() -> None:
     # Every tool-gated backend must be adapter-routed, or tool schemas would be
     # attached to a plain AsyncOpenAI client speaking a non-OpenAI wire format.
@@ -211,6 +237,7 @@ def test_registered_cloud_openai_compat_providers_enable_native_tools() -> None:
         "edenai",
         "volcengine_coding_plan",
         "byteplus_coding_plan",
+        "kimi_coding_plan",
     ):
         assert can_use_native_tool_calling(binding=binding, model=None) is True, binding
 

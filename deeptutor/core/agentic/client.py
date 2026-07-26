@@ -22,7 +22,7 @@ from deeptutor.services.llm import get_token_limit_kwargs, supports_tools
 from deeptutor.services.llm.reasoning_params import (
     build_openai_compatible_reasoning_kwargs,
 )
-from deeptutor.services.provider_registry import find_by_name
+from deeptutor.services.provider_registry import apply_model_overrides, find_by_name
 
 # Providers that don't reliably support OpenAI function-calling. The loop
 # still runs without tool schemas — the model just produces prose.
@@ -320,6 +320,8 @@ def build_completion_kwargs(
     kwargs: dict[str, Any] = {"temperature": temperature}
     if model:
         kwargs.update(get_token_limit_kwargs(model, max_tokens))
+    spec = find_by_name(binding)
+    apply_model_overrides(spec, model, kwargs)
     kwargs.update(
         build_provider_extra_kwargs(
             binding=binding,
