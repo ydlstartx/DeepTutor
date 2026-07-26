@@ -30,11 +30,11 @@ const OPTIMISTIC_RANK_OFFSET = 1e15;
 
 function siblingRank(message: MessageItem): number {
   // Optimistic, in-flight messages get a negative ``id`` on the client
-  // (``-Date.now()``) and must be treated as the freshest sibling so the
-  // bubble the user just submitted stays visible. Among optimistic rows,
-  // the *more recent* one (more negative id) must rank higher so that a
-  // second optimistic send doesn't get hidden by the first. Persisted
-  // messages keep their natural id-ordered rank.
+  // (``nextOptimisticId()``) and must be treated as the freshest
+  // sibling so the bubble the user just submitted stays visible. Among
+  // optimistic rows, the *more recent* one (more negative id) must rank
+  // higher so that a second optimistic send doesn't get hidden by the
+  // first. Persisted messages keep their natural id-ordered rank.
   const id = message.id ?? 0;
   return id < 0 ? OPTIMISTIC_RANK_OFFSET - id : id;
 }

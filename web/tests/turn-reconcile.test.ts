@@ -170,3 +170,37 @@ test("returns original references when there is nothing to reconcile", () => {
   assert.equal(result.messages, messages);
   assert.equal(result.selectedBranches, branches);
 });
+
+test("repairs a same-millisecond optimistic id collision by row index", () => {
+  // Legacy rows minted with ``-Date.now()``: a turn's user row and
+  // assistant placeholder could share one optimistic id. The persisted ids
+  // must still land on the right rows — user id on the user row, assistant
+  // id on the assistant row — and the assistant's parent must point at the
+  // user row, never at itself.
+  const messages: Msg[] = [
+    { id: 10, role: "user", content: "earlier", parentMessageId: null },
+    { id: 11, role: "assistant", content: "earlier reply", parentMessageId: 10 },
+    { id: -2000, role: "user", content: "question", parentMessageId: 11 },
+    {
+      id: -2000,
+      role: "assistant",
+      content: "streamed answer",
+      parentMessageId: -2000,
+      events: [{ turn_id: TURN }],
+    },
+  ];
+  const result = reconcileTurnIds(
+    messages,
+    {},
+    {
+      turnId: TURN,
+      userMessageId: 12,
+      assistantMessageId: 13,
+    },
+  );
+  assert.equal(result.changed, true);
+  const [, , user, assistant] = result.messages;
+  assert.equal(user.id, 12);
+  assert.equal(assistant.id, 13);
+  assert.equal(assistant.parentMessageId, 12);
+});

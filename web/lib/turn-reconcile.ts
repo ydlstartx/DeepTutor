@@ -93,19 +93,33 @@ export function reconcileTurnIds<T extends ReconcilableMessage>(
   if (ids.assistantMessageId != null && isOptimisticId(assistant.id)) {
     remap.set(assistant.id, ids.assistantMessageId);
   }
+  let userIndex = -1;
   if (ids.userMessageId != null) {
     for (let i = assistantIndex - 1; i >= 0; i--) {
       const message = messages[i];
       if (message.role !== "user") continue;
       if (isOptimisticId(message.id)) {
-        remap.set(message.id, ids.userMessageId);
+        userIndex = i;
+        // Legacy same-millisecond collision: optimistic ids used to be
+        // minted with ``-Date.now()``, so a turn's user row and assistant
+        // placeholder could share one id. A single Map key cannot carry
+        // both targets — keep the assistant mapping (parent pointers and
+        // branch selections referencing the shared id belong to the turn's
+        // tip, the assistant reply) and repair the user row by index below.
+        if (!remap.has(message.id)) {
+          remap.set(message.id, ids.userMessageId);
+        }
       }
       break;
     }
   }
+  const collides =
+    userIndex !== -1 &&
+    messages[userIndex].id === assistant.id &&
+    isOptimisticId(assistant.id);
   if (remap.size === 0) return unchanged;
 
-  const nextMessages = messages.map((message) => {
+  let nextMessages = messages.map((message) => {
     const nextId = message.id !== undefined ? remap.get(message.id) : undefined;
     const nextParent =
       message.parentMessageId != null
@@ -118,6 +132,24 @@ export function reconcileTurnIds<T extends ReconcilableMessage>(
       ...(nextParent !== undefined ? { parentMessageId: nextParent } : {}),
     };
   });
+
+  if (collides) {
+    nextMessages = nextMessages.map((message, index) => {
+      if (index === userIndex) {
+        return { ...message, id: ids.userMessageId! };
+      }
+      if (index === assistantIndex) {
+        return {
+          ...message,
+          id: ids.assistantMessageId ?? assistant.id,
+          // The placeholder's parent pointer references the shared
+          // optimistic id; aim it at the persisted user row, not at itself.
+          parentMessageId: ids.userMessageId ?? message.parentMessageId,
+        };
+      }
+      return message;
+    });
+  }
 
   let nextBranches = selectedBranches;
   const branchEntries = Object.entries(selectedBranches);
