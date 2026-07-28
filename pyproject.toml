@@ -222,7 +222,9 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
     "pre-commit>=3.0.0",
-    "safety<3.0.0",
+    # safety dropped: 2.x pins packaging<22 (downgrades it and breaks
+    # wheel/lancedb), and 3.x was already replaced by pip-audit in pre-commit
+    # (see .pre-commit-config.yaml "Security checks").
     "bandit>=1.8.0",
     # Test fixture builders for document-loader tests. Runtime pulls these via
     # cli/server, but dev keeps them explicit for pytest collection.
