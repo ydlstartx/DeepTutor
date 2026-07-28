@@ -516,6 +516,44 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                           />
                           <ContextWindowMeta model={activeModel} />
                         </div>
+                        <div>
+                          <div className="mb-1.5 text-[12px] text-[var(--muted-foreground)]">
+                            {t("Reasoning Effort")}
+                          </div>
+                          <select
+                            className={selectClass}
+                            value={activeModel.reasoning_effort || ""}
+                            onChange={(e) =>
+                              updateModelField(
+                                service,
+                                "reasoning_effort",
+                                e.target.value,
+                              )
+                            }
+                          >
+                            {["", "minimal", "low", "medium", "high"].map(
+                              (effort) => (
+                                <option
+                                  key={effort || "default"}
+                                  className={selectOptionClass}
+                                  value={effort}
+                                >
+                                  {effort
+                                    ? t(
+                                        effort.charAt(0).toUpperCase() +
+                                          effort.slice(1),
+                                      )
+                                    : t("Default")}
+                                </option>
+                              ),
+                            )}
+                          </select>
+                          <p className="mt-1.5 text-[11px] text-[var(--muted-foreground)]">
+                            {t(
+                              "For thinking-capable models (e.g. Qwen3, DeepSeek), Minimal disables thinking.",
+                            )}
+                          </p>
+                        </div>
                         <ContextWindowDetectionBanner
                           model={activeModel}
                           detection={activeLlmDetection}

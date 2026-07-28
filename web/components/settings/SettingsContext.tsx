@@ -47,6 +47,10 @@ export type CatalogModel = {
   context_window?: string;
   context_window_source?: string;
   context_window_detected_at?: string;
+  // LLM: per-model reasoning effort ("" = provider/model default). Backends
+  // that gate "thinking" via extra_body (e.g. DashScope enable_thinking)
+  // treat "minimal" as thinking-off.
+  reasoning_effort?: string;
   // Voice (TTS): free-form provider/model-specific voice string, e.g.
   // "alloy", "autumn", "model:voice". `response_format` is the TTS output
   // codec (mp3/wav/...) and is reused by imagegen ("url"/"b64_json").
