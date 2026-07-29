@@ -89,3 +89,11 @@ def test_qwen_model_override_enables_vision() -> None:
     assert supports_vision("openai", "Qwen/Qwen3-VL-235B-A22B-Instruct") is True
     assert supports_vision("openai", "qwen-plus") is False
     assert supports_vision("openai", "Qwen/Qwen3-235B-A22B-Instruct") is False
+
+
+def test_qwen37_native_vl_models_enable_vision() -> None:
+    """Qwen3.7 Plus/Flash are native VL models (Max stays text-only)."""
+    assert supports_vision("dashscope", "qwen3.7-plus") is True
+    assert supports_vision("dashscope", "qwen3.7-flash") is True
+    assert supports_vision("dashscope", "qwen3.7-flash-2026-07-15") is True
+    assert supports_vision("dashscope", "qwen3.7-max") is False

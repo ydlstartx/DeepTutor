@@ -267,6 +267,10 @@ MODEL_OVERRIDES: dict[str, dict[str, object]] = {
     "qwen3-vl": {"has_thinking_tags": True, "supports_vision": True},
     "qwen2-vl": {"has_thinking_tags": True, "supports_vision": True},
     "qwen-vl": {"has_thinking_tags": True, "supports_vision": True},
+    # Qwen3.7 Plus/Flash are native vision-language models (Max is text-only);
+    # their names carry no "vl" marker, so they need explicit entries.
+    "qwen3.7-plus": {"has_thinking_tags": True, "supports_vision": True},
+    "qwen3.7-flash": {"has_thinking_tags": True, "supports_vision": True},
     "qwen": {
         "has_thinking_tags": True,
         "supports_vision": False,
