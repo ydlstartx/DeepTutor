@@ -776,6 +776,25 @@ export async function moveKbFile(
   invalidateKnowledgeCaches();
 }
 
+export async function renameKbFile(
+  name: string,
+  source: string,
+  newName: string,
+): Promise<void> {
+  const res = await apiFetch(
+    apiUrl(`/api/v1/knowledge/${encodeURIComponent(name)}/files/rename`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, new_name: newName }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to rename file"));
+  }
+  invalidateKnowledgeCaches();
+}
+
 /**
  * Delete a single raw document from a KB. Works even while the KB is in an
  * error state, so an unparseable file can be dropped without rebuilding the

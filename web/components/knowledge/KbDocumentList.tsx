@@ -12,6 +12,7 @@ import {
   MoveRight,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   RefreshCw,
   Trash2,
   X,
@@ -22,6 +23,7 @@ import {
   deleteKbFile,
   listKnowledgeBaseFiles,
   moveKbFile,
+  renameKbFile,
   type KnowledgeBaseFile,
 } from "@/lib/knowledge-api";
 import { docIconFor, formatBytes } from "@/lib/doc-attachments";
@@ -126,6 +128,8 @@ export default function KbDocumentList({
   const [newFolderName, setNewFolderName] = useState("");
   const [moveMenuFor, setMoveMenuFor] = useState<string | null>(null);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
+  const [renameFor, setRenameFor] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [dragPath, setDragPath] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -280,6 +284,33 @@ export default function KbDocumentList({
           type: "file",
         });
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRename = async (source: string) => {
+    const basename = source.slice(source.lastIndexOf("/") + 1);
+    const newName = renameValue.trim();
+    setRenameFor(null);
+    if (!newName || newName === basename) return;
+    setBusy(true);
+    try {
+      await renameKbFile(kbName, source, newName);
+      // Keep the preview pointed at the renamed file if it was selected.
+      if (selectedFile === source) {
+        const parent = parentOf(source);
+        const newPath = parent ? `${parent}/${newName}` : newName;
+        const existing = files.find((f) => f.name === source);
+        onSelect({
+          ...(existing ?? { name: newPath }),
+          name: newPath,
+          type: "file",
+        });
+      }
+      await load(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -476,31 +507,62 @@ export default function KbDocumentList({
             aria-label={t("Select file")}
             className="h-3 w-3 shrink-0 cursor-pointer accent-[var(--primary)]"
           />
-          <button
-            type="button"
-            onClick={() => onSelect(file)}
-            title={node.path}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          >
-            <Icon
-              size={13}
-              strokeWidth={1.6}
-              className={`shrink-0 ${spec.tint}`}
+          {renameFor === node.path ? (
+            <input
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleRename(node.path);
+                if (e.key === "Escape") setRenameFor(null);
+              }}
+              onBlur={() => void handleRename(node.path)}
+              onClick={(e) => e.stopPropagation()}
+              autoFocus
+              disabled={busy}
+              aria-label={t("Rename")}
+              className="min-w-0 flex-1 rounded border border-[var(--primary)]/40 bg-[var(--background)] px-1.5 py-0.5 text-[12px] text-[var(--foreground)] outline-none"
             />
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-[12px] font-medium text-[var(--foreground)]">
-                {node.name}
+          ) : (
+            <button
+              type="button"
+              onClick={() => onSelect(file)}
+              title={node.path}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            >
+              <Icon
+                size={13}
+                strokeWidth={1.6}
+                className={`shrink-0 ${spec.tint}`}
+              />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-[12px] font-medium text-[var(--foreground)]">
+                  {node.name}
+                </div>
+                <div className="truncate text-[10px] text-[var(--muted-foreground)]">
+                  {file.size ? formatBytes(file.size) : ""}
+                  {file.modified ? ` · ${formatRelative(file.modified)}` : ""}
+                </div>
               </div>
-              <div className="truncate text-[10px] text-[var(--muted-foreground)]">
-                {file.size ? formatBytes(file.size) : ""}
-                {file.modified ? ` · ${formatRelative(file.modified)}` : ""}
-              </div>
-            </div>
-          </button>
+            </button>
+          )}
           <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100">
             <button
               type="button"
               onClick={() => {
+                setMoveMenuFor(null);
+                setRenameValue(node.name);
+                setRenameFor(node.path);
+              }}
+              title={t("Rename")}
+              aria-label={t("Rename")}
+              className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRenameFor(null);
                 setMoveMenuFor((cur) =>
                   cur === node.path ? null : node.path,
                 );

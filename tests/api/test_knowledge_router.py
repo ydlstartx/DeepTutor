@@ -619,6 +619,161 @@ def test_move_file_into_folder(monkeypatch, tmp_path: Path) -> None:
     assert not (raw / "demo.txt").exists()
 
 
+def _stage_llamaindex_index(kb_dir: Path, raw_file: Path) -> None:
+    """Minimal ready llamaindex version whose metadata references raw_file."""
+    version_dir = kb_dir / "version-1"
+    (version_dir / "bm25_retriever").mkdir(parents=True)
+    (version_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "version": "version-1",
+                "provider": "llamaindex",
+                "signature": "sig",
+                "layout": "flat",
+            }
+        ),
+        encoding="utf-8",
+    )
+    meta = {"file_name": raw_file.name, "file_path": str(raw_file)}
+    (version_dir / "docstore.json").write_text(
+        json.dumps(
+            {
+                "docstore/data": {"n1": {"__data__": {"metadata": meta}}},
+                "docstore/ref_doc_info": {"d1": {"node_ids": ["n1"], "metadata": meta}},
+                "docstore/metadata": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (version_dir / "index_store.json").write_text("{}", encoding="utf-8")
+    node = json.dumps({"id_": "n1", "metadata": meta}, ensure_ascii=False)
+    (version_dir / "bm25_retriever" / "corpus.jsonl").write_text(
+        json.dumps({**meta, "_node_content": node}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_rename_file_rekeys_hash_and_patches_index(monkeypatch, tmp_path: Path) -> None:
+    manager = _ready_kb_manager(tmp_path)
+    kb_dir = manager.base_dir / "kb"
+    raw = kb_dir / "raw"
+    raw_file = raw / "demo.txt"
+    raw_file.write_text("hi", encoding="utf-8")
+    (kb_dir / "metadata.json").write_text(
+        json.dumps({"file_hashes": {"demo.txt": "abc123"}}), encoding="utf-8"
+    )
+    _stage_llamaindex_index(kb_dir, raw_file)
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setattr(knowledge_router_module, "_kb_base_dir", tmp_path / "knowledge_bases")
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/kb/files/rename",
+            json={"source": "demo.txt", "new_name": "renamed.txt"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["path"] == "renamed.txt"
+    assert payload["was_indexed"] is True
+    assert payload["index_records_patched"] > 0
+
+    assert (raw / "renamed.txt").is_file()
+    assert not (raw / "demo.txt").exists()
+
+    hashes = json.loads((kb_dir / "metadata.json").read_text(encoding="utf-8"))[
+        "file_hashes"
+    ]
+    assert hashes == {"renamed.txt": "abc123"}
+
+    version_dir = kb_dir / "version-1"
+    docstore = json.loads((version_dir / "docstore.json").read_text(encoding="utf-8"))
+    node_meta = docstore["docstore/data"]["n1"]["__data__"]["metadata"]
+    assert node_meta["file_name"] == "renamed.txt"
+    assert node_meta["file_path"] == str(raw / "renamed.txt")
+    ref_meta = docstore["docstore/ref_doc_info"]["d1"]["metadata"]
+    assert ref_meta["file_name"] == "renamed.txt"
+
+    [row] = (version_dir / "bm25_retriever" / "corpus.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    corpus_row = json.loads(row)
+    assert corpus_row["file_name"] == "renamed.txt"
+    assert json.loads(corpus_row["_node_content"])["metadata"]["file_name"] == (
+        "renamed.txt"
+    )
+
+
+def test_rename_rejects_extension_change(monkeypatch, tmp_path: Path) -> None:
+    manager = _ready_kb_manager(tmp_path)
+    raw = manager.base_dir / "kb" / "raw"
+    (raw / "demo.txt").write_text("hi", encoding="utf-8")
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/kb/files/rename",
+            json={"source": "demo.txt", "new_name": "demo.pdf"},
+        )
+
+    assert response.status_code == 400
+    assert (raw / "demo.txt").is_file()
+
+
+def test_rename_rejects_existing_name(monkeypatch, tmp_path: Path) -> None:
+    manager = _ready_kb_manager(tmp_path)
+    raw = manager.base_dir / "kb" / "raw"
+    (raw / "demo.txt").write_text("hi", encoding="utf-8")
+    (raw / "taken.txt").write_text("busy", encoding="utf-8")
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/kb/files/rename",
+            json={"source": "demo.txt", "new_name": "taken.txt"},
+        )
+
+    assert response.status_code == 409
+    assert (raw / "demo.txt").is_file()
+
+
+def test_rename_rejects_indexed_non_llamaindex_kb(monkeypatch, tmp_path: Path) -> None:
+    manager = _ready_kb_manager(tmp_path)
+    manager.config["knowledge_bases"]["kb"]["rag_provider"] = "lightrag"
+    kb_dir = manager.base_dir / "kb"
+    raw = kb_dir / "raw"
+    (raw / "demo.txt").write_text("hi", encoding="utf-8")
+    version_dir = kb_dir / "version-1"
+    version_dir.mkdir(parents=True)
+    (version_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "version": "version-1",
+                "provider": "lightrag",
+                "signature": "sig",
+                "layout": "flat",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (version_dir / "kv_store_doc_status.json").write_text(
+        json.dumps({"doc-1": {"status": "processed", "chunks_list": ["c1"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/kb/files/rename",
+            json={"source": "demo.txt", "new_name": "renamed.txt"},
+        )
+
+    assert response.status_code == 400
+    assert "llamaindex" in response.json()["detail"]
+    assert (raw / "demo.txt").is_file()
+
+
 def test_list_files_preserves_kb_named_default(monkeypatch, tmp_path: Path) -> None:
     manager = _FakeKBManager(tmp_path / "knowledge_bases")
     manager.config["knowledge_bases"]["actual-kb"] = {

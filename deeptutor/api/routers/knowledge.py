@@ -28,12 +28,16 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from deeptutor.api.utils.progress_broadcaster import ProgressBroadcaster
 from deeptutor.api.utils.task_id_manager import TaskIDManager
 from deeptutor.api.utils.task_log_stream import capture_task_logs, get_task_stream_manager
-from deeptutor.knowledge.add_documents import DocumentAdder, remove_raw_document
+from deeptutor.knowledge.add_documents import (
+    DocumentAdder,
+    remove_raw_document,
+    rename_raw_document,
+)
 from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
 from deeptutor.knowledge.kb_types import is_connected_kb
 from deeptutor.knowledge.manager import KnowledgeBaseManager
@@ -1920,6 +1924,11 @@ class MoveFilePayload(BaseModel):
     dest_folder: str = ""
 
 
+class RenameFilePayload(BaseModel):
+    source: str
+    new_name: str = Field(max_length=255)
+
+
 @router.post("/{kb_name}/folders")
 async def create_kb_folder(kb_name: str, payload: CreateFolderPayload):
     """Create an (organizational) folder under <kb>/raw/. No retrieval effect."""
@@ -1969,6 +1978,86 @@ async def move_kb_file(kb_name: str, payload: MoveFilePayload):
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dest))
     return {"status": "ok", "path": dest.relative_to(raw_dir.resolve()).as_posix()}
+
+
+@router.post("/{kb_name}/files/rename")
+async def rename_kb_file(kb_name: str, payload: RenameFilePayload):
+    """Rename a raw document, keeping index references consistent.
+
+    Unlike folder moves (display-only), a rename touches retrieval data:
+    ``file_hashes`` is re-keyed so the dedup registry keeps working, and the
+    llamaindex index's ``file_name``/``file_path`` metadata is rewritten in
+    place — no reindex needed. Other engines embed file paths in formats we
+    don't rewrite yet, so renaming an indexed lightrag/graphrag/pageindex KB
+    is rejected rather than left silently stale.
+    """
+    manager, kb_name, _ = _writable_kb(kb_name)
+    kb_entry = _load_kb_entry_or_404(manager, kb_name)
+    _assert_kb_writable_or_409(kb_name, kb_entry)
+    kb_dir = Path(manager.get_knowledge_base_path(kb_name))
+    raw_dir = kb_dir / "raw"
+
+    source_rel = _sanitize_rel_subdir(payload.source)
+    if not source_rel:
+        raise HTTPException(status_code=400, detail="Source path is required")
+    src = _safe_join_raw(raw_dir, source_rel)
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    new_name = payload.new_name.strip()
+    if not new_name or "/" in new_name or "\\" in new_name or new_name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid new file name")
+    if Path(new_name).suffix.lower() != src.suffix.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="The new name must keep the same file extension",
+        )
+    dest = src.parent / new_name
+    if dest.resolve() == src.resolve():
+        return {"status": "ok", "path": source_rel}
+    if dest.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{new_name}' already exists in the same folder",
+        )
+
+    provider = normalize_provider_name(kb_entry.get("rag_provider"))
+    if provider != DEFAULT_PROVIDER:
+        from deeptutor.services.rag.index_probe import has_ready_provider_index
+
+        if has_ready_provider_index(kb_dir, provider):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Renaming indexed files is only supported for {DEFAULT_PROVIDER} "
+                    f"knowledge bases; this KB uses '{provider}'. Re-index after "
+                    "renaming the file on disk instead."
+                ),
+            )
+
+    rename = rename_raw_document(kb_dir, src, new_name)
+
+    patched = 0
+    if provider == DEFAULT_PROVIDER:
+        from deeptutor.services.rag.index_versioning import resolve_storage_dir_for_read
+        from deeptutor.services.rag.pipelines.llamaindex import storage as llama_storage
+
+        storage_dir = resolve_storage_dir_for_read(kb_dir, None)
+        if storage_dir is not None:
+            patched = llama_storage.rename_source_references(
+                storage_dir, old_path=src, new_path=dest
+            )
+            if patched:
+                # The retrieval path caches loaded indexes in memory; drop it
+                # so the next query reads the renamed metadata from disk.
+                llama_storage.clear_index_cache()
+
+    return {
+        "status": "ok",
+        "path": rename.new_rel_path,
+        "was_indexed": rename.was_indexed,
+        "index_records_patched": patched,
+    }
 
 
 @router.get("/{kb_name}/file-preview-text/{filename:path}")

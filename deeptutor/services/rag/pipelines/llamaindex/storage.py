@@ -11,6 +11,7 @@ import threading
 from typing import Any
 
 from deeptutor.services.embedding.validation import validate_embedding_batch
+from deeptutor.services.file_io import atomic_write_json, atomic_write_text
 from deeptutor.services.rag.index_versioning import (
     EmbeddingSignature,
     find_matching_version,
@@ -261,3 +262,95 @@ def delete_kb_dir(kb_dir: Path) -> bool:
         shutil.rmtree(kb_dir)
         return True
     return False
+
+
+def rename_source_references(storage_dir: Path, *, old_path: Path, new_path: Path) -> int:
+    """Rewrite source-file metadata after a raw document is renamed.
+
+    Both ``docstore.json`` and the BM25 corpus embed ``file_name`` /
+    ``file_path`` in node metadata; leaving them stale breaks citation labels
+    and the source-file preview link. ``file_name`` is only retitled for nodes
+    whose ``file_path`` matches exactly — same-named files in other folders
+    share the basename and must not be touched. Returns the number of records
+    patched (0 when the file was never indexed).
+    """
+    old_file_path = str(old_path)
+    new_file_path = str(new_path)
+    old_file_name = old_path.name
+    new_file_name = new_path.name
+
+    def _patch_metadata(metadata: Any) -> bool:
+        if not isinstance(metadata, dict) or metadata.get("file_path") != old_file_path:
+            return False
+        metadata["file_path"] = new_file_path
+        if metadata.get("file_name") == old_file_name:
+            metadata["file_name"] = new_file_name
+        return True
+
+    patched = 0
+
+    docstore_path = storage_dir / "docstore.json"
+    if docstore_path.is_file():
+        try:
+            payload = json.loads(docstore_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            touched = 0
+            data = payload.get("docstore/data")
+            if isinstance(data, dict):
+                for record in data.values():
+                    if not isinstance(record, dict):
+                        continue
+                    node = record.get("__data__", record)
+                    if isinstance(node, dict) and _patch_metadata(node.get("metadata")):
+                        touched += 1
+            ref_info = payload.get("docstore/ref_doc_info")
+            if isinstance(ref_info, dict):
+                for entry in ref_info.values():
+                    if isinstance(entry, dict) and _patch_metadata(entry.get("metadata")):
+                        touched += 1
+            if touched:
+                atomic_write_json(docstore_path, payload)
+                patched += touched
+
+    corpus_path = storage_dir / "bm25_retriever" / "corpus.jsonl"
+    if corpus_path.is_file():
+        touched = 0
+        lines: list[str] = []
+        for line in corpus_path.read_text(encoding="utf-8").splitlines():
+            row: dict[str, Any] | None = None
+            if line.strip():
+                try:
+                    parsed = json.loads(line)
+                    row = parsed if isinstance(parsed, dict) else None
+                except Exception:
+                    row = None
+            if row is None:
+                lines.append(line)
+                continue
+            line_touched = False
+            if row.get("file_path") == old_file_path:
+                row["file_path"] = new_file_path
+                if row.get("file_name") == old_file_name:
+                    row["file_name"] = new_file_name
+                line_touched = True
+            node_content = row.get("_node_content")
+            if isinstance(node_content, str):
+                try:
+                    node = json.loads(node_content)
+                except Exception:
+                    node = None
+                if isinstance(node, dict) and _patch_metadata(node.get("metadata")):
+                    row["_node_content"] = json.dumps(node, ensure_ascii=False)
+                    line_touched = True
+            if line_touched:
+                touched += 1
+                lines.append(json.dumps(row, ensure_ascii=False))
+            else:
+                lines.append(line)
+        if touched:
+            atomic_write_text(corpus_path, "\n".join(lines) + "\n")
+            patched += touched
+
+    return patched

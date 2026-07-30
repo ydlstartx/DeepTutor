@@ -79,6 +79,15 @@ class RawDocumentRemoval:
     was_indexed: bool
 
 
+@dataclass(frozen=True)
+class RawDocumentRename:
+    """Outcome of renaming one raw document within its folder."""
+
+    old_rel_path: str
+    new_rel_path: str
+    was_indexed: bool
+
+
 def _read_metadata(metadata_file: Path) -> dict:
     """Load a KB's metadata.json, returning {} when absent or unreadable."""
     if not metadata_file.exists():
@@ -108,6 +117,34 @@ def _raw_hash_key(file_path: Path, raw_dir: Path) -> str:
         return file_path.resolve().relative_to(raw_dir.resolve()).as_posix()
     except ValueError:
         return file_path.name
+
+
+def rename_raw_document(kb_dir: Path, file_path: Path, new_name: str) -> RawDocumentRename:
+    """Rename one staged raw file in place and re-key its indexed-hash record.
+
+    Same decoupling rationale as :func:`remove_raw_document`: works on any KB
+    state. ``file_path`` must already be sandbox-resolved under the KB's raw/
+    dir and the caller must have verified the destination name is free.
+    """
+    raw_dir = kb_dir / "raw"
+    old_key = _raw_hash_key(file_path, raw_dir)
+
+    source = file_path.resolve()
+    target = source.parent / new_name
+    source.rename(target)
+    new_key = _raw_hash_key(target, raw_dir)
+
+    metadata_file = kb_dir / "metadata.json"
+    metadata = _read_metadata(metadata_file)
+    hashes = metadata.get("file_hashes")
+    was_indexed = isinstance(hashes, dict) and old_key in hashes
+    if was_indexed:
+        hashes[new_key] = hashes.pop(old_key)
+        _write_metadata(metadata_file, metadata)
+
+    return RawDocumentRename(
+        old_rel_path=old_key, new_rel_path=new_key, was_indexed=was_indexed
+    )
 
 
 def remove_raw_document(kb_dir: Path, file_path: Path) -> RawDocumentRemoval:
