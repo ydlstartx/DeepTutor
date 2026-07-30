@@ -49,6 +49,11 @@ function parentOf(path: string): string {
   return idx === -1 ? "" : path.slice(0, idx);
 }
 
+const DEFAULT_WIDTH = 220;
+const MIN_WIDTH = 160;
+const MAX_WIDTH = 560;
+const WIDTH_STORAGE_KEY = "kb-document-list-width";
+
 function buildTree(entries: KnowledgeBaseFile[]): {
   root: TreeNode[];
   folderPaths: string[];
@@ -128,6 +133,40 @@ export default function KbDocumentList({
   const [batchMoveOpen, setBatchMoveOpen] = useState(false);
   const hasLoadedRef = useRef(false);
   const knownFoldersRef = useRef<Set<string>>(new Set());
+
+  // Resizable panel width. SSR/hydration renders the default; the saved
+  // width is applied after mount to avoid a server/client mismatch.
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  useEffect(() => {
+    const saved = Number(window.localStorage.getItem(WIDTH_STORAGE_KEY));
+    if (Number.isFinite(saved) && saved >= MIN_WIDTH && saved <= MAX_WIDTH) {
+      setWidth(saved);
+    }
+  }, []);
+
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    const onMove = (ev: PointerEvent) => {
+      setWidth(
+        Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + ev.clientX - startX)),
+      );
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = previousUserSelect;
+      setWidth((current) => {
+        window.localStorage.setItem(WIDTH_STORAGE_KEY, String(current));
+        return current;
+      });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
 
   const load = useCallback(
     async (force = false) => {
@@ -532,7 +571,10 @@ export default function KbDocumentList({
   };
 
   return (
-    <aside className="flex h-full w-[220px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--card)]/40">
+    <aside
+      style={{ width }}
+      className="relative flex h-full shrink-0 flex-col border-r border-[var(--border)] bg-[var(--card)]/40"
+    >
       <div className="flex items-center justify-between gap-1 px-2.5 pb-1.5 pt-2.5">
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="text-[12px] font-medium text-[var(--foreground)]">
@@ -707,6 +749,20 @@ export default function KbDocumentList({
           )}
         </div>
       )}
+
+      {/* Resize handle on the divider; double-click snaps back to default. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={t("Drag to resize")}
+        title={t("Drag to resize")}
+        onPointerDown={startResize}
+        onDoubleClick={() => {
+          setWidth(DEFAULT_WIDTH);
+          window.localStorage.setItem(WIDTH_STORAGE_KEY, String(DEFAULT_WIDTH));
+        }}
+        className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize transition-colors hover:bg-[var(--primary)]/30 active:bg-[var(--primary)]/50"
+      />
     </aside>
   );
 }

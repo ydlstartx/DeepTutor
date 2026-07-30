@@ -2491,6 +2491,7 @@
   "Select file": "选择文件",
   "Clear selection": "清除选择",
   "Failed to move {{count}} file(s)": "{{count}} 个文件移动失败",
+  "Drag to resize": "拖拽调整宽度",
   "New folder": "新建文件夹",
   "Folder name": "文件夹名称",
   "Or select an entire folder": "或选择整个文件夹",

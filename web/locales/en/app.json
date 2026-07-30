@@ -2491,6 +2491,7 @@
   "Select file": "Select file",
   "Clear selection": "Clear selection",
   "Failed to move {{count}} file(s)": "Failed to move {{count}} file(s)",
+  "Drag to resize": "Drag to resize",
   "New folder": "New folder",
   "Folder name": "Folder name",
   "Or select an entire folder": "Or select an entire folder",
