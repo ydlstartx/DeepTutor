@@ -125,7 +125,7 @@ export default function KbDocumentList({
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [moveMenuFor, setMoveMenuFor] = useState<string | null>(null);
-  const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [dragPath, setDragPath] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -273,28 +273,41 @@ export default function KbDocumentList({
     }
   };
 
-  const handleDelete = async (path: string) => {
-    setConfirmDeleteFor(null);
-    setBusy(true);
-    try {
-      await deleteKbFile(kbName, path);
-      // Drop the preview if the deleted file was the one being shown.
-      if (selectedFile === path) onSelect(null);
-      await load(true);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const toggleSelect = (path: string) =>
     setSelectedPaths((prev) => {
+      setConfirmBatchDelete(false);
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
     });
+
+  const handleDeleteSelected = async () => {
+    setConfirmBatchDelete(false);
+    const targets = [...selectedPaths];
+    if (!targets.length) return;
+    setBusy(true);
+    try {
+      const results = await Promise.allSettled(
+        targets.map((path) => deleteKbFile(kbName, path)),
+      );
+      const failed = targets.filter((_, i) => results[i].status === "rejected");
+      const deleted = new Set(
+        targets.filter((_, i) => results[i].status === "fulfilled"),
+      );
+      // Drop the preview if the file being shown was deleted.
+      if (selectedFile && deleted.has(selectedFile)) onSelect(null);
+      setSelectedPaths(new Set());
+      await load(true);
+      if (failed.length) {
+        setError(
+          t("Failed to delete {{count}} file(s)", { count: failed.length }),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleMoveSelected = async (destFolder: string) => {
     setBatchMoveOpen(false);
@@ -470,61 +483,21 @@ export default function KbDocumentList({
               </div>
             </div>
           </button>
-          {confirmDeleteFor === node.path ? (
-            <div className="flex shrink-0 items-center gap-0.5 pr-0.5">
-              <span className="px-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
-                {t("Delete?")}
-              </span>
-              <button
-                type="button"
-                onClick={() => void handleDelete(node.path)}
-                disabled={busy}
-                title={t("Confirm delete")}
-                aria-label={t("Confirm delete")}
-                className="rounded p-1 text-red-600 transition-colors hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
-              >
-                <Check className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDeleteFor(null)}
-                title={t("Cancel")}
-                aria-label={t("Cancel")}
-                className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100">
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirmDeleteFor(null);
-                  setMoveMenuFor((cur) =>
-                    cur === node.path ? null : node.path,
-                  );
-                }}
-                title={t("Move to…")}
-                aria-label={t("Move to…")}
-                className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
-              >
-                <MoveRight className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMoveMenuFor(null);
-                  setConfirmDeleteFor(node.path);
-                }}
-                title={t("Delete file")}
-                aria-label={t("Delete file")}
-                className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
+          <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100">
+            <button
+              type="button"
+              onClick={() => {
+                setMoveMenuFor((cur) =>
+                  cur === node.path ? null : node.path,
+                );
+              }}
+              title={t("Move to…")}
+              aria-label={t("Move to…")}
+              className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
+            >
+              <MoveRight className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         {moveMenuFor === node.path && (
@@ -703,9 +676,50 @@ export default function KbDocumentList({
             <MoveRight size={11} strokeWidth={1.8} />
             {t("Move to…")}
           </button>
+          {confirmBatchDelete ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void handleDeleteSelected()}
+                disabled={busy}
+                title={t("Confirm delete")}
+                aria-label={t("Confirm delete")}
+                className="flex shrink-0 items-center gap-0.5 rounded-md bg-red-600 px-2 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                <Check size={11} strokeWidth={2} />
+                {t("Delete?")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmBatchDelete(false)}
+                title={t("Cancel")}
+                aria-label={t("Cancel")}
+                className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                <X size={12} strokeWidth={1.8} />
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setBatchMoveOpen(false);
+                setConfirmBatchDelete(true);
+              }}
+              disabled={busy}
+              title={t("Delete selected")}
+              aria-label={t("Delete selected")}
+              className="shrink-0 rounded-md p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            >
+              <Trash2 size={13} strokeWidth={1.7} />
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setSelectedPaths(new Set())}
+            onClick={() => {
+              setSelectedPaths(new Set());
+              setConfirmBatchDelete(false);
+            }}
             title={t("Clear selection")}
             aria-label={t("Clear selection")}
             className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
