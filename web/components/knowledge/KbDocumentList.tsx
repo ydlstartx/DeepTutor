@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Check,
@@ -124,6 +124,10 @@ export default function KbDocumentList({
   const [dragPath, setDragPath] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [batchMoveOpen, setBatchMoveOpen] = useState(false);
+  const hasLoadedRef = useRef(false);
+  const knownFoldersRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(
     async (force = false) => {
@@ -133,10 +137,33 @@ export default function KbDocumentList({
         if (force) invalidateClientCache(`knowledge:files:${kbName}`);
         const next = await listKnowledgeBaseFiles(kbName, { force });
         setFiles(next);
-        // Default-expand every folder so files are visible without digging.
-        setExpanded(
-          new Set(next.filter((e) => e.type === "folder").map((e) => e.name)),
+        const folderNames = next
+          .filter((e) => e.type === "folder")
+          .map((e) => e.name);
+        setExpanded((prev) => {
+          // First load: default-expand every folder so files are visible
+          // without digging. Later reloads (move/delete/upload) preserve
+          // the user's fold state; folders created since count as new and
+          // open so a just-made folder never looks empty.
+          if (!hasLoadedRef.current) return new Set(folderNames);
+          const kept = new Set<string>();
+          for (const name of folderNames) {
+            if (prev.has(name) || !knownFoldersRef.current.has(name)) {
+              kept.add(name);
+            }
+          }
+          return kept;
+        });
+        knownFoldersRef.current = new Set(folderNames);
+        hasLoadedRef.current = true;
+        // Prune selections whose paths vanished (moved/deleted elsewhere).
+        const existing = new Set(
+          next.filter((e) => e.type !== "folder").map((e) => e.name),
         );
+        setSelectedPaths((prev) => {
+          const kept = [...prev].filter((p) => existing.has(p));
+          return kept.length === prev.size ? prev : new Set(kept);
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -217,6 +244,43 @@ export default function KbDocumentList({
       await load(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSelect = (path: string) =>
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const handleMoveSelected = async (destFolder: string) => {
+    setBatchMoveOpen(false);
+    const targets = [...selectedPaths].filter(
+      (p) => parentOf(p) !== destFolder,
+    );
+    if (!targets.length) return;
+    setBusy(true);
+    try {
+      // Moves are independent filesystem renames (no shared state on the
+      // backend), so run them concurrently — sequential round-trips through
+      // the dev proxy made a batch take ~0.3s per file.
+      const results = await Promise.allSettled(
+        targets.map((path) => moveKbFile(kbName, path, destFolder)),
+      );
+      const failed = targets.filter((_, i) => results[i].status === "rejected");
+      setSelectedPaths(new Set());
+      // One reload for the whole batch — not one per file — so the user's
+      // fold state survives the move (and N files don't cost N refetches).
+      await load(true);
+      if (failed.length) {
+        setError(
+          t("Failed to move {{count}} file(s)", { count: failed.length }),
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -332,9 +396,20 @@ export default function KbDocumentList({
           className={`flex items-center gap-2 rounded-md py-1.5 pr-1 text-left transition-colors ${
             active
               ? "bg-[var(--primary)]/10 text-[var(--foreground)]"
-              : "hover:bg-[var(--muted)]/50"
+              : selectedPaths.has(node.path)
+                ? "bg-[var(--primary)]/6"
+                : "hover:bg-[var(--muted)]/50"
           } ${dragPath === node.path ? "opacity-50" : ""}`}
         >
+          <input
+            type="checkbox"
+            checked={selectedPaths.has(node.path)}
+            onChange={() => toggleSelect(node.path)}
+            onClick={(e) => e.stopPropagation()}
+            title={t("Select file")}
+            aria-label={t("Select file")}
+            className="h-3 w-3 shrink-0 cursor-pointer accent-[var(--primary)]"
+          />
           <button
             type="button"
             onClick={() => onSelect(file)}
@@ -571,6 +646,67 @@ export default function KbDocumentList({
           <ul className="space-y-px">{root.map((n) => renderNode(n, 0))}</ul>
         )}
       </div>
+
+      {selectedPaths.size > 0 && (
+        <div className="relative flex shrink-0 items-center gap-1.5 border-t border-[var(--border)] px-2.5 py-2">
+          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted-foreground)]">
+            {t("{{count}} selected", { count: selectedPaths.size })}
+          </span>
+          <button
+            type="button"
+            onClick={() => setBatchMoveOpen((v) => !v)}
+            disabled={busy}
+            className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--primary)] px-2 py-1 text-[11px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-40"
+          >
+            <MoveRight size={11} strokeWidth={1.8} />
+            {t("Move to…")}
+          </button>
+          <button
+            type="button"
+            onClick={() => setSelectedPaths(new Set())}
+            title={t("Clear selection")}
+            aria-label={t("Clear selection")}
+            className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
+          >
+            <X size={12} strokeWidth={1.8} />
+          </button>
+          {batchMoveOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-10"
+                onClick={() => setBatchMoveOpen(false)}
+              />
+              <div className="absolute bottom-9 right-2 z-20 max-h-60 w-44 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--card)] py-1 shadow-lg">
+                <div className="px-2.5 py-1 text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">
+                  {t("Move to")}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleMoveSelected("")}
+                  className="block w-full truncate px-2.5 py-1.5 text-left text-[12px] text-[var(--foreground)] transition-colors hover:bg-[var(--muted)]/60"
+                >
+                  / {t("Root")}
+                </button>
+                {folderPaths.map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => void handleMoveSelected(p)}
+                    className="block w-full truncate px-2.5 py-1.5 text-left text-[12px] text-[var(--foreground)] transition-colors hover:bg-[var(--muted)]/60"
+                  >
+                    {p}
+                  </button>
+                ))}
+                {folderPaths.length === 0 && (
+                  <div className="px-2.5 py-1.5 text-[11px] text-[var(--muted-foreground)]">
+                    {t("No folders yet")}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </aside>
   );
 }
