@@ -222,8 +222,30 @@ def _inspect_lightrag(storage_dir: Path) -> ProviderIndexProbe:
     )
 
 
+# docstore.json grows with the KB (tens of MB for large libraries), and the
+# readiness probe above runs several times per API request. Parsing it on
+# every probe made each KB-touching request cost ~1s. Memoize per path on
+# (mtime, size): persistence is atomic (temp-file + os.replace), so an
+# unchanged stamp guarantees an unchanged file.
+_JSON_PARSE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+
+
+def _read_json_cached(path: Path) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    cached = _JSON_PARSE_CACHE.get(key)
+    if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+    payload = _read_json(path)
+    _JSON_PARSE_CACHE[key] = (stat.st_mtime_ns, stat.st_size, payload)
+    return payload
+
+
 def _llamaindex_doc_count(docstore_path: Path) -> int | None:
-    payload = _read_json(docstore_path)
+    payload = _read_json_cached(docstore_path)
     if not isinstance(payload, dict):
         return None
     data = payload.get("docstore/data")
