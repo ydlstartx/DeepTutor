@@ -902,7 +902,7 @@ const PreviewBody = memo(function PreviewBody({
 
   switch (kind) {
     case "pdf":
-      return <PdfPreview url={previewUrl} filename={filename} />;
+      return <PdfPreview key={previewUrl} url={previewUrl} filename={filename} />;
     case "docx":
       return <DocxPreview url={previewUrl} />;
     case "xlsx":

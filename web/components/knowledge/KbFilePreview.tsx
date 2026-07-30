@@ -303,7 +303,7 @@ export default function KbFilePreview({
             url={previewUrl}
           />
         ) : kind === "pdf" ? (
-          <PdfPreview url={previewUrl} filename={source.filename} />
+          <PdfPreview key={previewUrl} url={previewUrl} filename={source.filename} />
         ) : kind === "docx" ? (
           <DocxPreview url={previewUrl} />
         ) : kind === "xlsx" ? (
