@@ -145,27 +145,41 @@ export default function KbDocumentList({
   }, []);
 
   const startResize = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
     e.preventDefault();
+    // Capture the pointer on the handle itself: all subsequent move/up/
+    // cancel events for this pointer are retargeted here — even when the
+    // cursor leaves the window or a native drag starts over a draggable
+    // file row. Listening on `window` instead could miss the release and
+    // leave the panel following the mouse forever.
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
     const startX = e.clientX;
     const startWidth = width;
     const previousUserSelect = document.body.style.userSelect;
     document.body.style.userSelect = "none";
-    const onMove = (ev: PointerEvent) => {
+    const onMove = (ev: Event) => {
+      const pointer = ev as PointerEvent;
       setWidth(
-        Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + ev.clientX - startX)),
+        Math.min(
+          MAX_WIDTH,
+          Math.max(MIN_WIDTH, startWidth + pointer.clientX - startX),
+        ),
       );
     };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+    const stop = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
       document.body.style.userSelect = previousUserSelect;
       setWidth((current) => {
         window.localStorage.setItem(WIDTH_STORAGE_KEY, String(current));
         return current;
       });
     };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
   };
 
   const load = useCallback(
