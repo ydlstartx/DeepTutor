@@ -116,6 +116,7 @@ export default function AppShell({ sidebar, children }: AppShellProps) {
                 alt="DeepTutor"
                 width={20}
                 height={20}
+                unoptimized
                 className="h-5 w-5"
               />
               <Image
@@ -123,6 +124,7 @@ export default function AppShell({ sidebar, children }: AppShellProps) {
                 alt="DeepTutor"
                 width={897}
                 height={236}
+                unoptimized
                 className="h-[18px] w-auto"
               />
             </Link>

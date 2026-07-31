@@ -217,6 +217,7 @@ export function SidebarShell({
               alt="DeepTutor"
               width={22}
               height={22}
+              unoptimized
               className="h-[22px] w-[22px] rounded-md"
             />
           </Link>
@@ -346,6 +347,7 @@ export function SidebarShell({
             alt="DeepTutor"
             width={22}
             height={22}
+            unoptimized
             className="h-[22px] w-[22px] transition-transform duration-200 group-hover:scale-105"
           />
           <Image
@@ -354,6 +356,7 @@ export function SidebarShell({
             width={897}
             height={236}
             priority
+            unoptimized
             className="h-[22px] w-auto transition-transform duration-200 group-hover:scale-105"
           />
         </Link>
