@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from deeptutor.core.stream import StreamEvent, StreamEventType
 from deeptutor.services.llm.utils import clean_thinking_tags
 from deeptutor.services.path_service import get_path_service
+from deeptutor.services.session.artifact_attachments import (
+    artifact_attachments,
+    fill_preview_text,
+)
 from deeptutor.services.session.protocol import SessionStoreProtocol
 
 if TYPE_CHECKING:
@@ -56,50 +60,6 @@ def _narration_marker_call_id(event: StreamEvent) -> str | None:
         call_id = metadata.get("call_id")
         return str(call_id) if call_id else None
     return None
-
-
-def _artifact_attachments(event: StreamEvent) -> list[dict[str, Any]]:
-    """Generated-file attachments carried by a stream event.
-
-    The ``exec`` / ``code_execution`` tools surface files written to the turn
-    workspace ({filename, url, mime_type, size_bytes}) in two places: each
-    ``tool_result`` event carries them in ``metadata.tool_metadata.artifacts``
-    the moment the tool finishes (the source that survives cancelled turns),
-    and the loop's final SOURCES event aggregates them as ``type=="artifact"``
-    sources. Both are read — the caller dedupes by URL. Persisting them as
-    assistant-message attachments lets the chat UI render openable cards —
-    same Viewer path as user uploads — instead of relying on the model
-    pasting a raw ``/api/outputs`` URL.
-    """
-    metadata = event.metadata or {}
-    raw: list[Any] = []
-    if event.type == StreamEventType.SOURCES:
-        raw = [
-            entry
-            for entry in metadata.get("sources") or []
-            if isinstance(entry, dict) and entry.get("type") == "artifact"
-        ]
-    elif event.type == StreamEventType.TOOL_RESULT:
-        tool_meta = metadata.get("tool_metadata")
-        if isinstance(tool_meta, dict):
-            raw = [e for e in tool_meta.get("artifacts") or [] if isinstance(e, dict)]
-    attachments: list[dict[str, Any]] = []
-    for entry in raw:
-        url = str(entry.get("url") or "")
-        if not url:
-            continue
-        mime = str(entry.get("mime_type") or "")
-        attachments.append(
-            {
-                "type": "image" if mime.startswith("image/") else "document",
-                "filename": str(entry.get("filename") or "file"),
-                "mime_type": mime,
-                "url": url,
-                "size_bytes": entry.get("size_bytes"),
-                "generated": True,
-            }
-        )
-    return attachments
 
 
 def _clip_text(value: str, limit: int = 4000) -> str:
@@ -1678,10 +1638,16 @@ class TurnRuntimeManager:
                 narration_call_id = _narration_marker_call_id(event)
                 if narration_call_id:
                     narration_call_ids.add(narration_call_id)
-                for attachment in _artifact_attachments(event):
+                for attachment in artifact_attachments(event):
                     if attachment["url"] not in seen_artifact_urls:
                         seen_artifact_urls.add(attachment["url"])
                         generated_attachments.append(attachment)
+
+            # Office binaries the browser cannot render need their text pulled
+            # out now, while the files are still on disk, or their preview card
+            # opens empty. Skipped on the cancelled path below: that one is
+            # already unwinding and must not start new blocking work.
+            await fill_preview_text(generated_attachments)
 
             # The persisted answer is the captured content minus any narration
             # rounds (their text stayed in the trace, never the answer).

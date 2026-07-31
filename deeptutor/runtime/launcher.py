@@ -551,6 +551,28 @@ def _source_web_dir(home: Path) -> Path | None:
     return None
 
 
+def _ensure_web_dependencies(source: Path, npm: str) -> None:
+    """Install ``web/node_modules`` on a source checkout that has none.
+
+    ``pip install -e ".[cli]"`` never touches npm, so a fresh clone would hand
+    the dev server a missing ``next`` binary and die on Node's MODULE_NOT_FOUND
+    (#709). Prefer ``npm ci`` — reproducible and faster — and fall back to
+    ``npm install`` when the checkout has no lockfile. Output is left on the
+    terminal so a failing install explains itself. No-op once installed, which
+    keeps it cheap on the launcher's repeated resolve path.
+    """
+    if (source / "node_modules").exists():
+        return
+    action = "ci" if (source / "package-lock.json").exists() else "install"
+    _log(f"web/node_modules not found — running `npm {action}` in {source} ...")
+    result = subprocess.run([npm, action], cwd=source)
+    if result.returncode != 0:
+        raise SystemExit(
+            f"`npm {action}` failed (exit {result.returncode}). "
+            "Fix the error above, then retry `deeptutor start`."
+        )
+
+
 def _resolve_frontend(
     home: Path,
     frontend_port: int,
@@ -578,6 +600,7 @@ def _resolve_frontend(
             raise SystemExit(
                 "npm not found. Source installs require Node.js/npm and `cd web && npm install`."
             )
+        _ensure_web_dependencies(source, npm)
         return FrontendRuntime(
             "source", [npm, "run", "dev", "--", "--port", str(frontend_port)], source
         )
