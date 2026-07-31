@@ -21,6 +21,7 @@ import {
 } from "@/lib/markdown-display";
 import {
   InlineFileCard,
+  MarkdownImage,
   makeFileLinkRemarkPlugin,
   parseAttachmentHref,
   useInlineFileCardContext,
@@ -649,10 +650,9 @@ export default function RichMarkdownRenderer({
       );
     },
     img: ({ node, src, alt, ...props }: any) => (
-      <img
+      <MarkdownImage
         src={src}
-        alt={alt || ""}
-        loading="lazy"
+        alt={alt}
         className={`${gap} inline-block max-w-full rounded-lg border border-[var(--border)]`}
         {...lineAttr(node)}
         {...props}

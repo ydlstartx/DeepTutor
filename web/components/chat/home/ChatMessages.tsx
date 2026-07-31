@@ -31,6 +31,8 @@ import type { SelectedQuestionEntry } from "@/components/chat/QuestionBankPicker
 import AssistantResponse from "@/components/common/AssistantResponse";
 import {
   InlineFileCardProvider,
+  collectReferencedImageUrls,
+  imageSrcForAttachment,
   mergeGeneratedFiles,
 } from "@/components/common/InlineFileCard";
 import Tooltip from "@/components/common/Tooltip";
@@ -113,24 +115,6 @@ function getModeBadgeLabel(capability?: string | null): string {
   return capability;
 }
 
-function imageSrcForAttachment(attachment: MessageAttachment): string | null {
-  if (attachment.url) {
-    if (
-      attachment.url.startsWith("http") ||
-      attachment.url.startsWith("blob:") ||
-      attachment.url.startsWith("data:")
-    ) {
-      return attachment.url;
-    }
-    return apiUrl(attachment.url);
-  }
-
-  const base64 = attachment.base64?.trim();
-  if (!base64) return null;
-  if (base64.startsWith("data:")) return base64;
-  return `data:${attachment.mime_type || "image/png"};base64,${base64}`;
-}
-
 /** Format a byte count for a file card subtitle (e.g. "14 KB"). */
 function formatFileSize(bytes?: number): string {
   if (!bytes || bytes <= 0) return "";
@@ -162,21 +146,71 @@ function humanizeFilename(filename: string): string {
  * side panel, same path as user uploads. Sources: persisted ``generated``
  * attachments on the message (durable) merged with artifacts from streamed
  * tool_result events (live, while the turn is still running), deduped by URL.
+ *
+ * Images the message body already references (markdown image syntax, file
+ * link, or plain filename mention) render inline at their reference point
+ * via ``MarkdownImage``, so they are dropped here — each image shows exactly
+ * once. Unreferenced images are grouped by filename stem and only the most
+ * displayable member is kept (e.g. the PNG of a figure, not its SVG twin).
  */
 function GeneratedFileCards({
   attachments,
   events,
+  content,
   onOpen,
 }: {
   attachments: MessageAttachment[];
   events?: StreamEvent[];
+  content?: string;
   onOpen?: (attachment: MessageAttachment) => void;
 }) {
   const { t } = useTranslation();
-  const files = useMemo(
-    () => mergeGeneratedFiles(attachments, events),
-    [attachments, events],
-  );
+  const files = useMemo(() => {
+    const merged = mergeGeneratedFiles(attachments, events);
+    const referenced = collectReferencedImageUrls(content ?? "", merged);
+
+    const stemOf = (a: MessageAttachment): string =>
+      (a.filename || a.url || "")
+        .split(/[\\/]/)
+        .pop()!
+        .replace(/\.[A-Za-z0-9]{1,8}$/, "")
+        .toLowerCase();
+    const extRank = (a: MessageAttachment): number => {
+      const ext = (a.filename || a.url || "")
+        .split(".")
+        .pop()!
+        .toLowerCase();
+      const rank: Record<string, number> = {
+        png: 0,
+        jpg: 1,
+        jpeg: 1,
+        webp: 2,
+        gif: 3,
+        svg: 4,
+      };
+      return rank[ext] ?? 5;
+    };
+
+    const keep = new Set<MessageAttachment>();
+    const imageGroups = new Map<string, MessageAttachment[]>();
+    for (const a of merged) {
+      if (a.mime_type?.startsWith("image/")) {
+        const stem = stemOf(a);
+        const group = imageGroups.get(stem);
+        if (group) group.push(a);
+        else imageGroups.set(stem, [a]);
+      } else {
+        keep.add(a);
+      }
+    }
+    for (const group of imageGroups.values()) {
+      if (group.some((a) => a.url && referenced.has(a.url))) continue;
+      keep.add(
+        group.slice().sort((x, y) => extRank(x) - extRank(y))[0],
+      );
+    }
+    return merged.filter((a) => keep.has(a));
+  }, [attachments, events, content]);
   if (!files.length) return null;
   return (
     <div className="mt-3 flex flex-col gap-2">
@@ -1418,6 +1452,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             <GeneratedFileCards
               attachments={msg.attachments ?? []}
               events={msg.events}
+              content={msg.content}
               onOpen={onPreviewAttachment}
             />
             {(() => {
