@@ -96,8 +96,9 @@ export function mergeGeneratedFiles(
 // remark plugin: linkify exact filename mentions in prose.
 // ---------------------------------------------------------------------------
 
-// mdast node types whose text must NOT be linkified (code, existing links,
-// math). Filenames inside these are shown verbatim.
+// mdast node types whose text must NOT be recursively linkified. Exact
+// generated filenames in inlineCode are handled explicitly below so model
+// output such as `figure.png` still renders the generated image.
 const SKIP_NODE_TYPES = new Set([
   "code",
   "inlineCode",
@@ -130,10 +131,10 @@ function boundaryOk(text: string, start: number, len: number): boolean {
 }
 
 /**
- * Build a remark plugin that wraps every plain-text occurrence of a known
- * generated filename in an ``attachment:`` link. Matches the exact filename
- * and a separator-normalized variant (``_``/``-`` ⇄ space), longest first.
- * Returns null when there are no filenames to match.
+ * Build a remark plugin that wraps known generated filenames in an
+ * ``attachment:`` link. Generated images are auto-expanded only at their
+ * first filename mention, so a later "files created" summary does not repeat
+ * every figure. Non-image files may remain clickable at every mention.
  */
 export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
   const entries: Array<{ needle: string; name: string }> = [];
@@ -175,6 +176,18 @@ export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
     surfaceToName.get(s) ??
     surfaceToName.get(s.trim()) ??
     surfaceToName.get(s.trim().toLowerCase());
+  const imageNames = new Set(
+    files
+      .filter((file) => file.mime_type?.startsWith("image/"))
+      .map((file) => file.filename)
+      .filter((name): name is string => Boolean(name)),
+  );
+  const claimReference = (name: string, renderedImages: Set<string>): boolean => {
+    if (!imageNames.has(name)) return true;
+    if (renderedImages.has(name)) return false;
+    renderedImages.add(name);
+    return true;
+  };
 
   const linkLabel = (node: Record<string, unknown>): string => {
     const parts: string[] = [];
@@ -202,7 +215,10 @@ export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
     );
   };
 
-  const splitText = (value: string): Array<Record<string, unknown>> => {
+  const splitText = (
+    value: string,
+    renderedImages: Set<string>,
+  ): Array<Record<string, unknown>> => {
     const nodes: Array<Record<string, unknown>> = [];
     let i = 0;
     while (i < value.length) {
@@ -225,18 +241,25 @@ export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
       if (hit.idx > i) {
         nodes.push({ type: "text", value: value.slice(i, hit.idx) });
       }
-      nodes.push({
-        type: "link",
-        url: `${ATTACHMENT_HREF_PREFIX}${encodeURIComponent(hit.name)}`,
-        title: null,
-        children: [{ type: "text", value: hit.needle }],
-      });
+      if (claimReference(hit.name, renderedImages)) {
+        nodes.push({
+          type: "link",
+          url: `${ATTACHMENT_HREF_PREFIX}${encodeURIComponent(hit.name)}`,
+          title: null,
+          children: [{ type: "text", value: hit.needle }],
+        });
+      } else {
+        nodes.push({ type: "text", value: hit.needle });
+      }
       i = hit.idx + hit.needle.length;
     }
     return nodes;
   };
 
-  const visit = (node: Record<string, unknown>): void => {
+  const visit = (
+    node: Record<string, unknown>,
+    renderedImages: Set<string>,
+  ): void => {
     const children = node.children as
       | Array<Record<string, unknown>>
       | undefined;
@@ -244,7 +267,26 @@ export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
     const out: Array<Record<string, unknown>> = [];
     for (const child of children) {
       if (child.type === "text" && typeof child.value === "string") {
-        out.push(...splitText(child.value));
+        out.push(...splitText(child.value, renderedImages));
+      } else if (
+        child.type === "inlineCode" &&
+        typeof child.value === "string"
+      ) {
+        // Models commonly wrap generated filenames in backticks. Treat an
+        // exact known filename as an attachment reference; keep all other
+        // inline code verbatim. This must agree with
+        // collectReferencedImageUrls(), which counts the filename as rendered.
+        const real = lookupSurface(child.value);
+        if (real && claimReference(real, renderedImages)) {
+          out.push({
+            type: "link",
+            url: `${ATTACHMENT_HREF_PREFIX}${encodeURIComponent(real)}`,
+            title: null,
+            children: [{ type: "text", value: child.value }],
+          });
+        } else {
+          out.push(child);
+        }
       } else if (child.type === "link") {
         // The model often writes the file as a link itself, e.g.
         // `[name.pdf](name.pdf)` — a broken relative href that would navigate.
@@ -255,14 +297,16 @@ export function makeFileLinkRemarkPlugin(files: MessageAttachment[]) {
         }
         out.push(child);
       } else {
-        if (!SKIP_NODE_TYPES.has(child.type as string)) visit(child);
+        if (!SKIP_NODE_TYPES.has(child.type as string)) {
+          visit(child, renderedImages);
+        }
         out.push(child);
       }
     }
     node.children = out;
   };
 
-  return () => (tree: Record<string, unknown>) => visit(tree);
+  return () => (tree: Record<string, unknown>) => visit(tree, new Set());
 }
 
 // ---------------------------------------------------------------------------

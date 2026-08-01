@@ -6,6 +6,28 @@
  * This utility converts between formats.
  */
 
+const MATH_SEGMENT_RE =
+  /\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)/g;
+
+/**
+ * KaTeX treats a Unicode middle dot inside `\text{...}` as the unsupported
+ * text command `\cdotp`, which is rendered as red error text. Keep the prose
+ * on either side in text mode and move the multiplication operator back into
+ * math mode: `\text{kg·m}` -> `\text{kg}\mathbin{\cdot}\text{m}`.
+ *
+ * Only math-delimited segments are touched, so code/prose examples containing
+ * `\text{...}` remain byte-for-byte unchanged.
+ */
+export function normalizeLatexTextMiddleDots(content: string): string {
+  if (!content) return content;
+  return content.replace(MATH_SEGMENT_RE, (math) =>
+    math.replace(/\\text\{([^{}]*[·⋅][^{}]*)\}/g, (_match, inner: string) => {
+      const parts = inner.split(/[·⋅]/);
+      return parts.map((part) => `\\text{${part}}`).join("\\mathbin{\\cdot}");
+    }),
+  );
+}
+
 /**
  * Convert LaTeX delimiters from \(...\) and \[...\] to $...$ and $$...$$
  * This makes the content compatible with remark-math for ReactMarkdown rendering.
@@ -358,13 +380,14 @@ export function processLatexContent(content: string): string {
   const str = String(content);
 
   // Apply delimiter conversion
-  return convertLatexDelimiters(str);
+  return convertLatexDelimiters(normalizeLatexTextMiddleDots(str));
 }
 
 export function processMarkdownContent(content: string): string {
   if (!content) return "";
 
   let result = String(content);
+  result = normalizeLatexTextMiddleDots(result);
   result = normalizeEditorMdHeadings(result);
   result = normalizeEditorMdInlineMath(result);
   result = convertEditorMdFences(result);

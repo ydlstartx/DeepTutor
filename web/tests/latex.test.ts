@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import katex from "katex";
 import {
   convertFlowFenceToMermaid,
   convertLatexDelimiters,
   convertSequenceFenceToMermaid,
+  normalizeLatexTextMiddleDots,
   processLatexContent,
   processMarkdownContent,
 } from "../lib/latex";
@@ -66,6 +68,25 @@ test("processLatexContent: delegates to convertLatexDelimiters", () => {
   assert.equal(processLatexContent(""), "");
   const out = processLatexContent("\\(x\\)");
   assert.ok(out.includes("$x$"));
+});
+
+test("SI units: moves Unicode middle dot out of LaTeX text mode", () => {
+  const input = "$1\\,\\text{N} = 1\\,\\text{kg·m/s}^2$";
+  const expected =
+    "$1\\,\\text{N} = 1\\,\\text{kg}\\mathbin{\\cdot}\\text{m/s}^2$";
+  assert.equal(normalizeLatexTextMiddleDots(input), expected);
+  assert.equal(processMarkdownContent(input), expected);
+  const html = katex.renderToString(expected.slice(1, -1), {
+    output: "html",
+    throwOnError: false,
+  });
+  assert.ok(!html.includes("color:#cc0000"));
+  assert.ok(!html.includes("\\cdotp"));
+});
+
+test("SI units: leaves middle dots in prose and code unchanged", () => {
+  const input = "正文 A·B，代码 `\\text{kg·m}`。";
+  assert.equal(normalizeLatexTextMiddleDots(input), input);
 });
 
 // ---------------------------------------------------------------------------
