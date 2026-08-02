@@ -57,6 +57,7 @@ import {
 } from "@/context/GeogebraTabContext";
 import { BookmarkPlus, Download, PanelRight } from "lucide-react";
 import {
+  useChatStream,
   useUnifiedChat,
   type MessageAttachment,
   type MessageRequestSnapshot,
@@ -366,6 +367,10 @@ export default function ChatPage() {
     renameSessionTitle,
   } = useUnifiedChat();
 
+  // Streaming data lives on its own context so sidebar re-renders don't
+  // cascade from every stream event.
+  const stream = useChatStream();
+
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   // A connected agent to preselect once it loads, from `?agent=<name>` on the
   // URL (the partner list page links here to drop straight into a chat with a
@@ -647,7 +652,7 @@ export default function ChatPage() {
       ensureActivityPanelOpen();
     }
   }, [capabilityNeedsConfig, ensureActivityPanelOpen]);
-  const hasMessages = state.messages.length > 0;
+  const hasMessages = stream.messages.length > 0;
   // Time-of-day greeting: seeded once on mount from the user's local clock so
   // the heading stays stable while they're on the page. State (not useMemo)
   // because the random pick would otherwise mismatch SSR ↔ client hydration.
@@ -686,12 +691,12 @@ export default function ChatPage() {
   }, []);
   const firstUserTitle = useMemo(
     () =>
-      state.messages
+      stream.messages
         .find((msg) => msg.role === "user")
         ?.content.trim()
         .replace(/\s+/g, " ")
         .slice(0, 80) || "",
-    [state.messages],
+    [stream.messages],
   );
   const persistedSessionTitle = state.sessionTitle.trim();
   const displaySessionTitle =
@@ -840,17 +845,17 @@ export default function ChatPage() {
   );
   const chatSaveMessages = useMemo(
     () =>
-      state.messages.map((msg) => ({
+      stream.messages.map((msg) => ({
         role: msg.role,
         content: msg.content,
         capability: msg.capability,
       })),
-    [state.messages],
+    [stream.messages],
   );
   const chatSavePayload = useMemo(() => {
-    if (!state.messages.length) return null;
+    if (!stream.messages.length) return null;
     const title =
-      state.messages
+      stream.messages
         .find((msg) => msg.role === "user")
         ?.content.trim()
         .slice(0, 80) || "Chat Session";
@@ -867,11 +872,11 @@ export default function ChatPage() {
         capability: state.activeCapability || "chat",
         ui_language: state.language,
         session_id: state.sessionId,
-        total_message_count: state.messages.length,
+        total_message_count: stream.messages.length,
       },
     };
-  }, [state.activeCapability, state.language, state.messages, state.sessionId]);
-  const lastMessage = state.messages[state.messages.length - 1];
+  }, [state.activeCapability, state.language, stream.messages, state.sessionId]);
+  const lastMessage = stream.messages[stream.messages.length - 1];
   const {
     containerRef: messagesContainerRef,
     endRef: messagesEndRef,
@@ -880,9 +885,9 @@ export default function ChatPage() {
     handleScroll: handleMessagesScroll,
   } = useChatAutoScroll({
     hasMessages,
-    isStreaming: state.isStreaming,
+    isStreaming: stream.isStreaming,
     composerHeight,
-    messageCount: state.messages.length,
+    messageCount: stream.messages.length,
     lastMessageContent: lastMessage?.content,
     lastEventCount: lastMessage?.events?.length,
   });
@@ -893,8 +898,8 @@ export default function ChatPage() {
   // same visible-path walk the message list uses, so switching an edit
   // branch reshapes both together.
   const chatOutline = useMemo(
-    () => buildChatOutline(state.messages, state.selectedBranches),
-    [state.messages, state.selectedBranches],
+    () => buildChatOutline(stream.messages, stream.selectedBranches),
+    [stream.messages, stream.selectedBranches],
   );
   /** Bring a question back on screen and mark where the user landed. */
   const jumpToTurn = useCallback(
@@ -1342,11 +1347,11 @@ export default function ChatPage() {
     [attachments],
   );
 
-  // Fold all messages once per state.messages change to power the
+  // Fold all messages once per stream.messages change to power the
   // SessionActivityPanel on the right (tools, KBs, space refs, attachments).
   const sessionActivity = useMemo(
-    () => buildSessionActivity(state.messages),
-    [state.messages],
+    () => buildSessionActivity(stream.messages),
+    [stream.messages],
   );
 
   // Context-window readout for the composer chip: the newest turn that was
@@ -1355,14 +1360,14 @@ export default function ChatPage() {
   // event yet, so the walk falls through to the last completed turn and the
   // chip flips exactly once, when the new measurement lands.
   const contextBudget = useMemo(() => {
-    for (let i = state.messages.length - 1; i >= 0; i -= 1) {
-      const msg = state.messages[i];
+    for (let i = stream.messages.length - 1; i >= 0; i -= 1) {
+      const msg = stream.messages[i];
       if (msg.role !== "assistant") continue;
       const budget = readContextBudget(msg.events);
       if (budget) return budget;
     }
     return null;
-  }, [state.messages]);
+  }, [stream.messages]);
 
   /**
    * Capability-config card rendered at the bottom of the Activity panel.
@@ -1555,7 +1560,7 @@ export default function ChatPage() {
           !selectedHistorySessions.length &&
           !selectedQuestionEntries.length &&
           !selectedMemoryFiles.length) ||
-        state.isStreaming
+        stream.isStreaming
       )
         return;
 
@@ -1655,7 +1660,7 @@ export default function ChatPage() {
       selectedQuestionEntries.length,
       sendMessage,
       shouldAutoScrollRef,
-      state.isStreaming,
+      stream.isStreaming,
       subagentBudget,
       t,
       visualizeConfig,
@@ -1873,14 +1878,14 @@ export default function ChatPage() {
   }, []);
 
   const handleDownloadMarkdown = useCallback(() => {
-    if (!state.messages.length) return;
+    if (!stream.messages.length) return;
     const title =
-      state.messages
+      stream.messages
         .find((msg) => msg.role === "user")
         ?.content.trim()
         .slice(0, 80) || "Chat Session";
-    downloadChatMarkdown(state.messages, { title });
-  }, [state.messages]);
+    downloadChatMarkdown(stream.messages, { title });
+  }, [stream.messages]);
 
   return (
     <QuizFollowupProvider>
@@ -1888,7 +1893,7 @@ export default function ChatPage() {
         <QuizFollowupBridge viewerPanelRef={viewerPanelRef} />
         <GeogebraTabBridge viewerPanelRef={viewerPanelRef} />
         <SubagentTabWatcher
-          messages={state.messages}
+          messages={stream.messages}
           viewerPanelRef={viewerPanelRef}
         />
         <div
@@ -1955,7 +1960,7 @@ export default function ChatPage() {
               />
               <HeaderActionButton
                 onClick={handleDownloadMarkdown}
-                disabled={!state.messages.length}
+                disabled={!stream.messages.length}
                 icon={Download}
                 label={t("Download Markdown")}
                 title={t("Download chat history as Markdown")}
@@ -2035,8 +2040,8 @@ export default function ChatPage() {
                     className="mx-auto w-full max-w-[960px] space-y-9 px-6"
                   >
                     <ChatMessageList
-                      messages={state.messages}
-                      isStreaming={state.isStreaming}
+                      messages={stream.messages}
+                      isStreaming={stream.isStreaming}
                       sessionId={state.sessionId}
                       language={state.language}
                       onCopyAssistantMessage={copyAssistantMessage}
@@ -2044,7 +2049,7 @@ export default function ChatPage() {
                       onConfirmOutline={handleConfirmOutline}
                       onPreviewAttachment={handlePreviewMessageAttachment}
                       onDeleteTurn={deleteTurn}
-                      selectedBranches={state.selectedBranches}
+                      selectedBranches={stream.selectedBranches}
                       onEditMessage={editMessage}
                       onSwitchBranch={switchBranch}
                       onSubmitUserReply={submitUserReply}
@@ -2099,7 +2104,7 @@ export default function ChatPage() {
               selectedPersona={null}
               selectedMemoryFiles={selectedMemoryFiles}
               selectedKnowledgeBases={selectedKbOnly}
-              isStreaming={state.isStreaming}
+              isStreaming={stream.isStreaming}
               isVisualizeMode={isVisualizeMode}
               capabilityNeedsConfig={capabilityNeedsConfig}
               capabilityConfigConfirmed={capabilityConfigConfirmed}

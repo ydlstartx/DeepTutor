@@ -847,6 +847,27 @@ interface ChatContextValue {
 
 const ChatCtx = createContext<ChatContextValue | null>(null);
 
+/**
+ * High-frequency streaming slice. Delivered via a separate context so the
+ * sidebar and other low-frequency consumers of {@link ChatCtx} don't
+ * re-render on every token: stream events only change these fields, and the
+ * main context value's memo now excludes them.
+ */
+export interface ChatStreamValue {
+  messages: MessageItem[];
+  isStreaming: boolean;
+  currentStage: string;
+  selectedBranches: Record<string, number>;
+}
+
+const ChatStreamCtx = createContext<ChatStreamValue | null>(null);
+
+// Stable placeholders for the streaming fields the main context no longer
+// owns. Consumers of ChatCtx must not read them — the stream context is the
+// source for streaming data (see useChatStream).
+const EMPTY_MESSAGES: MessageItem[] = [];
+const EMPTY_BRANCHES: Record<string, number> = {};
+
 function hydrateMessageAttachments(
   attachments: SessionMessage["attachments"],
 ): MessageAttachment[] {
@@ -1765,6 +1786,53 @@ export function UnifiedChatProvider({
     };
   }, [state]);
 
+  // Low-frequency slice exposed on the main context. Its memo depends on the
+  // individual field values (not `derivedState` identity), so stream events —
+  // which only replace messages/isStreaming/currentStage/selectedBranches —
+  // leave it untouched and the sidebar never re-renders per token.
+  const metaState = useMemo<ChatState>(
+    () => ({
+      sessionId: derivedState.sessionId,
+      sessionTitle: derivedState.sessionTitle,
+      enabledTools: derivedState.enabledTools,
+      activeCapability: derivedState.activeCapability,
+      knowledgeBases: derivedState.knowledgeBases,
+      llmSelection: derivedState.llmSelection,
+      personaSelection: derivedState.personaSelection,
+      language: derivedState.language,
+      messages: EMPTY_MESSAGES,
+      isStreaming: false,
+      currentStage: "",
+      selectedBranches: EMPTY_BRANCHES,
+    }),
+    [
+      derivedState.sessionId,
+      derivedState.sessionTitle,
+      derivedState.enabledTools,
+      derivedState.activeCapability,
+      derivedState.knowledgeBases,
+      derivedState.llmSelection,
+      derivedState.personaSelection,
+      derivedState.language,
+    ],
+  );
+
+  // High-frequency streaming slice on its own context (see ChatStreamValue).
+  const streamValue = useMemo<ChatStreamValue>(
+    () => ({
+      messages: derivedState.messages,
+      isStreaming: derivedState.isStreaming,
+      currentStage: derivedState.currentStage,
+      selectedBranches: derivedState.selectedBranches,
+    }),
+    [
+      derivedState.messages,
+      derivedState.isStreaming,
+      derivedState.currentStage,
+      derivedState.selectedBranches,
+    ],
+  );
+
   const sessionStatuses = useMemo<Record<string, SessionStatusSnapshot>>(() => {
     const entries: Record<string, SessionStatusSnapshot> = {};
     for (const session of Object.values(state.sessions)) {
@@ -1953,7 +2021,7 @@ export function UnifiedChatProvider({
   // and sidebarRefreshToken.
   const value = useMemo<ChatContextValue>(
     () => ({
-      state: derivedState,
+      state: metaState,
       setTools,
       setCapability,
       setKBs,
@@ -1971,12 +2039,12 @@ export function UnifiedChatProvider({
       newSession,
       loadSession,
       showCachedSession,
-      selectedSessionId: derivedState.sessionId,
+      selectedSessionId: metaState.sessionId,
       sessionStatuses,
       sidebarRefreshToken: state.sidebarRefreshToken,
     }),
     [
-      derivedState,
+      metaState,
       setTools,
       setCapability,
       setKBs,
@@ -1999,7 +2067,21 @@ export function UnifiedChatProvider({
     ],
   );
 
-  return <ChatCtx.Provider value={value}>{children}</ChatCtx.Provider>;
+  return (
+    <ChatCtx.Provider value={value}>
+      <ChatStreamCtx.Provider value={streamValue}>
+        {children}
+      </ChatStreamCtx.Provider>
+    </ChatCtx.Provider>
+  );
+}
+
+export function useChatStream(): ChatStreamValue {
+  const value = useContext(ChatStreamCtx);
+  if (!value) {
+    throw new Error("useChatStream must be used within UnifiedChatProvider");
+  }
+  return value;
 }
 
 export function useUnifiedChat() {

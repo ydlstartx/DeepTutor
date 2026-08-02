@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { SidebarShell } from "@/components/sidebar/SidebarShell";
@@ -15,7 +15,7 @@ import {
   type SessionSummary,
 } from "@/lib/session-api";
 
-export default function WorkspaceSidebar() {
+function WorkspaceSidebarImpl() {
   const { t } = useTranslation();
   const router = useRouter();
   const {
@@ -52,27 +52,30 @@ export default function WorkspaceSidebar() {
     void refreshSessions();
   }, [refreshSessions, sidebarRefreshToken]);
 
-  const orderedSessions = sessions
-    .map((session, index) => {
-      const runtime = sessionStatuses[session.session_id];
-      return {
-        index,
-        session: runtime
-          ? {
-              ...session,
-              status: runtime.status,
-              active_turn_id: runtime.activeTurnId || session.active_turn_id,
-            }
-          : session,
-      };
-    })
-    .sort((a, b) => {
-      const aPriority = a.session.status === "running" ? 0 : 1;
-      const bPriority = b.session.status === "running" ? 0 : 1;
-      if (aPriority !== bPriority) return aPriority - bPriority;
-      return a.index - b.index;
-    })
-    .map(({ session }) => session);
+  const orderedSessions = useMemo(() => {
+    const ordered = sessions
+      .map((session, index) => {
+        const runtime = sessionStatuses[session.session_id];
+        return {
+          index,
+          session: runtime
+            ? {
+                ...session,
+                status: runtime.status,
+                active_turn_id: runtime.activeTurnId || session.active_turn_id,
+              }
+            : session,
+        };
+      })
+      .sort((a, b) => {
+        const aPriority = a.session.status === "running" ? 0 : 1;
+        const bPriority = b.session.status === "running" ? 0 : 1;
+        if (aPriority !== bPriority) return aPriority - bPriority;
+        return a.index - b.index;
+      })
+      .map(({ session }) => session);
+    return ordered;
+  }, [sessions, sessionStatuses]);
 
   // Cancel any in-flight streaming turn before starting a fresh session, so a
   // new chat never inherits a still-running turn (mirrors handleDeleteSession).
@@ -143,3 +146,10 @@ export default function WorkspaceSidebar() {
     />
   );
 }
+
+// Memoized: the component has no props and only consumes low-frequency
+// context (sessions/statuses — stream events no longer touch it), so memo
+// blocks re-renders from unrelated parent updates.
+const WorkspaceSidebar = memo(WorkspaceSidebarImpl);
+WorkspaceSidebar.displayName = "WorkspaceSidebar";
+export default WorkspaceSidebar;
