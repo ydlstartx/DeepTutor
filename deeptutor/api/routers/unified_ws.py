@@ -138,6 +138,45 @@ async def _forward_with_content_batching(
     return seen_done
 
 
+async def _forward_subscription(
+    events_provider: Callable[[], AsyncIterator[dict[str, Any]]],
+    send: Callable[[dict[str, Any]], Awaitable[None]],
+    on_interrupted: Callable[[], Awaitable[None]] | None = None,
+) -> None:
+    """Forward one subscription with content batching and self-healing.
+
+    Pumps the subscription generator into a bounded inbox so the batching
+    loop can use timeout-aware reads (``wait_for`` on ``queue.get`` is
+    cancellation-safe) without ever cancelling the generator — and so
+    backpressure from a slow client propagates to the runtime, whose
+    bounded subscriber queues then terminate the subscription instead of
+    silently dropping frames.
+
+    When the subscription ends WITHOUT a ``done`` event (dropped
+    subscriber / turn vanished mid-stream), ``on_interrupted`` is invoked
+    so the caller can force a client reconnect, which resumes from the
+    last seq and heals the hole.
+    """
+    inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1024)
+
+    async def _pump() -> None:
+        try:
+            async for event in events_provider():
+                await inbox.put(event)
+        finally:
+            await inbox.put(None)
+
+    pump_task = asyncio.create_task(_pump())
+    try:
+        seen_done = await _forward_with_content_batching(_Inbox(inbox), send)
+    finally:
+        pump_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pump_task
+    if not seen_done and on_interrupted is not None:
+        await on_interrupted()
+
+
 @router.websocket("/ws")
 async def unified_websocket(ws: WebSocket) -> None:
     from deeptutor.api.routers.auth import ws_auth_failed, ws_require_auth
@@ -178,38 +217,18 @@ async def unified_websocket(ws: WebSocket) -> None:
 
         async def _forward() -> None:
             runtime = get_turn_runtime_manager()
-            # Pump the subscription generator into a bounded inbox so the
-            # batching loop can use timeout-aware reads (wait_for on queue.get
-            # is cancellation-safe) without ever cancelling the generator —
-            # and so backpressure from a slow client propagates to the runtime.
-            inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1024)
 
-            async def _pump() -> None:
-                try:
-                    async for event in runtime.subscribe_turn(
-                        turn_id, after_seq=after_seq
-                    ):
-                        await inbox.put(event)
-                finally:
-                    await inbox.put(None)
+            async def _events() -> AsyncIterator[dict[str, Any]]:
+                async for event in runtime.subscribe_turn(turn_id, after_seq=after_seq):
+                    yield event
 
-            pump_task = asyncio.create_task(_pump())
-            try:
-                seen_done = await _forward_with_content_batching(
-                    _Inbox(inbox), safe_send
-                )
-            finally:
-                pump_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pump_task
-            if not seen_done and not closed:
-                # The subscription ended without a DONE: it was dropped
-                # (slow-consumer overflow) or the turn vanished mid-stream.
-                # Close the socket so the client reconnects and resumes from
-                # its last seq — the only self-healing path for a hole.
+            async def _on_interrupted() -> None:
+                nonlocal closed
                 closed = True
                 with contextlib.suppress(Exception):
                     await ws.close()
+
+            await _forward_subscription(_events, safe_send, on_interrupted=_on_interrupted)
 
         await stop_subscription(turn_id)
         subscription_tasks[turn_id] = asyncio.create_task(_forward())
@@ -219,30 +238,20 @@ async def unified_websocket(ws: WebSocket) -> None:
 
         async def _forward() -> None:
             runtime = get_turn_runtime_manager()
-            inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1024)
 
-            async def _pump() -> None:
-                try:
-                    async for event in runtime.subscribe_session(
-                        session_id, after_seq=after_seq
-                    ):
-                        await inbox.put(event)
-                finally:
-                    await inbox.put(None)
+            async def _events() -> AsyncIterator[dict[str, Any]]:
+                async for event in runtime.subscribe_session(
+                    session_id, after_seq=after_seq
+                ):
+                    yield event
 
-            pump_task = asyncio.create_task(_pump())
-            try:
-                seen_done = await _forward_with_content_batching(
-                    _Inbox(inbox), safe_send
-                )
-            finally:
-                pump_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await pump_task
-            if not seen_done and not closed:
+            async def _on_interrupted() -> None:
+                nonlocal closed
                 closed = True
                 with contextlib.suppress(Exception):
                     await ws.close()
+
+            await _forward_subscription(_events, safe_send, on_interrupted=_on_interrupted)
 
         key = f"session:{session_id}"
         await stop_subscription(key)

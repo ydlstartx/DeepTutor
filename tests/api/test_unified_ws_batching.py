@@ -16,8 +16,13 @@ from typing import Any
 
 import pytest
 
-from deeptutor.api.routers.unified_ws import _Inbox, _forward_with_content_batching
+from deeptutor.api.routers.unified_ws import (
+    _forward_subscription,
+    _Inbox,
+    _forward_with_content_batching,
+)
 from deeptutor.core.stream import StreamEvent, StreamEventType
+from deeptutor.services.session.sqlite_store import SQLiteSessionStore
 from deeptutor.services.session.turn_runtime import (
     _LiveSubscriber,
     _TurnExecution,
@@ -48,8 +53,6 @@ async def _run_stream(events) -> tuple[bool, list[dict[str, Any]]]:
         seen_done = await _forward_with_content_batching(_Inbox(queue), send)
     finally:
         pump_task.cancel()
-        with pytest.MonkeyPatch.context() as _:  # keep linters quiet about ctx
-            pass
         try:
             await pump_task
         except asyncio.CancelledError:
@@ -166,3 +169,97 @@ class TestSlowConsumerTermination:
         received = [ok_queue.get_nowait() for _ in range(3)]
         assert all(item is not None for item in received)
         assert ok_subscriber in execution.subscribers
+
+
+class TestForwardSubscription:
+    """Integration-level: the WS _forward glue around batching + healing.
+
+    These drive ``_forward_subscription`` (the module-level function the WS
+    endpoint closures delegate to) end to end, covering the reconnect
+    decision that a closure-only bug previously broke (UnboundLocalError on
+    the no-DONE path left the socket open forever).
+    """
+
+    async def test_no_done_ends_stream_triggers_on_interrupted(self):
+        async def events():
+            yield await _content("abc", 1)
+            # No DONE: subscription was dropped / turn vanished mid-stream.
+
+        interrupted: list[bool] = []
+
+        async def on_interrupted() -> None:
+            interrupted.append(True)
+
+        await _forward_subscription(events, lambda e: asyncio.sleep(0), on_interrupted)
+        assert interrupted == [True], "no-DONE end must trigger the reconnect path"
+
+    async def test_done_does_not_trigger_on_interrupted(self):
+        async def events():
+            yield await _content("abc", 1)
+            yield {"type": "done", "source": "chat", "seq": 2}
+
+        interrupted: list[bool] = []
+
+        async def on_interrupted() -> None:
+            interrupted.append(True)
+
+        await _forward_subscription(events, lambda e: asyncio.sleep(0), on_interrupted)
+        assert interrupted == [], "normal DONE end must not close the socket"
+
+    async def test_slow_consumer_overflow_chain_reaches_on_interrupted(
+        self, tmp_path
+    ):
+        """End-to-end backpressure: slow client -> inbox full -> pump stalls
+        -> runtime subscriber queue overflows -> subscription terminated
+        without DONE -> on_interrupted invoked (the WS layer closes the
+        socket, the client reconnects and resumes)."""
+        store = SQLiteSessionStore(tmp_path / "chat_history.db")
+        runtime = TurnRuntimeManager(store)
+        session = await runtime.store.create_session("overflow")
+        turn = await runtime.store.create_turn(session["id"], "chat")
+        execution = _TurnExecution(
+            turn_id=turn["id"], session_id=session["id"], capability="chat", payload={}
+        )
+        runtime._executions[turn["id"]] = execution
+
+        async def events():
+            async for event in runtime.subscribe_turn(turn["id"], after_seq=0):
+                yield event
+
+        send_gate = asyncio.Event()
+        forwarded: list[dict[str, Any]] = []
+
+        async def slow_send(event: dict[str, Any]) -> None:
+            # A stalled client: never consumes until the test releases it.
+            await send_gate.wait()
+            forwarded.append(event)
+
+        interrupted: list[bool] = []
+
+        async def on_interrupted() -> None:
+            interrupted.append(True)
+
+        forward_task = asyncio.create_task(
+            _forward_subscription(events, slow_send, on_interrupted)
+        )
+
+        # Overflow the chain while the client is stalled: the pump only stops
+        # consuming once the 1024-entry inbox is full, so we need more events
+        # than inbox + subscriber queue (500) combined before the subscriber
+        # queue overflows and the subscription is terminated.
+        for i in range(1600):
+            await runtime._publish_live_event(
+                execution,
+                StreamEvent(
+                    type=StreamEventType.CONTENT, source="chat", content=f"tok{i}"
+                ),
+            )
+            await asyncio.sleep(0)
+
+        # Release the client, drain, and confirm the reconnect path fired.
+        send_gate.set()
+        await forward_task
+        assert interrupted == [True], "overflow must end in the reconnect path"
+        assert len(forwarded) > 0, "client received frames before the stall"
+        # 订阅者已从 execution 移除，turn 仍在运行（未合成假 done）
+        assert runtime._executions[turn["id"]].subscribers == []
