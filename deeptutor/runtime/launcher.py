@@ -38,6 +38,14 @@ SOURCE_BUILD_EXCLUDED_DIRS = {
     "coverage",
 }
 
+# Build-regenerated files that must not participate in the source fingerprint:
+# `npm run build` (Next/tsc incremental typecheck) rewrites tsconfig.tsbuildinfo
+# on every build, so hashing it would invalidate the build marker on the next
+# launch and force a full frontend rebuild on EVERY `deeptutor start`.
+SOURCE_BUILD_EXCLUDED_FILES = {
+    "tsconfig.tsbuildinfo",
+}
+
 
 def _apply_single_user_allocator_env(env: dict[str, str]) -> None:
     """Reduce glibc arena fragmentation without overriding operator tuning."""
@@ -624,7 +632,11 @@ def _source_build_fingerprint(source: Path, env: dict[str, str]) -> str:
             if name not in SOURCE_BUILD_EXCLUDED_DIRS and not name.startswith(".next")
         )
         root = Path(dirpath)
-        candidates.extend(root / name for name in sorted(filenames))
+        candidates.extend(
+            root / name
+            for name in sorted(filenames)
+            if name not in SOURCE_BUILD_EXCLUDED_FILES
+        )
     if version_file.is_file():
         candidates.append(version_file)
 
