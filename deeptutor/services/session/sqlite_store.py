@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 import time
 from typing import Any
 import uuid
@@ -96,12 +97,19 @@ class TurnRecord:
 class SQLiteSessionStore:
     """Persist unified chat sessions and messages in a SQLite database."""
 
+    # Reusable connection pool. Connections are thread-safe when created with
+    # check_same_thread=False and used by one thread at a time; WAL + busy_timeout
+    # let concurrent readers and short writers share the file, so the store no
+    # longer needs a global lock that serialized every op (reads included).
+    _POOL_SIZE = 8
+
     def __init__(self, db_path: Path | None = None) -> None:
         path_service = get_path_service()
         self.db_path = db_path or path_service.get_chat_history_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_db(path_service)
-        self._lock = asyncio.Lock()
+        self._pool: list[sqlite3.Connection] = []
+        self._pool_lock = threading.Lock()
         self._initialize()
 
     def _migrate_legacy_db(self, path_service) -> None:
@@ -118,6 +126,10 @@ class SQLiteSessionStore:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
+            # WAL: readers never block writers and vice versa; the mode is
+            # persisted in the DB file, so it only needs setting here (outside
+            # any transaction). synchronous=NORMAL is the WAL default.
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions (
@@ -396,25 +408,46 @@ class SQLiteSessionStore:
             conn.execute("ALTER TABLE notebook_entries ADD COLUMN ai_judgment TEXT DEFAULT ''")
 
     async def _run(self, fn, *args):
-        async with self._lock:
-            return await asyncio.to_thread(fn, *args)
+        # No global lock: WAL permits concurrent readers and busy_timeout
+        # arbitrates short write transactions.
+        return await asyncio.to_thread(fn, *args)
+
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
+    def _acquire_connection(self) -> sqlite3.Connection:
+        with self._pool_lock:
+            if self._pool:
+                return self._pool.pop()
+        return self._new_connection()
+
+    def _release_connection(self, conn: sqlite3.Connection) -> None:
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+        except sqlite3.Error:
+            pass
+        with self._pool_lock:
+            if len(self._pool) < self._POOL_SIZE:
+                self._pool.append(conn)
+                return
+        conn.close()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        # sqlite3.Connection's own context manager commits/rolls back but does
-        # NOT close the connection — so naked `with sqlite3.connect(...)` leaks
-        # one FD per call until GC. Wrap it so each call site gets both
-        # transaction semantics and deterministic close. The inner `with conn`
-        # commits on clean exit and rolls back on exception, so call sites do
-        # NOT need an explicit conn.commit() (any remaining ones are no-ops).
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        # `with conn` commits on clean exit and rolls back on exception, but
+        # does NOT close the connection — the pool keeps it for reuse. Each
+        # call site gets transaction semantics plus deterministic release.
+        conn = self._acquire_connection()
         try:
             with conn:
                 yield conn
         finally:
-            conn.close()
+            self._release_connection(conn)
 
     def _create_session_sync(
         self,
