@@ -1,3 +1,4 @@
+import copy
 import os
 from pathlib import Path
 import tempfile
@@ -64,7 +65,10 @@ class ConfigManager:
                 self._config_cache = self._read_yaml()
                 self._last_mtime = current_mtime
 
-            return yaml.safe_load(yaml.safe_dump(self._config_cache, sort_keys=False)) or {}
+            # Cache hit: a plain deepcopy is far cheaper than the previous
+            # yaml round-trip, and callers may mutate the returned dict
+            # (save_config deep-updates it before writing).
+            return copy.deepcopy(self._config_cache) or {}
 
     def save_config(self, config: Dict[str, Any]) -> bool:
         with self._lock:
