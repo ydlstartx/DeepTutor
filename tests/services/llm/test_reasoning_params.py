@@ -7,7 +7,9 @@ import pytest
 from deeptutor.services.llm.reasoning_params import (
     build_openai_compatible_reasoning_kwargs,
     default_reasoning_effort_for,
+    is_toggle_effort,
 )
+from deeptutor.services.provider_registry import find_by_name
 
 
 class TestDefaultReasoningEffortFor:
@@ -90,3 +92,69 @@ class TestBuildOpenAICompatibleReasoningKwargsForGemini:
             spec=None, binding="openai", model="gpt-4o", reasoning_effort=None
         )
         assert kwargs == {}
+
+
+class TestToggleEffortValues:
+    """``"on"``/``"off"`` are UI thinking-toggle values — never sent top-level."""
+
+    def test_on_off_ignored_without_thinking_style(self) -> None:
+        for effort in ("on", "off"):
+            kwargs = build_openai_compatible_reasoning_kwargs(
+                spec=None, binding="openai", model="gpt-4o", reasoning_effort=effort
+            )
+            assert kwargs == {}
+
+    def test_on_off_drive_enable_thinking_providers(self) -> None:
+        spec = find_by_name("dashscope")
+
+        assert spec is not None
+        off = build_openai_compatible_reasoning_kwargs(
+            spec=spec, binding="dashscope", model="qwen3.7-flash", reasoning_effort="off"
+        )
+        on = build_openai_compatible_reasoning_kwargs(
+            spec=spec, binding="dashscope", model="qwen3.7-flash", reasoning_effort="on"
+        )
+        assert off == {"extra_body": {"enable_thinking": False}}
+        assert on == {"extra_body": {"enable_thinking": True}}
+
+    def test_on_off_drive_thinking_type_providers_without_top_level(self) -> None:
+        spec = find_by_name("deepseek")
+
+        assert spec is not None
+        off = build_openai_compatible_reasoning_kwargs(
+            spec=spec, binding="deepseek", model="deepseek-v4-flash", reasoning_effort="off"
+        )
+        on = build_openai_compatible_reasoning_kwargs(
+            spec=spec, binding="deepseek", model="deepseek-v4-flash", reasoning_effort="on"
+        )
+        assert off == {"extra_body": {"thinking": {"type": "disabled"}}}
+        assert on == {"extra_body": {"thinking": {"type": "enabled"}}}
+
+    def test_minimal_legacy_disable_semantics_unchanged(self) -> None:
+        spec = find_by_name("dashscope")
+
+        assert spec is not None
+        kwargs = build_openai_compatible_reasoning_kwargs(
+            spec=spec, binding="dashscope", model="qwen3.7-flash", reasoning_effort="minimal"
+        )
+        assert kwargs == {"extra_body": {"enable_thinking": False}}
+
+    def test_levels_pass_through_verbatim(self) -> None:
+        spec = find_by_name("kimi_coding_plan")
+
+        assert spec is not None
+        for effort in ("low", "high", "max"):
+            kwargs = build_openai_compatible_reasoning_kwargs(
+                spec=spec,
+                binding="kimi_coding_plan",
+                model="kimi-k3",
+                reasoning_effort=effort,
+            )
+            assert kwargs == {"reasoning_effort": effort}
+
+    def test_is_toggle_effort(self) -> None:
+        assert is_toggle_effort("on")
+        assert is_toggle_effort("OFF")
+        assert not is_toggle_effort("high")
+        assert not is_toggle_effort("")
+        assert not is_toggle_effort(None)

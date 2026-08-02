@@ -775,6 +775,8 @@ def test_codex_provider_choice_is_advertised_as_oauth() -> None:
         "label": "OpenAI Codex",
         "base_url": "https://chatgpt.com/backend-api",
         "auth_mode": "oauth",
+        "reasoning_efforts": [],
+        "thinking_toggle": False,
     }
     # API-key providers keep the same shape, so the frontend never special-cases
     # a missing field.
@@ -905,3 +907,20 @@ async def test_update_ui_settings_persists_explicit_theme_and_language_defaults(
     persisted = settings_router.load_ui_settings()
     assert persisted["theme"] == "snow"
     assert persisted["language"] == "en"
+
+
+def test_llm_provider_choices_include_reasoning_efforts() -> None:
+    llm = {item["value"]: item for item in settings_router._provider_choices()["llm"]}
+
+    assert llm["kimi_coding_plan"]["reasoning_efforts"] == [
+        {"pattern": "k3", "options": ["low", "high", "max"], "default": "high"}
+    ]
+    assert llm["deepseek"]["reasoning_efforts"] == [
+        {"pattern": "deepseek-v4", "options": ["low", "high", "max"], "default": "high"}
+    ]
+    assert llm["dashscope"]["reasoning_efforts"] == [
+        {"pattern": "", "options": ["on", "off"], "default": "on"}
+    ]
+    assert llm["openai"]["reasoning_efforts"] == []
+    assert llm["dashscope"]["thinking_toggle"] is True
+    assert llm["openai"]["thinking_toggle"] is False

@@ -366,6 +366,11 @@ def _provider_choices() -> dict[str, list[dict[str, Any]]]:
                 ),
                 "base_url": s.default_api_base,
                 "auth_mode": s.auth_mode,
+                "reasoning_efforts": [
+                    {"pattern": pattern, "options": list(options), "default": default}
+                    for pattern, options, default in s.reasoning_effort_options
+                ],
+                "thinking_toggle": bool(s.thinking_style),
             }
             for s in PROVIDERS
         ],

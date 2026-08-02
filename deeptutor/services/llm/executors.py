@@ -17,7 +17,10 @@ from deeptutor.services.llm.provider_registry import (
     find_by_name,
     strip_provider_prefix,
 )
-from deeptutor.services.llm.reasoning_params import default_reasoning_effort_for
+from deeptutor.services.llm.reasoning_params import (
+    default_reasoning_effort_for,
+    is_toggle_effort,
+)
 
 from .config import get_token_limit_kwargs
 from .utils import extract_response_content
@@ -184,7 +187,7 @@ async def sdk_complete(
     effective_effort = reasoning_effort or default_reasoning_effort_for(
         provider_name, resolved_model
     )
-    if effective_effort:
+    if effective_effort and not is_toggle_effort(effective_effort):
         payload["reasoning_effort"] = effective_effort
     payload.update(kwargs)
     apply_model_overrides(find_by_name(provider_name), resolved_model, payload)
@@ -256,7 +259,7 @@ async def sdk_stream(
     effective_effort = reasoning_effort or default_reasoning_effort_for(
         provider_name, resolved_model
     )
-    if effective_effort:
+    if effective_effort and not is_toggle_effort(effective_effort):
         payload["reasoning_effort"] = effective_effort
     payload.update(kwargs)
     apply_model_overrides(find_by_name(provider_name), resolved_model, payload)

@@ -120,8 +120,12 @@ def build_openai_compatible_reasoning_kwargs(
         if semantic_effort == "minimum":
             semantic_effort = "minimal"
 
+    # "on"/"off" are UI thinking-toggle values, not API effort levels — they
+    # must never be sent as a top-level reasoning_effort.
+    toggle_effort = semantic_effort in ("on", "off")
+
     kwargs: dict[str, Any] = {}
-    if resolved_effort:
+    if resolved_effort and not toggle_effort:
         suppress_top_level = bool(
             thinking_style and (semantic_effort == "minimal" or thinking_style == "enable_thinking")
         )
@@ -129,7 +133,7 @@ def build_openai_compatible_reasoning_kwargs(
             kwargs["reasoning_effort"] = resolved_effort
 
     if thinking_style and resolved_effort is not None:
-        thinking_enabled = semantic_effort != "minimal"
+        thinking_enabled = semantic_effort not in ("minimal", "off")
         extra = _THINKING_STYLE_MAP.get(thinking_style, lambda _enabled: None)(thinking_enabled)
         if extra:
             kwargs.setdefault("extra_body", {}).update(extra)
@@ -141,7 +145,18 @@ def build_openai_compatible_reasoning_kwargs(
     return kwargs
 
 
+def is_toggle_effort(effort: str | None) -> bool:
+    """True for the UI thinking-toggle values ``"on"``/``"off"``.
+
+    These are never valid top-level ``reasoning_effort`` values; request
+    paths that don't go through :func:`build_openai_compatible_reasoning_kwargs`
+    use this to avoid leaking them into the payload.
+    """
+    return (effort or "").strip().lower() in ("on", "off")
+
+
 __all__ = [
     "build_openai_compatible_reasoning_kwargs",
     "default_reasoning_effort_for",
+    "is_toggle_effort",
 ]

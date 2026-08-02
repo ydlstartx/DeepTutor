@@ -1,4 +1,8 @@
-from deeptutor.services.provider_registry import find_by_name, find_gateway
+from deeptutor.services.provider_registry import (
+    effort_options_for_model,
+    find_by_name,
+    find_gateway,
+)
 
 
 def test_nvidia_nim_gateway_detection_by_key_and_base() -> None:
@@ -70,3 +74,57 @@ def test_kimi_coding_plan_aliases_and_base_detection() -> None:
     assert find_by_name("kimi-coding-plan") == spec
     assert find_by_name("KimiCodingPlan") == spec
     assert find_gateway(api_base="https://api.kimi.com/coding/v1") == spec
+
+
+def test_effort_options_kimi_coding_plan_k3_variants() -> None:
+    spec = find_by_name("kimi_coding_plan")
+
+    assert spec is not None
+    for model in ("k3", "k3-256k", "kimi-k3"):
+        assert effort_options_for_model(spec, model) == (("low", "high", "max"), "high")
+
+
+def test_effort_options_kimi_for_coding_has_no_selector() -> None:
+    spec = find_by_name("kimi_coding_plan")
+
+    assert spec is not None
+    assert effort_options_for_model(spec, "kimi-for-coding") is None
+    assert effort_options_for_model(spec, "kimi-for-coding-highspeed") is None
+
+
+def test_effort_options_moonshot_public_k3_defaults_to_max() -> None:
+    spec = find_by_name("moonshot")
+
+    assert spec is not None
+    assert effort_options_for_model(spec, "kimi-k3") == (("low", "high", "max"), "max")
+
+
+def test_effort_options_deepseek_v4_levels() -> None:
+    spec = find_by_name("deepseek")
+
+    assert spec is not None
+    for model in ("deepseek-v4-pro", "deepseek-v4-flash"):
+        assert effort_options_for_model(spec, model) == (("low", "high", "max"), "high")
+
+
+def test_effort_options_dashscope_is_on_off_toggle() -> None:
+    spec = find_by_name("dashscope")
+
+    assert spec is not None
+    assert effort_options_for_model(spec, "qwen3.7-plus") == (("on", "off"), "on")
+    assert effort_options_for_model(spec, "qwen3.7-flash") == (("on", "off"), "on")
+
+
+def test_effort_options_fall_back_to_toggle_for_thinking_style_providers() -> None:
+    spec = find_by_name("volcengine")
+
+    assert spec is not None
+    assert effort_options_for_model(spec, "doubao-seed-1.6") == (("on", "off"), "on")
+
+
+def test_effort_options_none_for_providers_without_thinking_support() -> None:
+    spec = find_by_name("openai")
+
+    assert spec is not None
+    assert effort_options_for_model(spec, "gpt-4o") is None
+    assert effort_options_for_model(None, "k3") is None

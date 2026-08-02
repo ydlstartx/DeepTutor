@@ -22,7 +22,7 @@ from .capabilities import (
 )
 from .config import get_token_limit_kwargs
 from .exceptions import LLMAPIError, LLMAuthenticationError, LLMConfigError
-from .reasoning_params import default_reasoning_effort_for
+from .reasoning_params import default_reasoning_effort_for, is_toggle_effort
 from .utils import (
     build_auth_headers,
     build_chat_url,
@@ -348,7 +348,7 @@ async def _openai_complete(
     reasoning_effort = kwargs.get("reasoning_effort")
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         effort = reasoning_effort.strip()
-        if not (
+        if not is_toggle_effort(effort) and not (
             effort.lower() == "minimal" and binding.lower() in _BINDINGS_WITH_EXTRA_BODY_THINKING
         ):
             data["reasoning_effort"] = effort
@@ -521,7 +521,7 @@ async def _openai_stream(
     reasoning_effort = kwargs.get("reasoning_effort")
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
         effort = reasoning_effort.strip()
-        if not (
+        if not is_toggle_effort(effort) and not (
             effort.lower() == "minimal" and binding.lower() in _BINDINGS_WITH_EXTRA_BODY_THINKING
         ):
             data["reasoning_effort"] = effort

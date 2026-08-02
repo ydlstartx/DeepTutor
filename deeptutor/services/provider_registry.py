@@ -52,6 +52,14 @@ class ProviderSpec:
     # explicit reasoning_effort, the provider auto-injects "high" so the
     # thinking_style flag (e.g. extra_body.thinking.type=enabled) is sent.
     reasoning_model_patterns: tuple[str, ...] = ()
+    # Per-model reasoning effort choices surfaced by the settings UI, as
+    # (model substring pattern, options, default option) entries matched in
+    # order (case-insensitive substring; "" matches every model).  Option
+    # values are sent to the API verbatim, except "on"/"off" which denote a
+    # thinking toggle (enable_thinking/thinking.type).  Models matching no
+    # entry fall back to ("on", "off") when thinking_style is set, and get
+    # no selector at all otherwise.
+    reasoning_effort_options: tuple[tuple[str, tuple[str, ...], str], ...] = ()
 
     @property
     def mode(self) -> str:
@@ -258,6 +266,11 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         # parameter is always dropped and the API applies its fixed
         # default — Moonshot's own recommendation.
         model_overrides=(("", {"temperature": None}),),
+        # K3 (k3 / k3-256k / kimi-k3) takes top-level reasoning_effort
+        # low/high/max and defaults to high. kimi-for-coding (K2.7 Code)
+        # has thinking always on with no levels, so it matches nothing
+        # here and the UI hides the selector for it.
+        reasoning_effort_options=(("k3", ("low", "high", "max"), "high"),),
     ),
     # === Standard providers (matched by model-name keywords) ===============
     ProviderSpec(
@@ -307,6 +320,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.deepseek.com",
         thinking_style="thinking_type",
         reasoning_model_patterns=("deepseek-v4-pro", "deepseek-reasoner"),
+        # V4 (pro and flash) accepts top-level reasoning_effort low/high/max
+        # (default high) alongside the thinking.type toggle.
+        reasoning_effort_options=(("deepseek-v4", ("low", "high", "max"), "high"),),
     ),
     ProviderSpec(
         name="gemini",
@@ -333,6 +349,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
         thinking_style="enable_thinking",
+        # Qwen3.7 (plus/flash) is hybrid thinking with enable_thinking as the
+        # only control — no effort levels — so the whole provider gets an
+        # on/off toggle (thinking defaults to on server-side).
+        reasoning_effort_options=(("", ("on", "off"), "on"),),
     ),
     ProviderSpec(
         name="moonshot",
@@ -349,6 +369,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         # Moonshot's own recommendation. The tunable moonshot-v1-* series does
         # not contain "kimi" and keeps the caller's temperature.
         model_overrides=(("kimi", {"temperature": None}),),
+        # kimi-k3 on the public API takes low/high/max and defaults to max
+        # (unlike the coding-plan endpoint, which defaults to high).
+        reasoning_effort_options=(("k3", ("low", "high", "max"), "max"),),
     ),
     ProviderSpec(
         name="minimax",
@@ -566,6 +589,28 @@ def apply_model_overrides(
             break
 
 
+def effort_options_for_model(
+    spec: ProviderSpec | None,
+    model: str | None,
+) -> tuple[tuple[str, ...], str] | None:
+    """Return the reasoning-effort ``(options, default)`` for ``model``.
+
+    First matching ``reasoning_effort_options`` entry wins (case-insensitive
+    substring; the empty pattern matches everything).  Models without an
+    entry fall back to an on/off toggle when the provider has a
+    ``thinking_style``, and return None (no selector) otherwise.
+    """
+    if not spec:
+        return None
+    model_lower = (model or "").lower()
+    for pattern, options, default in spec.reasoning_effort_options:
+        if pattern.lower() in model_lower:
+            return options, default
+    if spec.thinking_style:
+        return ("on", "off"), "on"
+    return None
+
+
 __all__ = [
     "ProviderSpec",
     "PROVIDERS",
@@ -573,6 +618,7 @@ __all__ = [
     "PROVIDER_ALIASES",
     "apply_model_overrides",
     "canonical_provider_name",
+    "effort_options_for_model",
     "find_by_name",
     "find_by_model",
     "find_gateway",

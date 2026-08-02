@@ -94,6 +94,36 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
     activeProfile,
   );
 
+  // Reasoning-effort choices are model-specific: match the active model
+  // against the provider's effort entries (substring, first hit wins);
+  // thinking-toggle providers fall back to on/off; anything else hides the
+  // selector entirely.
+  const effortChoices = (() => {
+    if (service !== "llm" || !activeModel) return null;
+    const modelId = (activeModel.model || "").trim().toLowerCase();
+    for (const entry of activeProviderOption?.reasoning_efforts || []) {
+      if (entry.pattern === "" || modelId.includes(entry.pattern.toLowerCase())) {
+        return entry;
+      }
+    }
+    if (activeProviderOption?.thinking_toggle) {
+      return { pattern: "", options: ["on", "off"], default: "on" };
+    }
+    return null;
+  })();
+  // The select shows exactly what gets sent to the API. Legacy stored values
+  // that are no longer offered map onto the toggle/default instead.
+  const effortDisplay = (() => {
+    if (!effortChoices) return "";
+    const stored = (activeModel?.reasoning_effort || "").trim().toLowerCase();
+    if (effortChoices.options.includes(stored)) return stored;
+    if (!stored) return effortChoices.default;
+    if (effortChoices.options.includes("on")) {
+      return stored === "minimal" || stored === "off" ? "off" : "on";
+    }
+    return effortChoices.default;
+  })();
+
   const [showApiKey, setShowApiKey] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [editingModelId, setEditingModelId] = useState<string | null>(null);
@@ -516,44 +546,34 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                           />
                           <ContextWindowMeta model={activeModel} />
                         </div>
-                        <div>
-                          <div className="mb-1.5 text-[12px] text-[var(--muted-foreground)]">
-                            {t("Reasoning Effort")}
-                          </div>
-                          <select
-                            className={selectClass}
-                            value={activeModel.reasoning_effort || ""}
-                            onChange={(e) =>
-                              updateModelField(
-                                service,
-                                "reasoning_effort",
-                                e.target.value,
-                              )
-                            }
-                          >
-                            {["", "minimal", "low", "medium", "high"].map(
-                              (effort) => (
+                        {effortChoices && (
+                          <div>
+                            <div className="mb-1.5 text-[12px] text-[var(--muted-foreground)]">
+                              {t("Reasoning Effort")}
+                            </div>
+                            <select
+                              className={selectClass}
+                              value={effortDisplay}
+                              onChange={(e) =>
+                                updateModelField(
+                                  service,
+                                  "reasoning_effort",
+                                  e.target.value,
+                                )
+                              }
+                            >
+                              {effortChoices.options.map((effort) => (
                                 <option
-                                  key={effort || "default"}
+                                  key={effort}
                                   className={selectOptionClass}
                                   value={effort}
                                 >
-                                  {effort
-                                    ? t(
-                                        effort.charAt(0).toUpperCase() +
-                                          effort.slice(1),
-                                      )
-                                    : t("Default")}
+                                  {effort}
                                 </option>
-                              ),
-                            )}
-                          </select>
-                          <p className="mt-1.5 text-[11px] text-[var(--muted-foreground)]">
-                            {t(
-                              "For thinking-capable models (e.g. Qwen3, DeepSeek), Minimal disables thinking.",
-                            )}
-                          </p>
-                        </div>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                         <ContextWindowDetectionBanner
                           model={activeModel}
                           detection={activeLlmDetection}
