@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiUrl, wsUrl } from "@/lib/api";
 import type { ProgressInfo } from "@/lib/knowledge-helpers";
 
@@ -325,14 +325,29 @@ export function useKnowledgeProgress(options?: UseKnowledgeProgressOptions) {
     };
   }, [closeAll]);
 
-  return {
-    progressByKb,
-    tasksByKb,
-    setProgress,
-    clearProgress,
-    subscribeWs,
-    startTask,
-    dismissTask,
-    cleanupKb,
-  };
+  // Memoized so consumers that depend on the whole object (e.g. the `load`
+  // callback in useKnowledgeBases) don't rebuild their own callbacks and
+  // effects on every render of this hook's owner.
+  return useMemo(
+    () => ({
+      progressByKb,
+      tasksByKb,
+      setProgress,
+      clearProgress,
+      subscribeWs,
+      startTask,
+      dismissTask,
+      cleanupKb,
+    }),
+    [
+      progressByKb,
+      tasksByKb,
+      setProgress,
+      clearProgress,
+      subscribeWs,
+      startTask,
+      dismissTask,
+      cleanupKb,
+    ],
+  );
 }
