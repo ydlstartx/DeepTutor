@@ -99,6 +99,17 @@ class EventBus:
             logger.debug("Handler unsubscribed from %s", event_type.value)
 
     async def publish(self, event: Event) -> None:
+        # Fast path: with no subscribers anywhere, skip the queue and the
+        # background processor entirely (nothing would consume the event).
+        # publish() currently runs per turn (orchestrator) and per partner
+        # outbound message, so this is the hot path today.
+        if not any(self._subscribers.values()):
+            logger.debug(
+                "EventBus has no subscribers; skipping %s (task_id=%s)",
+                event.type.value,
+                event.task_id,
+            )
+            return
         await self._task_queue.put(event)
         logger.debug("Event published: %s (task_id=%s)", event.type.value, event.task_id)
 
