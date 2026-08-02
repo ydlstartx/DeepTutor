@@ -8,8 +8,10 @@ Every tool — built-in or contributed via plugin — implements ``BaseTool``.
 
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Protocol
 
 
@@ -60,8 +62,23 @@ class ToolDefinition:
     parameters: list[ToolParameter] = field(default_factory=list)
     raw_parameters: dict[str, Any] | None = None
 
+    @cached_property
+    def _openai_schema_template(self) -> dict[str, Any]:
+        """Immutable per-instance template (callers get a copy)."""
+        return self._build_openai_schema()
+
     def to_openai_schema(self) -> dict[str, Any]:
-        """Build an OpenAI-compatible function tool schema."""
+        """Build an OpenAI-compatible function tool schema.
+
+        The template is cached on the instance (registry-held tool
+        definitions are stable for the process lifetime; MCP reloads swap in
+        new instances, which naturally invalidate). A fresh copy is returned
+        because callers inject per-turn properties (RAG KB choices,
+        notebook options) into the nested dict.
+        """
+        return copy.deepcopy(self._openai_schema_template)
+
+    def _build_openai_schema(self) -> dict[str, Any]:
         if self.raw_parameters is not None:
             schema = dict(self.raw_parameters)
             schema.setdefault("type", "object")
