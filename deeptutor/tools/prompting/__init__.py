@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +50,14 @@ def _normalize_language(language: str) -> str:
     return normalized
 
 
+@lru_cache(maxsize=128)
 def load_prompt_hints(tool_name: str, language: str = "en") -> ToolPromptHints:
-    """Load per-tool prompt hints from YAML with zh/en fallback."""
+    """Load per-tool prompt hints from YAML with zh/en fallback.
+
+    Cached: the hints files are static for the process lifetime, and this is
+    on the per-turn hot path (once per enabled tool). Returned
+    ``ToolPromptHints`` values must be treated as read-only.
+    """
     normalized_language = _normalize_language(language)
     base_dir = Path(__file__).parent / "hints"
     candidates = [base_dir / normalized_language / f"{tool_name}.yaml"]
