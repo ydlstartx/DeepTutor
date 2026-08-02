@@ -2244,6 +2244,37 @@ function getExploreContextStatusLabel(
   return null;
 }
 
+/**
+ * The turn-level elapsed clock. Ticks every second while streaming and freezes
+ * once the turn ends. Isolated in its own component so the per-second state
+ * update re-renders only this small label, not the whole status row and trace.
+ */
+function TurnDurationClock({
+  events,
+  isStreaming,
+}: {
+  events: StreamEvent[];
+  isStreaming: boolean;
+}) {
+  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    if (!isStreaming) return;
+    const timer = window.setInterval(
+      () => setNowSeconds(Date.now() / 1000),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [isStreaming]);
+
+  const turnSeconds = getTurnDurationSeconds(events, nowSeconds, isStreaming);
+  if (turnSeconds == null) return null;
+  return (
+    <span className="text-[12px] font-medium tabular-nums text-[var(--muted-foreground)]/55">
+      · {formatTurnDuration(turnSeconds)}
+    </span>
+  );
+}
+
 export function StreamingStatus({
   events,
   isStreaming,
@@ -2277,15 +2308,6 @@ export function StreamingStatus({
 }) {
   const { t } = useTranslation();
   const hasFinalContent = Boolean(content && content.trim().length > 0);
-  const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
-  useEffect(() => {
-    if (!isStreaming) return;
-    const timer = window.setInterval(
-      () => setNowSeconds(Date.now() / 1000),
-      1000,
-    );
-    return () => window.clearInterval(timer);
-  }, [isStreaming]);
 
   // Only render once we either have a streaming turn OR a completed turn that
   // produced visible content — empty placeholders (e.g. system message
@@ -2315,17 +2337,6 @@ export function StreamingStatus({
     getDeepResearchStatusLabel(events, t, Boolean(isStreaming)) ??
     modeLabel;
 
-  // Single turn-level clock. Ticks every second while the turn is in
-  // flight and freezes on the final elapsed time once the answer ends —
-  // replaces the per-sub-trace duration chips that used to live inside
-  // the trace card.
-  const turnSeconds = getTurnDurationSeconds(
-    events,
-    nowSeconds,
-    Boolean(isStreaming),
-  );
-  const durationLabel =
-    turnSeconds != null ? formatTurnDuration(turnSeconds) : null;
   // Static label after the answer is done — no breathing animation. The other
   // three states are live so they pulse to signal ongoing work. The icon also
   // stretches/contracts on its own cycle (out of phase with the opacity fade)
@@ -2355,11 +2366,7 @@ export function StreamingStatus({
         />
       ) : null}
       <span className={breathingClass}>{label}</span>
-      {durationLabel ? (
-        <span className="text-[12px] font-medium tabular-nums text-[var(--muted-foreground)]/55">
-          · {durationLabel}
-        </span>
-      ) : null}
+      <TurnDurationClock events={events} isStreaming={Boolean(isStreaming)} />
     </>
   );
 
