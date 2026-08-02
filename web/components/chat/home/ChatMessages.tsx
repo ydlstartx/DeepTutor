@@ -1066,7 +1066,10 @@ const UserMessage = memo(function UserMessage({
   ];
 
   return (
-    <div key={`${msg.role}-${index}`} className="group flex justify-end">
+    <div
+      key={msg.id != null ? `msg-${msg.id}` : `${msg.role}-${index}`}
+      className="group flex justify-end"
+    >
       {/* ``data-turn-key`` is the scroll target the turn navigator jumps
           to; ``data-turn-bubble`` is what it flashes on arrival. Both keys
           come from ``turnAnchorKey`` so the rail and the transcript can
