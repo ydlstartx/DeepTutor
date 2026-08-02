@@ -5,9 +5,12 @@ import {
   convertFlowFenceToMermaid,
   convertLatexDelimiters,
   convertSequenceFenceToMermaid,
+  makeLatexCompatibilityRemarkPlugin,
+  normalizeLatexCjkInMath,
   normalizeLatexTextMiddleDots,
   processLatexContent,
   processMarkdownContent,
+  resolveKatexStrictMode,
 } from "../lib/latex";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +90,84 @@ test("SI units: moves Unicode middle dot out of LaTeX text mode", () => {
 test("SI units: leaves middle dots in prose and code unchanged", () => {
   const input = "正文 A·B，代码 `\\text{kg·m}`。";
   assert.equal(normalizeLatexTextMiddleDots(input), input);
+});
+
+test("CJK labels: moves raw Chinese into LaTeX text mode", () => {
+  const input = "F_{合}+F_弹+k=斜率+b=截距";
+  const expected =
+    "F_{\\text{合}}+F_{\\text{弹}}+k=\\text{斜率}+b=\\text{截距}";
+  assert.equal(normalizeLatexCjkInMath(input), expected);
+
+  const strictEvents: string[] = [];
+  katex.renderToString(expected, {
+    throwOnError: true,
+    strict: (errorCode: string) => {
+      strictEvents.push(errorCode);
+      return "ignore";
+    },
+  });
+  assert.deepEqual(strictEvents, []);
+});
+
+test("CJK labels: preserves existing text-mode commands", () => {
+  const input =
+    "F_{\\text{合}}+\\operatorname{斜率}(x)+\\mathrm{N}+\\text{弹力}";
+  assert.equal(normalizeLatexCjkInMath(input), input);
+});
+
+test("KaTeX strict mode: ignores only Unicode text in math mode", () => {
+  assert.equal(resolveKatexStrictMode("unicodeTextInMathMode"), "ignore");
+  assert.equal(resolveKatexStrictMode("unknownSymbol"), "warn");
+  assert.equal(resolveKatexStrictMode("htmlExtension"), "warn");
+});
+
+test("CJK labels: remark plugin changes math nodes only", () => {
+  const plugin = makeLatexCompatibilityRemarkPlugin();
+  const tree = {
+    type: "root",
+    children: [
+      { type: "text", value: "正文 F_{合}" },
+      { type: "inlineCode", value: "$F_{合}$" },
+      { type: "inlineMath", value: "F_{合}" },
+      { type: "math", value: "F_{弹}=kx" },
+    ],
+  };
+
+  plugin()(tree);
+  assert.equal(tree.children[0].value, "正文 F_{合}");
+  assert.equal(tree.children[1].value, "$F_{合}$");
+  assert.equal(tree.children[2].value, "F_{\\text{合}}");
+  assert.equal(tree.children[3].value, "F_{\\text{弹}}=kx");
+});
+
+test("CJK labels: remark plugin updates remark-math rendering payload", () => {
+  const plugin = makeLatexCompatibilityRemarkPlugin();
+  const tree = {
+    type: "root",
+    children: [
+      {
+        type: "inlineMath",
+        value: "F_合=ma+F_弹",
+        data: {
+          hChildren: [{ type: "text", value: "F_合=ma+F_弹" }],
+        },
+      },
+    ],
+  };
+
+  plugin()(tree);
+  const renderedValue = tree.children[0].data.hChildren[0].value;
+  assert.equal(renderedValue, "F_{\\text{合}}=ma+F_{\\text{弹}}");
+
+  const strictEvents: string[] = [];
+  katex.renderToString(renderedValue, {
+    throwOnError: true,
+    strict: (errorCode: string) => {
+      strictEvents.push(errorCode);
+      return "ignore";
+    },
+  });
+  assert.deepEqual(strictEvents, []);
 });
 
 // ---------------------------------------------------------------------------

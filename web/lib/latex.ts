@@ -9,6 +9,158 @@
 const MATH_SEGMENT_RE =
   /\$\$[\s\S]*?\$\$|\$(?!\$)[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)/g;
 
+const CJK_CHARACTER_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+const TEXT_MODE_COMMANDS = new Set([
+  "emph",
+  "mbox",
+  "operatorname",
+  "text",
+  "textbf",
+  "textit",
+  "textnormal",
+  "textrm",
+  "textsf",
+  "texttt",
+]);
+
+/**
+ * KaTeX supports CJK glyphs through the browser font stack but reports each
+ * raw glyph as a strict-mode compatibility warning.  The remark plugin below
+ * normally moves those labels into `\\text{...}`; this focused fallback keeps
+ * intentionally supported CJK labels from flooding the browser console if a
+ * third-party markdown transform bypasses or overwrites that normalization.
+ * Other strict-mode diagnostics remain visible.
+ */
+export function resolveKatexStrictMode(errorCode: string): "ignore" | "warn" {
+  return errorCode === "unicodeTextInMathMode" ? "ignore" : "warn";
+}
+
+type MarkdownAstNode = {
+  type?: string;
+  value?: unknown;
+  children?: MarkdownAstNode[];
+  data?: {
+    hChildren?: MarkdownAstNode[];
+    [key: string]: unknown;
+  };
+};
+
+function balancedGroupEnd(value: string, start: number): number {
+  if (value[start] !== "{") return -1;
+  let depth = 0;
+  for (let index = start; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Move raw CJK labels into LaTeX text mode while preserving existing text
+ * commands.  KaTeX renders `F_{合}` but reports `unicodeTextInMathMode`;
+ * `F_{\text{合}}` is both visually correct and LaTeX-compatible.
+ */
+export function normalizeLatexCjkInMath(expression: string): string {
+  if (!expression || !CJK_CHARACTER_RE.test(expression)) return expression;
+
+  let result = "";
+  let index = 0;
+  while (index < expression.length) {
+    const char = expression[index];
+    if (char === "\\") {
+      const commandMatch = /^\\([A-Za-z]+)/.exec(expression.slice(index));
+      if (!commandMatch) {
+        result += expression.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+
+      const command = commandMatch[1];
+      const commandEnd = index + commandMatch[0].length;
+      if (TEXT_MODE_COMMANDS.has(command)) {
+        let groupStart = commandEnd;
+        if (expression[groupStart] === "*") groupStart += 1;
+        while (/\s/.test(expression[groupStart] ?? "")) groupStart += 1;
+        const groupEnd = balancedGroupEnd(expression, groupStart);
+        if (groupEnd >= 0) {
+          result += expression.slice(index, groupEnd + 1);
+          index = groupEnd + 1;
+          continue;
+        }
+      }
+
+      result += commandMatch[0];
+      index = commandEnd;
+      continue;
+    }
+
+    if (CJK_CHARACTER_RE.test(char)) {
+      let end = index + 1;
+      while (end < expression.length && CJK_CHARACTER_RE.test(expression[end])) {
+        end += 1;
+      }
+      const text = `\\text{${expression.slice(index, end)}}`;
+      result += ["_", "^"].includes(expression[index - 1]) ? `{${text}}` : text;
+      index = end;
+      continue;
+    }
+
+    result += char;
+    index += 1;
+  }
+  return result;
+}
+
+/**
+ * remark plugin applied after remark-math.  Working on `math`/`inlineMath`
+ * nodes avoids rewriting prose, inline code, or fenced code examples.
+ */
+export function makeLatexCompatibilityRemarkPlugin() {
+  const visit = (node: MarkdownAstNode): void => {
+    if (
+      (node.type === "math" || node.type === "inlineMath") &&
+      typeof node.value === "string"
+    ) {
+      const normalizedValue = normalizeLatexCjkInMath(
+        normalizeLatexTextMiddleDotsInMath(node.value),
+      );
+      node.value = normalizedValue;
+
+      // remark-math stores a second copy of the expression for the mdast →
+      // hast bridge.  Updating only `node.value` looks correct in the remark
+      // tree, but rehype-katex still receives the stale `hChildren` value.
+      // Keep that rendering payload in sync so KaTeX sees the normalized TeX.
+      const renderedMathText = node.data?.hChildren;
+      if (Array.isArray(renderedMathText) && renderedMathText.length === 1) {
+        const textNode = renderedMathText[0];
+        if (textNode.type === "text" && typeof textNode.value === "string") {
+          textNode.value = normalizedValue;
+        }
+      }
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  return () => (tree: MarkdownAstNode) => visit(tree);
+}
+
+function normalizeLatexTextMiddleDotsInMath(expression: string): string {
+  return expression.replace(
+    /\\text\{([^{}]*[·⋅][^{}]*)\}/g,
+    (_match, inner: string) => {
+      const parts = inner.split(/[·⋅]/);
+      return parts.map((part) => `\\text{${part}}`).join("\\mathbin{\\cdot}");
+    },
+  );
+}
+
 /**
  * KaTeX treats a Unicode middle dot inside `\text{...}` as the unsupported
  * text command `\cdotp`, which is rendered as red error text. Keep the prose
@@ -21,10 +173,7 @@ const MATH_SEGMENT_RE =
 export function normalizeLatexTextMiddleDots(content: string): string {
   if (!content) return content;
   return content.replace(MATH_SEGMENT_RE, (math) =>
-    math.replace(/\\text\{([^{}]*[·⋅][^{}]*)\}/g, (_match, inner: string) => {
-      const parts = inner.split(/[·⋅]/);
-      return parts.map((part) => `\\text{${part}}`).join("\\mathbin{\\cdot}");
-    }),
+    normalizeLatexTextMiddleDotsInMath(math),
   );
 }
 

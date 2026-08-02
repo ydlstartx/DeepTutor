@@ -9,7 +9,9 @@ import "katex/dist/katex.min.css";
 import {
   convertFlowFenceToMermaid,
   convertSequenceFenceToMermaid,
+  makeLatexCompatibilityRemarkPlugin,
   processMarkdownContent,
+  resolveKatexStrictMode,
 } from "@/lib/latex";
 import { findCitationAnchor } from "@/lib/markdown-anchors";
 import {
@@ -727,17 +729,31 @@ export default function RichMarkdownRenderer({
     () => makeFileLinkRemarkPlugin(fileCtx?.files ?? []),
     [fileCtx?.files],
   );
+  const latexCompatibilityPlugin = useMemo(
+    () => makeLatexCompatibilityRemarkPlugin(),
+    [],
+  );
   const remarkPlugins = useMemo(() => {
     const p: Array<any> = [remarkGfm];
-    if (plugins.remarkMath) p.push(plugins.remarkMath as never);
+    if (plugins.remarkMath) {
+      p.push(plugins.remarkMath as never);
+      p.push(latexCompatibilityPlugin as never);
+    }
     if (fileLinkPlugin) p.push(fileLinkPlugin as never);
     return p;
-  }, [plugins.remarkMath, fileLinkPlugin]);
+  }, [plugins.remarkMath, latexCompatibilityPlugin, fileLinkPlugin]);
 
   const rehypePlugins = useMemo(() => {
     const p: Array<any> = [];
     if (allowHtml && plugins.rehypeRaw) p.push(plugins.rehypeRaw as never);
-    if (enableMath && plugins.rehypeKatex) p.push(plugins.rehypeKatex as never);
+    if (enableMath && plugins.rehypeKatex) {
+      p.push(
+        [
+          plugins.rehypeKatex,
+          { strict: resolveKatexStrictMode },
+        ] as never,
+      );
+    }
     return p;
   }, [allowHtml, enableMath, plugins.rehypeRaw, plugins.rehypeKatex]);
 
