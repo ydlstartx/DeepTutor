@@ -976,7 +976,11 @@ class TurnRuntimeManager:
             last_seq = max(last_seq, int(item.get("seq") or 0))
             yield _track(item)
 
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        # Bounded queue: a slow consumer drops frames (put_nowait + QueueFull
+        # suppression in _publish_live_event) instead of growing memory for
+        # the whole turn. The replay path (backlog by seq) still recovers full
+        # content after a reconnect.
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=500)
         subscriber = _LiveSubscriber(queue=queue)
         execution: _TurnExecution | None = None
         live_backlog: list[dict[str, Any]] = []
