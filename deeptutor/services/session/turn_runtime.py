@@ -1857,8 +1857,35 @@ class TurnRuntimeManager:
                 execution.events.append(payload)
             subscribers = list(current.subscribers)
         for subscriber in subscribers:
-            with contextlib.suppress(asyncio.QueueFull):
+            try:
                 subscriber.queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Slow consumer: silently dropping frames would leave the
+                # client with a hole it can never heal (the frontend only
+                # catches up via resume_from after a reconnect). Instead,
+                # terminate this subscription: drain the queue and post the
+                # None sentinel. subscribe_turn exits without a DONE (the
+                # turn is still running), the WS layer detects that and
+                # closes the socket, and the client reconnects + resumes
+                # from its last seq.
+                logger.warning(
+                    "Live subscriber queue full; dropping subscriber for turn %s "
+                    "(client will reconnect to resume)",
+                    execution.turn_id,
+                )
+                while True:
+                    try:
+                        subscriber.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                subscriber.queue.put_nowait(None)
+                # Remove immediately so later events don't keep piling into
+                # the dead queue (the generator's finally also removes it,
+                # but only after it gets scheduled).
+                async with self._lock:
+                    current = self._executions.get(execution.turn_id)
+                    if current is not None and subscriber in current.subscribers:
+                        current.subscribers.remove(subscriber)
         return payload
 
     async def _maybe_generate_session_title(

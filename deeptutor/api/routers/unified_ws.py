@@ -31,6 +31,7 @@ Supported client message ``type`` values:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -48,30 +49,74 @@ logger = logging.getLogger(__name__)
 # replay (after_seq) still covers every event.
 _CONTENT_FLUSH_INTERVAL_S = 0.04
 _CONTENT_FLUSH_CHARS = 64
-_CONTENT_MAX_FRAME = 1024
+
+
+class _Inbox:
+    """Bounded inbox fed by a pump task, with a timeout-safe ``__anext__``.
+
+    ``asyncio.Queue.get`` can be cancelled by ``asyncio.wait_for``/``timeout``
+    without losing the item or disturbing the producer, which makes it safe to
+    use as the timeout-flush source for content batching — unlike awaiting the
+    subscription generator directly, where a timeout cancellation would
+    propagate into the generator and tear the subscription down.
+    """
+
+    def __init__(self, queue: asyncio.Queue[dict[str, Any] | None]) -> None:
+        self._queue = queue
+
+    def __aiter__(self) -> "_Inbox":
+        return self
+
+    async def __anext__(self) -> dict[str, Any]:
+        item = await self._queue.get()
+        if item is None:
+            raise StopAsyncIteration
+        return item
 
 
 async def _forward_with_content_batching(
     events: AsyncIterator[dict[str, Any]],
     send: Callable[[dict[str, Any]], Awaitable[None]],
-) -> None:
-    """Forward a stream of event dicts, coalescing adjacent content frames."""
+) -> bool:
+    """Forward a stream of event dicts, coalescing adjacent content frames.
+
+    A frame is flushed when (a) a non-content event arrives, (b) the pending
+    content reaches ``_CONTENT_FLUSH_CHARS`` characters, or (c) no new event
+    arrives within ``_CONTENT_FLUSH_INTERVAL_S`` (timeout flush) — the last
+    case is what keeps slow streams visible instead of buffering up to the
+    frame cap.
+
+    Returns ``True`` when a ``done`` event was forwarded, ``False`` when the
+    stream ended without one (subscription dropped / turn vanished) so the
+    caller can force a client reconnect for catch-up.
+    """
     loop = asyncio.get_running_loop()
     pending: dict[str, Any] | None = None
-    flush_at = 0.0
+    seen_done = False
 
-    async def flush(force: bool = False) -> None:
+    async def flush() -> None:
         nonlocal pending
         if pending is None:
-            return
-        if not force and loop.time() < flush_at:
             return
         await send(pending)
         pending = None
 
-    async for event in events:
+    while True:
+        try:
+            event = await asyncio.wait_for(
+                anext(events), timeout=_CONTENT_FLUSH_INTERVAL_S
+            )
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            # No new event within the window: ship what we have so a slow
+            # stream stays visible instead of buffering until DONE.
+            await flush()
+            continue
+        if event.get("type") == "done":
+            seen_done = True
         if event.get("type") != "content":
-            await flush(force=True)
+            await flush()
             await send(event)
             continue
         if pending is not None and (
@@ -82,15 +127,15 @@ async def _forward_with_content_batching(
             # Coalesce: extend text, keep the newest seq for resume replay.
             pending["content"] = (pending.get("content") or "") + (event.get("content") or "")
             pending["seq"] = event.get("seq")
-            if len(pending["content"]) >= _CONTENT_MAX_FRAME:
-                await flush(force=True)
+            if len(pending["content"]) >= _CONTENT_FLUSH_CHARS:
+                await flush()
             continue
-        await flush(force=True)
+        await flush()
         pending = dict(event)
-        flush_at = loop.time() + _CONTENT_FLUSH_INTERVAL_S
-        if len(pending.get("content") or "") >= _CONTENT_MAX_FRAME:
-            await flush(force=True)
-    await flush(force=True)
+        if len(pending.get("content") or "") >= _CONTENT_FLUSH_CHARS:
+            await flush()
+    await flush()
+    return seen_done
 
 
 @router.websocket("/ws")
@@ -133,9 +178,38 @@ async def unified_websocket(ws: WebSocket) -> None:
 
         async def _forward() -> None:
             runtime = get_turn_runtime_manager()
-            await _forward_with_content_batching(
-                runtime.subscribe_turn(turn_id, after_seq=after_seq), safe_send
-            )
+            # Pump the subscription generator into a bounded inbox so the
+            # batching loop can use timeout-aware reads (wait_for on queue.get
+            # is cancellation-safe) without ever cancelling the generator —
+            # and so backpressure from a slow client propagates to the runtime.
+            inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1024)
+
+            async def _pump() -> None:
+                try:
+                    async for event in runtime.subscribe_turn(
+                        turn_id, after_seq=after_seq
+                    ):
+                        await inbox.put(event)
+                finally:
+                    await inbox.put(None)
+
+            pump_task = asyncio.create_task(_pump())
+            try:
+                seen_done = await _forward_with_content_batching(
+                    _Inbox(inbox), safe_send
+                )
+            finally:
+                pump_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump_task
+            if not seen_done and not closed:
+                # The subscription ended without a DONE: it was dropped
+                # (slow-consumer overflow) or the turn vanished mid-stream.
+                # Close the socket so the client reconnects and resumes from
+                # its last seq — the only self-healing path for a hole.
+                closed = True
+                with contextlib.suppress(Exception):
+                    await ws.close()
 
         await stop_subscription(turn_id)
         subscription_tasks[turn_id] = asyncio.create_task(_forward())
@@ -145,9 +219,30 @@ async def unified_websocket(ws: WebSocket) -> None:
 
         async def _forward() -> None:
             runtime = get_turn_runtime_manager()
-            await _forward_with_content_batching(
-                runtime.subscribe_session(session_id, after_seq=after_seq), safe_send
-            )
+            inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=1024)
+
+            async def _pump() -> None:
+                try:
+                    async for event in runtime.subscribe_session(
+                        session_id, after_seq=after_seq
+                    ):
+                        await inbox.put(event)
+                finally:
+                    await inbox.put(None)
+
+            pump_task = asyncio.create_task(_pump())
+            try:
+                seen_done = await _forward_with_content_batching(
+                    _Inbox(inbox), safe_send
+                )
+            finally:
+                pump_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await pump_task
+            if not seen_done and not closed:
+                closed = True
+                with contextlib.suppress(Exception):
+                    await ws.close()
 
         key = f"session:{session_id}"
         await stop_subscription(key)
