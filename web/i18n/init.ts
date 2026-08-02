@@ -10,14 +10,29 @@ export function normalizeLanguage(lang: unknown): AppLanguage {
   return "en";
 }
 
-// Register the React plugin eagerly (harmless, no init side effects) so
-// useTranslation works even before initI18n resolves.
-i18n.use(initReactI18next);
-
-// Bundles fetched before i18n.init() resolves (hasResourceBundle/addResource
-// live on the store, which only exists after init) are handed to init() via
-// its `resources` option; after init they go straight into the store.
-const _pendingBundles: Record<string, ResourceLanguage> = {};
+// i18next calls each plugin's `init` during i18n.init() — that's what makes
+// react-i18next's useTranslation find the instance (getI18n). We must init
+// SYNCHRONOUSLY at module load so every component that calls useTranslation
+// before language bundles finish loading gets a registered instance instead
+// of the NO_I18NEXT_INSTANCE warning. Resources are intentionally empty here;
+// they load on demand via ensureLanguage() (the default `en` keys are the
+// English text itself, so first paint is indistinguishable from translated
+// output until the bundle arrives and changeLanguage re-renders).
+i18n.use(initReactI18next).init({
+  resources: {},
+  lng: "en",
+  fallbackLng: "en",
+  // Use a single default namespace to keep lookups simple.
+  // We intentionally keep keySeparator disabled so keys like "Generating..." remain valid.
+  defaultNS: "app",
+  ns: ["app"],
+  keySeparator: false,
+  interpolation: {
+    escapeValue: false,
+  },
+  returnEmptyString: false,
+  returnNull: false,
+});
 
 let _initPromise: Promise<typeof i18n> | null = null;
 
@@ -26,29 +41,9 @@ export function initI18n(language?: unknown): Promise<typeof i18n> {
   const lng = normalizeLanguage(language);
   _initPromise = (async () => {
     await ensureLanguage(lng);
-    // i18next's resources shape is { lng: { ns: bundle } } — wrap the flat
-    // bundles fetched before init into the namespace layer.
-    const resources = Object.fromEntries(
-      Object.entries(_pendingBundles).map(([lang, bundle]) => [
-        lang,
-        { app: bundle },
-      ]),
-    );
-    i18n.init({
-      resources,
-      lng,
-      fallbackLng: "en",
-      // Use a single default namespace to keep lookups simple.
-      // We intentionally keep keySeparator disabled so keys like "Generating..." remain valid.
-      defaultNS: "app",
-      ns: ["app"],
-      keySeparator: false,
-      interpolation: {
-        escapeValue: false,
-      },
-      returnEmptyString: false,
-      returnNull: false,
-    });
+    if (i18n.language !== lng) {
+      await i18n.changeLanguage(lng);
+    }
     return i18n;
   })();
   return _initPromise;
@@ -64,14 +59,8 @@ async function fetchBundle(language: AppLanguage): Promise<ResourceLanguage> {
 }
 
 async function loadResourceBundle(language: AppLanguage): Promise<void> {
-  if (i18n.store) {
-    // Already initialized: instance-level resource helpers are live.
-    if (i18n.hasResourceBundle(language, "app")) return;
-    i18n.addResourceBundle(language, "app", await fetchBundle(language), true, true);
-    return;
-  }
-  if (_pendingBundles[language]) return;
-  _pendingBundles[language] = await fetchBundle(language);
+  if (i18n.hasResourceBundle(language, "app")) return;
+  i18n.addResourceBundle(language, "app", await fetchBundle(language), true, true);
 }
 
 export async function ensureLanguage(language: AppLanguage) {
