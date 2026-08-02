@@ -20,6 +20,7 @@ Callers resolve their own flags (chat checks selected KBs / source index
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -212,6 +213,16 @@ def _ordered_unique(names: Iterable[str]) -> list[str]:
     return result
 
 
+# Mount-gate probes hit the hot path once per turn (and per agent loop
+# iteration) but only decide a boolean tool toggle. A short TTL makes repeated
+# calls within a turn free while still picking up new memory/notebooks within
+# a second or two of them being created.
+_MOUNT_PROBE_TTL_S = 2.0
+
+_has_memory_cache: tuple[float, bool] = (0.0, False)
+_has_notebooks_cache: tuple[float, bool] = (0.0, False)
+
+
 def user_has_memory() -> bool:
     """Whether the active user has any L3 memory content.
 
@@ -220,16 +231,22 @@ def user_has_memory() -> bool:
     ``False``) on any error so a broken memory directory doesn't surface
     a tool with no payload to read.
     """
+    now = time.monotonic()
+    global _has_memory_cache
+    if now - _has_memory_cache[0] < _MOUNT_PROBE_TTL_S:
+        return _has_memory_cache[1]
     try:
         from deeptutor.services.memory import get_memory_store
 
         store = get_memory_store()
-        return any(
+        result = any(
             store.read_raw("L3", slot).strip()
             for slot in ("recent", "profile", "scope", "preferences")
         )
     except Exception:
-        return False
+        result = False
+    _has_memory_cache = (now, result)
+    return result
 
 
 def user_has_notebooks() -> bool:
@@ -238,15 +255,21 @@ def user_has_notebooks() -> bool:
     Auto-mount gate for ``list_notebook`` + ``write_note``. Same
     fail-closed posture as :func:`user_has_memory`.
     """
+    now = time.monotonic()
+    global _has_notebooks_cache
+    if now - _has_notebooks_cache[0] < _MOUNT_PROBE_TTL_S:
+        return _has_notebooks_cache[1]
     try:
         from deeptutor.services.notebook import get_notebook_manager
 
         notebooks = get_notebook_manager().list_notebooks()
-        return isinstance(notebooks, list) and any(
+        result = isinstance(notebooks, list) and any(
             nb for nb in notebooks if str(nb.get("id") or "").strip()
         )
     except Exception:
-        return False
+        result = False
+    _has_notebooks_cache = (now, result)
+    return result
 
 
 __all__ = [
