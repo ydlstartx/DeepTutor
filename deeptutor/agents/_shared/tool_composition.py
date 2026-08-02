@@ -216,11 +216,19 @@ def _ordered_unique(names: Iterable[str]) -> list[str]:
 # Mount-gate probes hit the hot path once per turn (and per agent loop
 # iteration) but only decide a boolean tool toggle. A short TTL makes repeated
 # calls within a turn free while still picking up new memory/notebooks within
-# a second or two of them being created.
+# a second or two of them being created. Probes are per-user (the stores
+# resolve per-user paths), so the caches are keyed by the current user id —
+# never shared across users in multi-user deployments.
 _MOUNT_PROBE_TTL_S = 2.0
 
-_has_memory_cache: tuple[float, bool] = (0.0, False)
-_has_notebooks_cache: tuple[float, bool] = (0.0, False)
+_has_memory_cache: dict[str, tuple[float, bool]] = {}
+_has_notebooks_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _probe_cache_key() -> str:
+    from deeptutor.multi_user.context import get_current_user
+
+    return str(get_current_user().id)
 
 
 def user_has_memory() -> bool:
@@ -231,10 +239,11 @@ def user_has_memory() -> bool:
     ``False``) on any error so a broken memory directory doesn't surface
     a tool with no payload to read.
     """
+    key = _probe_cache_key()
     now = time.monotonic()
-    global _has_memory_cache
-    if now - _has_memory_cache[0] < _MOUNT_PROBE_TTL_S:
-        return _has_memory_cache[1]
+    cached = _has_memory_cache.get(key)
+    if cached is not None and now - cached[0] < _MOUNT_PROBE_TTL_S:
+        return cached[1]
     try:
         from deeptutor.services.memory import get_memory_store
 
@@ -245,7 +254,7 @@ def user_has_memory() -> bool:
         )
     except Exception:
         result = False
-    _has_memory_cache = (now, result)
+    _has_memory_cache[key] = (now, result)
     return result
 
 
@@ -255,10 +264,11 @@ def user_has_notebooks() -> bool:
     Auto-mount gate for ``list_notebook`` + ``write_note``. Same
     fail-closed posture as :func:`user_has_memory`.
     """
+    key = _probe_cache_key()
     now = time.monotonic()
-    global _has_notebooks_cache
-    if now - _has_notebooks_cache[0] < _MOUNT_PROBE_TTL_S:
-        return _has_notebooks_cache[1]
+    cached = _has_notebooks_cache.get(key)
+    if cached is not None and now - cached[0] < _MOUNT_PROBE_TTL_S:
+        return cached[1]
     try:
         from deeptutor.services.notebook import get_notebook_manager
 
@@ -268,7 +278,7 @@ def user_has_notebooks() -> bool:
         )
     except Exception:
         result = False
-    _has_notebooks_cache = (now, result)
+    _has_notebooks_cache[key] = (now, result)
     return result
 
 
