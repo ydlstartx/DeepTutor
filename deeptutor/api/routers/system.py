@@ -4,6 +4,7 @@ Manages system status checks and model connection tests
 """
 
 from datetime import datetime
+import asyncio
 import time
 
 from fastapi import APIRouter
@@ -296,7 +297,11 @@ async def test_search_connection():
                 message=f"Search provider `{search_config.requested_provider}` missing credentials.",
                 error="Set profile.api_key in Settings > Catalog.",
             )
-        result = web_search("DeepTutor health check", provider=search_config.provider)
+        # web_search is sync requests-based; run it off the event loop so a
+        # slow search endpoint can't freeze other connections' streaming.
+        result = await asyncio.to_thread(
+            web_search, "DeepTutor health check", provider=search_config.provider
+        )
         response_time = (time.time() - start_time) * 1000
         answer = result.get("answer") or result.get("search_results")
         if not answer:
