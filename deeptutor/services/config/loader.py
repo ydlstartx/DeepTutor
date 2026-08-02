@@ -8,6 +8,7 @@ Provides YAML configuration loading, path resolution, and language parsing.
 """
 
 import asyncio
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -199,6 +200,7 @@ def parse_language(language: Any) -> str:
     return code
 
 
+@lru_cache(maxsize=32)
 def get_agent_params(module_name: str) -> dict:
     """
     Get agent parameters (temperature, max_tokens) for a specific module.
@@ -287,6 +289,7 @@ DEFAULT_CHAT_PARAMS: dict[str, Any] = {
 }
 
 
+@lru_cache(maxsize=1)
 def get_chat_params() -> dict[str, Any]:
     """
     Read ``capabilities.chat`` from agents.yaml with deep-merged defaults.

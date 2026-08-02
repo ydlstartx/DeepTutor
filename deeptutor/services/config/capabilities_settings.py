@@ -30,6 +30,8 @@ import yaml
 from deeptutor.services.config.loader import (
     DEFAULT_CHAT_PARAMS,
     PROJECT_ROOT,
+    get_agent_params,
+    get_chat_params,
     get_runtime_settings_dir,
 )
 from deeptutor.utils.config_manager import ConfigManager
@@ -429,6 +431,10 @@ def save_capabilities_settings(payload: dict[str, Any]) -> dict[str, Any]:
     _write_agents_yaml(agents_cfg)
     if main_payload:
         ConfigManager().save_config(main_payload)
+    # get_chat_params/get_agent_params are lru_cached; drop their entries so
+    # the next turn picks up the freshly written agents.yaml.
+    get_chat_params.cache_clear()
+    get_agent_params.cache_clear()
     return capabilities_settings_dict()
 
 

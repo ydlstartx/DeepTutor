@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from deeptutor.services.config import loader as loader_module
@@ -12,6 +13,14 @@ from deeptutor.services.config.loader import (
     DEFAULT_CHAT_PARAMS,
     get_chat_params,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_chat_params_cache():
+    """get_chat_params() is lru_cached; tests repoint PROJECT_ROOT per-case."""
+    get_chat_params.cache_clear()
+    yield
+    get_chat_params.cache_clear()
 
 
 def _write_agents_yaml(tmp_path: Path, content: dict[str, Any]) -> Path:

@@ -13,6 +13,15 @@ import yaml
 from deeptutor.services.config import loader as loader_module
 from deeptutor.services.config.loader import get_agent_params
 
+
+@pytest.fixture(autouse=True)
+def _clear_agent_params_cache():
+    """get_agent_params() is lru_cached; tests repoint PROJECT_ROOT per-case."""
+    get_agent_params.cache_clear()
+    yield
+    get_agent_params.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # get_agent_params("llm_probe") — reads diagnostics.llm_probe from agents.yaml
 # ---------------------------------------------------------------------------

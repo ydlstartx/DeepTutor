@@ -27,6 +27,7 @@ from deeptutor.services.config import (
     get_model_catalog_service,
     get_runtime_settings_service,
 )
+from deeptutor.services.config.loader import get_agent_params, get_chat_params
 from deeptutor.services.config.origins import normalize_origins
 from deeptutor.services.config.runtime_settings import (
     CHAT_ATTACHMENT_CHARS_RANGE,
@@ -267,6 +268,10 @@ def _invalidate_runtime_caches() -> None:
     clear_llm_config_cache()
     reset_llm_client()
     reset_embedding_client()
+    # agents.yaml feeds get_agent_params/get_chat_params; drop their caches so
+    # the next turn re-reads the edited file.
+    get_agent_params.cache_clear()
+    get_chat_params.cache_clear()
 
 
 def load_ui_settings() -> dict[str, Any]:
