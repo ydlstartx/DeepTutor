@@ -2,6 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 
+// Commit the visible slice every Nth rAF frame. The reveal cursor advances
+// every frame (same total type-out duration), but downstream markdown
+// re-parses happen 3x less often during streaming.
+const FRAME_SKIP = 3;
+
 interface SmoothStreamOptions {
   /**
    * Cap on visible chars revealed per rAF frame.
@@ -32,6 +37,11 @@ interface SmoothStreamOptions {
  *   - While ``isStreaming`` is true and the incoming ``content`` is
  *     longer than what we've shown, a single ``requestAnimationFrame``
  *     loop advances the cursor towards ``content.length``.
+ *   - The cursor position advances every frame (so reveal speed is
+ *     unchanged), but the visible state is committed every
+ *     ``FRAME_SKIP`` frames (~20fps instead of 60fps). Each committed
+ *     frame re-parses the whole markdown downstream, so the 3x fewer
+ *     commits cut that cost 3x with no perceivable smoothing loss.
  *   - When ``isStreaming`` flips false, we snap to the full ``content``
  *     on the next frame so the finished message lands instantly. This
  *     also handles short messages where the smoother would otherwise
@@ -59,6 +69,7 @@ export function useSmoothStreamText(
   const [shown, setShown] = useState<string>(content);
   const shownLenRef = useRef<number>(content.length);
   const rafRef = useRef<number>(0);
+  const frameCounterRef = useRef<number>(0);
 
   useEffect(() => {
     if (!enabled) {
@@ -109,7 +120,16 @@ export function useSmoothStreamText(
       );
       const next = Math.min(target, current + advance);
       shownLenRef.current = next;
-      setShown(content.slice(0, next));
+      // Commit the visible slice every FRAME_SKIP frames (or at the end) —
+      // the cursor itself advances every frame, so total reveal time is
+      // unchanged while markdown re-parses happen 3x less often.
+      frameCounterRef.current += 1;
+      if (
+        frameCounterRef.current % FRAME_SKIP === 0 ||
+        next >= target
+      ) {
+        setShown(content.slice(0, next));
+      }
       if (next < target) {
         rafRef.current = requestAnimationFrame(step);
       }
