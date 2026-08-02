@@ -14,7 +14,9 @@ from deeptutor.services.llm.config import LLMConfig, get_llm_config
 from deeptutor.services.llm.provider_core.base import GenerationSettings, LLMProvider
 from deeptutor.services.provider_registry import find_by_name
 
-_PROVIDER_POOL_MAXSIZE = 2
+# A single turn can touch chat + title-generation + RAG models; a small pool
+# churns (close + rebuild SDK clients) when users switch models mid-session.
+_PROVIDER_POOL_MAXSIZE = 16
 _provider_pool: "OrderedDict[tuple[Any, ...], LLMProvider]" = OrderedDict()
 _provider_pool_lock = threading.RLock()
 

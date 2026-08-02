@@ -43,7 +43,8 @@ _NATIVE_TOOL_BLOCKED_BINDINGS: frozenset[str] = frozenset(
 # AsyncOpenAI client pointed at a non-OpenAI wire format. github_copilot is
 # adapter-routed but deliberately excluded from this set.
 _NATIVE_TOOL_BACKENDS: frozenset[str] = frozenset({"anthropic", "openai_codex"})
-_AGENTIC_CLIENT_POOL_MAXSIZE = 2
+# Pool sized for mixed model usage in one session (chat + title + RAG).
+_AGENTIC_CLIENT_POOL_MAXSIZE = 16
 _agentic_client_pool: "OrderedDict[tuple[Any, ...], Any]" = OrderedDict()
 _agentic_client_pool_lock = threading.RLock()
 
