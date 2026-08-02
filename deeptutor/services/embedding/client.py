@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+from contextlib import contextmanager
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from deeptutor.services.config.provider_runtime import (
     EMBEDDING_PROVIDERS,
@@ -13,6 +15,15 @@ from deeptutor.services.config.provider_runtime import (
 from .adapters import ADAPTER_BACKENDS, BaseEmbeddingAdapter, EmbeddingRequest
 from .config import EmbeddingConfig, get_embedding_config
 from .validation import validate_embedding_batch
+
+# Reusable executor for sync embedding calls made from inside a running event
+# loop (embed_sync submits asyncio.run to a worker thread).
+_sync_embed_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+@contextmanager
+def _sync_embed_executor() -> Iterator[concurrent.futures.ThreadPoolExecutor]:
+    yield _sync_embed_executor_pool
 
 
 def _resolve_adapter_class(binding: str) -> type[BaseEmbeddingAdapter]:
@@ -229,9 +240,9 @@ class EmbeddingClient:
         except RuntimeError:
             return asyncio.run(self.embed(texts))
 
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Shared executor instead of a fresh ThreadPoolExecutor per call
+        # (thread creation on every sync embedding was pure overhead).
+        with _sync_embed_executor() as executor:
             future = executor.submit(asyncio.run, self.embed(texts))
             return future.result()
 

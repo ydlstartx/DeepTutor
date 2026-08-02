@@ -11,22 +11,46 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 from typing import Any
 
 from deeptutor.services.rag.factory import DEFAULT_PROVIDER, normalize_provider_name
 
+# Cached parse of kb_config.json keyed by base dir; invalidated by mtime so
+# external writes (KB create/delete/binding changes) are picked up without
+# any explicit cache-clearing calls. RAG queries hit this on every turn.
+_kb_config_cache: dict[str, tuple[int, dict[str, Any]]] = {}
+_kb_config_cache_lock = threading.Lock()
+
+
+def _load_kb_config(kb_base_dir: str | Path) -> dict[str, Any]:
+    """Read ``kb_config.json`` once per (base_dir, mtime) instead of per query."""
+    base = str(kb_base_dir)
+    config_path = Path(base) / "kb_config.json"
+    try:
+        mtime = config_path.stat().st_mtime_ns
+    except OSError:
+        with _kb_config_cache_lock:
+            _kb_config_cache.pop(base, None)
+        return {}
+    with _kb_config_cache_lock:
+        cached = _kb_config_cache.get(base)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        data = {}
+    with _kb_config_cache_lock:
+        _kb_config_cache[base] = (mtime, data)
+    return data
+
 
 def load_kb_config_entry(kb_base_dir: str | Path, kb_name: str) -> dict[str, Any]:
     """Return the raw ``kb_config.json`` entry for ``kb_name``, if present."""
-    config_path = Path(kb_base_dir) / "kb_config.json"
-    if not config_path.exists():
-        return {}
-    try:
-        with open(config_path, encoding="utf-8") as handle:
-            entry = json.load(handle).get("knowledge_bases", {}).get(kb_name, {})
-        return entry if isinstance(entry, dict) else {}
-    except Exception:
-        return {}
+    entry = _load_kb_config(kb_base_dir).get("knowledge_bases", {}).get(kb_name, {})
+    return entry if isinstance(entry, dict) else {}
 
 
 def load_metadata_provider(kb_base_dir: str | Path, kb_name: str) -> str | None:
