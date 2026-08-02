@@ -317,7 +317,9 @@ class DocumentAdder:
                 success = await rag_service.add_documents(self.kb_name, [str(doc_file)])
                 if success:
                     processed_files.append(doc_file)
-                    self._record_successful_hash(doc_file)
+                    # File hash + metadata rewrite is sync IO on a possibly
+                    # large file — keep it off the event loop too.
+                    await asyncio.to_thread(self._record_successful_hash, doc_file)
                     logger.info(f"Processed: {doc_file.name}")
                 else:
                     error = "Provider returned failure without details."

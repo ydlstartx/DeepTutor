@@ -857,7 +857,12 @@ async def run_upload_processing_task(
                 rag_provider=rag_provider,
             )
 
-            staged_files = adder.add_documents(uploaded_file_paths, allow_duplicates=False)
+            # add_documents does per-file sha256 + copy2 of potentially large
+            # uploads — run it off the event loop so streaming turns on other
+            # connections don't stall while a big file is being staged.
+            staged_files = await asyncio.to_thread(
+                adder.add_documents, uploaded_file_paths, allow_duplicates=False
+            )
             _task_log(task_id, f"Staged {len(staged_files)} new file(s)")
 
             if not staged_files:
