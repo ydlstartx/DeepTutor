@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   ChevronDown,
   KeyRound,
@@ -12,7 +12,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { BrandGlyph } from "@/components/common/BrandIcon";
-import { brandIconFor } from "@/lib/brand-icons";
+import { loadBrandIcon } from "@/lib/brand-icons";
 
 import McpStatusBadge from "@/components/mcp/McpStatusBadge";
 import {
@@ -64,15 +64,25 @@ export default function McpServerRow({
   const rowStatus = mcpRowStatus(cfg, status);
   // Resolved here rather than rendered blindly: `BrandGlyph` yields null for an
   // unknown brand, but a JSX element is always truthy, so `?? plug` in the markup
-  // would never fire.
-  const brand = brandIconFor("mcp", cfg.catalog_entry || name);
+  // would never fire. The icon table loads on demand; the generic plug shows
+  // until (if ever) a mark arrives.
+  const [hasBrand, setHasBrand] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    loadBrandIcon("mcp", cfg.catalog_entry || name).then((icon) => {
+      if (alive) setHasBrand(icon != null);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [cfg.catalog_entry, name]);
   return (
     <div className="flex w-full items-start gap-3 px-5 py-4">
       {/* The mark comes from the catalog entry this server was installed from,
           not from its local name — the installer may have renamed it. A
           hand-written server has no provenance and keeps the generic plug. */}
       <span className="mt-0.5 shrink-0 text-[var(--muted-foreground)]">
-        {brand ? (
+        {hasBrand ? (
           <BrandGlyph
             namespace="mcp"
             id={cfg.catalog_entry || name}

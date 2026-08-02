@@ -48,7 +48,7 @@ export default function SessionLoadingView({
       {/* Logo + spinner */}
       <div className="flex items-center gap-3">
         <img
-          src="/logo_black.png"
+          src="/logo_black-sm.png"
           alt="DeepTutor"
           width={32}
           height={32}

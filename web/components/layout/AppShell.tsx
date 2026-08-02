@@ -112,7 +112,7 @@ export default function AppShell({ sidebar, children }: AppShellProps) {
             </button>
             <Link href="/" className="flex items-center gap-1.5">
               <Image
-                src="/logo.png"
+                src="/logo-sm.png"
                 alt="DeepTutor"
                 width={20}
                 height={20}
@@ -120,10 +120,10 @@ export default function AppShell({ sidebar, children }: AppShellProps) {
                 className="h-5 w-5"
               />
               <Image
-                src="/banner.png"
+                src="/banner-sm.png"
                 alt="DeepTutor"
-                width={897}
-                height={236}
+                width={200}
+                height={53}
                 unoptimized
                 className="h-[18px] w-auto"
               />

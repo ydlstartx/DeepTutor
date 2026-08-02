@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { brandIconFor, brandInitials } from "../lib/brand-icons";
+import { brandInitials, loadBrandIcon } from "../lib/brand-icons";
 import { BRAND_ICONS } from "../lib/brand-icons.generated";
 import {
   CLI_BRAND_SLUGS,
@@ -37,48 +37,49 @@ test("every mark is a usable 24x24 path", () => {
   }
 });
 
-test("a known entry resolves in its own namespace only", () => {
+test("a known entry resolves in its own namespace only", async () => {
   // `exa` is a hosted search MCP *and* an installed CLI; they are different
   // products, so one namespace's curation must not answer for the other.
-  assert.ok(brandIconFor("mcp", "github"));
-  assert.equal(brandIconFor("cli", "github"), null);
-  assert.ok(brandIconFor("cli", "blender"));
-  assert.equal(brandIconFor("mcp", "blender"), null);
+  assert.ok(await loadBrandIcon("mcp", "github"));
+  assert.equal(await loadBrandIcon("cli", "github"), null);
+  assert.ok(await loadBrandIcon("cli", "blender"));
+  assert.equal(await loadBrandIcon("mcp", "blender"), null);
 });
 
-test("an unknown entry resolves to null rather than a wrong logo", () => {
+test("an unknown entry resolves to null rather than a wrong logo", async () => {
   // Partial coverage is the design: the newer MCP brands are not in Simple Icons,
   // and a plausible-but-wrong mark is worse than a monogram.
-  assert.equal(brandIconFor("mcp", "tavily"), null);
-  assert.equal(brandIconFor("mcp", "definitely-not-a-service"), null);
+  assert.equal(await loadBrandIcon("mcp", "tavily"), null);
+  assert.equal(await loadBrandIcon("mcp", "definitely-not-a-service"), null);
 });
 
-test("a renamed install still finds its mark", () => {
+test("a renamed install still finds its mark", async () => {
   // The MCP store lets the installer choose a local name, and the common edits
   // are case and separator changes.
-  assert.ok(brandIconFor("mcp", "GitHub"));
-  assert.ok(brandIconFor("mcp", "google_maps"));
-  assert.ok(brandIconFor("cli", "OBS_Studio"));
+  assert.ok(await loadBrandIcon("mcp", "GitHub"));
+  assert.ok(await loadBrandIcon("mcp", "google_maps"));
+  assert.ok(await loadBrandIcon("cli", "OBS_Studio"));
   assert.ok(
-    brandIconFor("cli", "blender-cli"),
+    await loadBrandIcon("cli", "blender-cli"),
     "a -cli suffix is not part of the brand",
   );
 });
 
-test("resolution never throws on junk", () => {
+test("resolution never throws on junk", async () => {
   for (const value of ["", "   ", "../etc/passwd", "-", "___"]) {
-    assert.doesNotThrow(() => brandIconFor("cli", value));
+    assert.doesNotThrow(() => loadBrandIcon("cli", value));
+    assert.equal(await loadBrandIcon("cli", value), null);
   }
 });
 
-test("the two namespaces stay in sync with what is generated", () => {
+test("the two namespaces stay in sync with what is generated", async () => {
   for (const [namespace, table] of [
     ["mcp", MCP_BRAND_SLUGS],
     ["cli", CLI_BRAND_SLUGS],
   ] as const) {
     for (const id of Object.keys(table)) {
       assert.ok(
-        brandIconFor(namespace, id),
+        await loadBrandIcon(namespace, id),
         `${namespace}:${id} resolves to nothing`,
       );
     }

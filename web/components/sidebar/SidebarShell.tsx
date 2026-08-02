@@ -213,7 +213,7 @@ export function SidebarShell({
             className="flex items-center justify-center transition-opacity duration-150 group-hover/sb:opacity-0"
           >
             <Image
-              src="/logo.png"
+              src="/logo-sm.png"
               alt="DeepTutor"
               width={22}
               height={22}
@@ -343,7 +343,7 @@ export function SidebarShell({
       <div className="flex h-14 items-center justify-between px-4">
         <Link href="/" className="group flex items-center gap-1.5">
           <Image
-            src="/logo.png"
+            src="/logo-sm.png"
             alt="DeepTutor"
             width={22}
             height={22}
@@ -351,10 +351,10 @@ export function SidebarShell({
             className="h-[22px] w-[22px] transition-transform duration-200 group-hover:scale-105"
           />
           <Image
-            src="/banner.png"
+            src="/banner-sm.png"
             alt="DeepTutor"
-            width={897}
-            height={236}
+            width={200}
+            height={53}
             priority
             unoptimized
             className="h-[22px] w-auto transition-transform duration-200 group-hover:scale-105"

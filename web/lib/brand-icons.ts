@@ -5,37 +5,13 @@
  * (`exa` is both a hosted search MCP and an installed CLI), and they are not the
  * same product. Callers say which store they are rendering.
  *
- * Everything here is a pure lookup over the generated tables, so the store pages
- * stay free of icon logic and this stays testable.
+ * The generated icon table (~97KB of SVG path data) is loaded lazily via
+ * dynamic import so it only ships to browsers that actually open a store page.
  */
 
-import {
-  BRAND_ICONS,
-  CLI_ICON_SLUGS,
-  MCP_ICON_SLUGS,
-  type BrandIcon,
-} from "@/lib/brand-icons.generated";
+import type { BrandIcon } from "@/lib/brand-icons.generated";
 
 export type BrandNamespace = "mcp" | "cli";
-
-/**
- * The mark for *id* in *namespace*, or `null` when there is none.
- *
- * `null` is the common case and not a failure: coverage is partial on purpose
- * (see `brand-slugs.ts`), and a monogram is the designed fallback rather than a
- * degraded one.
- */
-export function brandIconFor(
-  namespace: BrandNamespace,
-  id: string,
-): BrandIcon | null {
-  const table = namespace === "mcp" ? MCP_ICON_SLUGS : CLI_ICON_SLUGS;
-  for (const key of candidateKeys(id)) {
-    const slug = table[key];
-    if (slug) return BRAND_ICONS[slug] ?? null;
-  }
-  return null;
-}
 
 /**
  * The keys to try for *id*, exact form first.
@@ -53,6 +29,30 @@ function candidateKeys(id: string): string[] {
   const dashed = lowered.replace(/[\s_.]+/g, "-");
   const stripped = dashed.replace(/^cli-/, "").replace(/-cli$/, "");
   return [...new Set([raw, lowered, dashed, stripped])];
+}
+
+/**
+ * The mark for *id* in *namespace*, or `null` when there is none.
+ *
+ * `null` is the common case and not a failure: coverage is partial on purpose
+ * (see `brand-slugs.ts`), and a monogram is the designed fallback rather than a
+ * degraded one.
+ *
+ * Loads the generated icon table on first call (module is cached afterwards).
+ */
+export async function loadBrandIcon(
+  namespace: BrandNamespace,
+  id: string,
+): Promise<BrandIcon | null> {
+  const { BRAND_ICONS, CLI_ICON_SLUGS, MCP_ICON_SLUGS } = await import(
+    "@/lib/brand-icons.generated"
+  );
+  const table = namespace === "mcp" ? MCP_ICON_SLUGS : CLI_ICON_SLUGS;
+  for (const key of candidateKeys(id)) {
+    const slug = table[key];
+    if (slug) return BRAND_ICONS[slug] ?? null;
+  }
+  return null;
 }
 
 /**

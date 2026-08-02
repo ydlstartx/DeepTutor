@@ -1,12 +1,14 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  brandIconFor,
   brandInitials,
+  loadBrandIcon,
   type BrandNamespace,
 } from "@/lib/brand-icons";
+import type { BrandIcon as BrandIconData } from "@/lib/brand-icons.generated";
 
 /**
  * The square mark in front of a store entry: the product's own logo when we have
@@ -35,7 +37,17 @@ export default function BrandIcon({
   size?: "sm" | "lg";
   className?: string;
 }) {
-  const icon = brandIconFor(namespace, id);
+  // The icon table (~97KB) is loaded on demand; monogram shows meanwhile.
+  const [icon, setIcon] = useState<BrandIconData | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadBrandIcon(namespace, id).then((loaded) => {
+      if (alive) setIcon(loaded);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [namespace, id]);
   const box =
     size === "lg" ? "h-11 w-11 text-[14px]" : "mt-0.5 h-7 w-7 text-[10.5px]";
   const glyph = size === "lg" ? 20 : 14;
@@ -102,7 +114,16 @@ export function BrandGlyph({
   size?: number;
   className?: string;
 }) {
-  const icon = brandIconFor(namespace, id);
+  const [icon, setIcon] = useState<BrandIconData | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadBrandIcon(namespace, id).then((loaded) => {
+      if (alive) setIcon(loaded);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [namespace, id]);
   if (!icon) return null;
   return (
     <svg
