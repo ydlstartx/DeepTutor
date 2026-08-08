@@ -11,11 +11,11 @@ import React, {
   useRef,
 } from "react";
 import {
-  LANGUAGE_EVENT,
-  LANGUAGE_STORAGE_KEY,
+  RESPONSE_LANGUAGE_EVENT,
+  RESPONSE_LANGUAGE_STORAGE_KEY,
   normalizeLanguage,
   readStoredChatResponseTimeout,
-  readStoredLanguage,
+  readStoredResponseLanguage,
   writeStoredActiveSessionId,
 } from "@/context/app-shell-storage";
 import type { StreamEvent, ChatMessage, LLMSelection } from "@/lib/unified-ws";
@@ -30,7 +30,10 @@ import {
 import { normalizeMarkdownForDisplay } from "@/lib/markdown-display";
 import { normalizeMessageContent } from "@/lib/message-content";
 import { buildVisiblePath, tipMessageId } from "@/lib/message-branches";
-import { nextOptimisticId } from "@/lib/optimistic-id";
+import {
+  nextOptimisticId,
+  resolvePersistedMessage,
+} from "@/lib/optimistic-id";
 import { reconcileTurnIds } from "@/lib/turn-reconcile";
 import {
   isNarrationMarker,
@@ -267,7 +270,8 @@ function createSessionEntry(
     messages: [],
     isStreaming: false,
     currentStage: "",
-    language: typeof window === "undefined" ? "en" : readStoredLanguage(),
+    language:
+      typeof window === "undefined" ? "en" : readStoredResponseLanguage(),
     status: "idle",
     activeTurnId: null,
     lastSeq: 0,
@@ -836,7 +840,7 @@ interface ChatContextValue {
   loadSession: (
     sessionId: string,
     options?: { signal?: AbortSignal; revalidate?: boolean },
-  ) => Promise<void>;
+  ) => Promise<MessageItem[] | undefined>;
   /** Select an already-loaded session without fetching. Returns false when
    *  it isn't in memory, i.e. the caller must load it. */
   showCachedSession: (sessionId: string) => boolean;
@@ -1027,9 +1031,9 @@ export function UnifiedChatProvider({
   // Forward-declared so ``handleRunnerEvent`` (created above
   // ``loadSession`` in source order) can trigger a server refresh after
   // a turn finishes without taking a stale closure of ``loadSession``.
-  const loadSessionRef = useRef<((sessionId: string) => Promise<void>) | null>(
-    null,
-  );
+  const loadSessionRef = useRef<
+    ((sessionId: string) => Promise<MessageItem[] | undefined>) | null
+  >(null);
 
   useLayoutEffect(() => {
     stateRef.current = state;
@@ -1359,12 +1363,13 @@ export function UnifiedChatProvider({
         const local = stateRef.current.sessions[key];
         if (!local || local.isStreaming || local.status === "running") return;
       }
+      const messages = hydrateMessages(session.messages ?? []);
       dispatch({
         type: options?.revalidate ? "REVALIDATE_SESSION" : "LOAD_SESSION",
         key,
         sessionId: key,
         title: session.title || "",
-        messages: hydrateMessages(session.messages ?? []),
+        messages,
         activeTurnId: activeTurn?.turn_id || activeTurn?.id || null,
         status:
           (session.status as SessionRuntimeStatus | undefined) ||
@@ -1381,10 +1386,10 @@ export function UnifiedChatProvider({
           typeof session.preferences?.persona === "string"
             ? session.preferences.persona
             : "",
-        // The Settings language is global UI state. Historical sessions may
-        // have stale persisted preferences, so new turns follow the current
-        // app language rather than the language saved when the session began.
-        language: readStoredLanguage(),
+        // Model output language is account-level state. Historical sessions
+        // may have stale persisted preferences, so new turns follow the
+        // current response-language setting rather than their original value.
+        language: readStoredResponseLanguage(),
         selectedBranches: normalizeSelectedBranches(
           session.preferences?.selected_branches,
         ),
@@ -1399,6 +1404,7 @@ export function UnifiedChatProvider({
           after_seq: 0,
         });
       }
+      return messages;
     },
     [hydrateMessages, sendThroughRunner],
   );
@@ -1421,18 +1427,19 @@ export function UnifiedChatProvider({
     const syncLanguage = (language: string | null | undefined) => {
       dispatch({ type: "SET_LANGUAGE", lang: normalizeLanguage(language) });
     };
-    const onLanguage = (event: Event) => {
+    const onResponseLanguage = (event: Event) => {
       const detail = (event as CustomEvent<{ language?: string }>).detail;
       syncLanguage(detail?.language);
     };
     const onStorage = (event: StorageEvent) => {
-      if (event.key === LANGUAGE_STORAGE_KEY) syncLanguage(event.newValue);
+      if (event.key === RESPONSE_LANGUAGE_STORAGE_KEY)
+        syncLanguage(event.newValue);
     };
 
-    window.addEventListener(LANGUAGE_EVENT, onLanguage);
+    window.addEventListener(RESPONSE_LANGUAGE_EVENT, onResponseLanguage);
     window.addEventListener("storage", onStorage);
     return () => {
-      window.removeEventListener(LANGUAGE_EVENT, onLanguage);
+      window.removeEventListener(RESPONSE_LANGUAGE_EVENT, onResponseLanguage);
       window.removeEventListener("storage", onStorage);
     };
   }, []);
@@ -1529,7 +1536,7 @@ export function UnifiedChatProvider({
           ? (replaySnapshot.llmSelection ?? null)
           : session.llmSelection;
       const effectiveLanguage =
-        replaySnapshot?.language ?? readStoredLanguage();
+        replaySnapshot?.language ?? readStoredResponseLanguage();
       // Persona resolution: replay snapshot wins; then an explicit per-call
       // persona (quiz follow-up surface); then the session-level preference.
       // Always a string — "" means Default / no persona.
@@ -1763,7 +1770,7 @@ export function UnifiedChatProvider({
       type: "regenerate",
       session_id: session.sessionId,
       overrides: {
-        language: readStoredLanguage(),
+        language: readStoredResponseLanguage(),
       },
     });
   }, [sendThroughRunner]);
@@ -1905,35 +1912,21 @@ export function UnifiedChatProvider({
       // already running so we don't queue against an in-flight stream
       // (matches the delete-turn guard).
       if (session.isStreaming) return;
-      const idx = session.messages.findIndex(
-        (m) => m.id === messageId && m.role === "user",
-      );
-      if (idx === -1) return;
-      let original = session.messages[idx];
-      // Optimistic in-flight rows have a negative client-side id — we
-      // need a real server id to hang the new sibling under. Refresh
-      // from the server, then re-resolve the row by its position in the
-      // (now-persisted) thread before continuing.
-      if (typeof original.id === "number" && original.id < 0) {
-        if (!session.sessionId) return;
-        try {
-          await loadSession(session.sessionId);
-        } catch {
-          return;
-        }
-        const refreshed = stateRef.current.sessions[key];
-        const candidate = refreshed?.messages[idx];
-        if (
-          !candidate ||
-          candidate.role !== "user" ||
-          typeof candidate.id !== "number" ||
-          candidate.id < 0
-        ) {
-          return;
-        }
-        original = candidate;
+      let original: MessageItem | undefined;
+      try {
+        original = await resolvePersistedMessage(
+          session.messages,
+          messageId,
+          "user",
+          async () =>
+            session.sessionId
+              ? await loadSession(session.sessionId)
+              : undefined,
+        );
+      } catch {
+        return;
       }
-      if (typeof original.id !== "number" || original.id < 0) return;
+      if (!original) return;
       const parentId = original.parentMessageId ?? null;
       sendMessage(
         trimmed,
