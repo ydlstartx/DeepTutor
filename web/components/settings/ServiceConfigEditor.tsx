@@ -597,7 +597,13 @@ export function ServiceConfigEditor({ service }: { service: ServiceName }) {
                           detection={activeLlmDetection}
                           onApply={applyDetectedContextWindow}
                         />
-                        {reasoningOptions.length > 0 && (
+                        {/* Server-advertised effort options
+                            (ProviderSpec.reasoning_effort_options via the
+                            settings API) take precedence; the local table
+                            below only fills in for providers the server does
+                            not advertise — both selectors must never render
+                            at once. */}
+                        {!effortChoices && reasoningOptions.length > 0 && (
                           <div>
                             <div className="mb-1.5 text-[12px] text-[var(--muted-foreground)]">
                               {t("Reasoning effort")}
