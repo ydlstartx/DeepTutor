@@ -1216,6 +1216,7 @@ class LightRagConfigUpdate(BaseModel):
 
     top_k: int | None = None
     response_type: str | None = None
+    vector_storage: str | None = None
 
 
 @router.get("/rag-pipelines/lightrag/config")

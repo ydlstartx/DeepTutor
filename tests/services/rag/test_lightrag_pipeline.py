@@ -149,12 +149,14 @@ class _FakeEmbeddingFunc:
         max_token_size=8192,
         send_dimensions=None,
         model_name=None,
+        supports_asymmetric=False,
     ) -> None:
         self.embedding_dim = embedding_dim
         self.func = func
         self.max_token_size = max_token_size
         self.send_dimensions = send_dimensions
         self.model_name = model_name
+        self.supports_asymmetric = supports_asymmetric
 
 
 def _install_fake_lightrag(monkeypatch) -> None:
@@ -313,10 +315,13 @@ def test_build_rag_skips_raganything_parser_install_check(monkeypatch) -> None:
             self.parser = "mineru"  # RAG-Anything's default
 
     class _FakeRagAnything:
-        def __init__(self, *, config, llm_model_func, vision_model_func, embedding_func) -> None:
+        def __init__(
+            self, *, config, llm_model_func, vision_model_func, embedding_func, lightrag_kwargs=None
+        ) -> None:
             # Mirror the real constructor: the install check starts unsatisfied.
             self._parser_installation_checked = False
             captured["config"] = config
+            captured["lightrag_kwargs"] = lightrag_kwargs
 
     fake_module = types.ModuleType("raganything")
     fake_module.RAGAnything = _FakeRagAnything
@@ -390,7 +395,7 @@ def _force_available(monkeypatch, available: bool = True) -> None:
 def _stub_engine(monkeypatch, answer: str = "ANSWER") -> list[dict]:
     """Stub the engine so insert writes a readiness marker and query echoes."""
     inserts: list[dict] = []
-    monkeypatch.setattr(engine, "build_rag", lambda wd: _FakeRag(wd))
+    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a: _FakeRag(wd))
 
     async def fake_insert(rag, content_list, *, file_name, doc_id):
         inserts.append({"file": file_name, "doc_id": doc_id, "blocks": content_list})
@@ -488,7 +493,7 @@ def test_initialize_no_content_returns_false(tmp_path, monkeypatch) -> None:
 
 def test_initialize_fails_when_lightrag_records_doc_failure(tmp_path, monkeypatch) -> None:
     _force_available(monkeypatch, True)
-    monkeypatch.setattr(engine, "build_rag", lambda wd: _FakeRag(wd))
+    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a: _FakeRag(wd))
 
     async def fake_insert(rag, content_list, *, file_name, doc_id):
         (rag.working_dir / "kv_store_doc_status.json").write_text(
@@ -584,3 +589,212 @@ def test_global_provider_mode_used_when_kb_has_none(tmp_path, monkeypatch) -> No
     )
     res = asyncio.run(pipe.search("q", "kb"))
     assert res["mode"] == "naive"
+
+
+# --------------------------------------------------------------------------- #
+# vector-storage engine selection (nano / faiss)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_raganything_module(captured: dict) -> types.ModuleType:
+    class _FakeConfig:
+        def __init__(self, *, working_dir) -> None:
+            self.working_dir = working_dir
+            self.parser = "mineru"
+
+    class _FakeRagAnything:
+        def __init__(
+            self, *, config, llm_model_func, vision_model_func, embedding_func, lightrag_kwargs=None
+        ) -> None:
+            self._parser_installation_checked = True
+            captured["lightrag_kwargs"] = lightrag_kwargs
+
+    fake_module = types.ModuleType("raganything")
+    fake_module.RAGAnything = _FakeRagAnything
+    fake_module.RAGAnythingConfig = _FakeConfig
+    return fake_module
+
+
+def _stub_raganything(monkeypatch) -> dict:
+    captured: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, "raganything", _fake_raganything_module(captured))
+    monkeypatch.setattr(engine, "build_llm_model_func", lambda: "llm")
+    monkeypatch.setattr(engine, "build_vision_model_func", lambda: "vision")
+    monkeypatch.setattr(engine, "build_embedding_func", lambda: "embed")
+    return captured
+
+
+def test_build_rag_forwards_faiss_vector_storage(monkeypatch) -> None:
+    captured = _stub_raganything(monkeypatch)
+    # The lean-storage install is a separate concern (covered by
+    # test_lean_faiss_*) and requires the real lightrag/faiss packages.
+    monkeypatch.setattr(engine, "_install_lean_faiss_storage", lambda: None)
+    engine.build_rag(Path("/tmp/kb-wd"), "faiss")  # noqa: S108
+    assert captured["lightrag_kwargs"] == {"vector_storage": "FaissVectorDBStorage"}
+
+
+def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
+    captured = _stub_raganything(monkeypatch)
+    engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108  # default == nano
+    assert captured["lightrag_kwargs"] == {}
+
+    engine.build_rag(Path("/tmp/kb-wd"), "nano")  # noqa: S108
+    assert captured["lightrag_kwargs"] == {}
+
+    # Unknown ids fall back to nano instead of breaking indexing.
+    engine.build_rag(Path("/tmp/kb-wd"), "qdrant-whatever")  # noqa: S108
+    assert captured["lightrag_kwargs"] == {}
+
+
+def test_write_meta_records_and_pins_vector_storage(tmp_path) -> None:
+    root = tmp_path / "version-1"
+    root.mkdir()
+    storage.write_meta(root, "faiss")
+    meta = json.loads((root / storage.META_FILENAME).read_text())
+    assert meta["vector_storage"] == "faiss"
+    # A pinned version must reopen with its own engine regardless of defaults.
+    assert storage.read_vector_storage(root) == "faiss"
+
+
+def test_read_vector_storage_legacy_version_defaults_nano(tmp_path, monkeypatch) -> None:
+    # Pre-feature version: has LightRAG output but meta.json lacks the field.
+    def _boom():
+        raise AssertionError("global settings must not be consulted for legacy versions")
+
+    monkeypatch.setattr("deeptutor.services.config.load_lightrag_settings", _boom)
+    root = tmp_path / "version-1"
+    root.mkdir()
+    (root / "vdb_chunks.json").write_text(json.dumps({"vectors": [[1.0]]}), encoding="utf-8")
+    (root / "kv_store_doc_status.json").write_text(
+        json.dumps({"d1": {"status": "processed", "file_path": "a.pdf", "chunks_list": ["c1"]}}),
+        encoding="utf-8",
+    )
+    (root / storage.META_FILENAME).write_text(json.dumps({"version": "version-1"}), encoding="utf-8")
+    assert storage.read_vector_storage(root) == "nano"
+
+
+def test_read_vector_storage_fresh_dir_uses_global_setting(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "deeptutor.services.config.load_lightrag_settings",
+        lambda: {"vector_storage": "faiss"},
+    )
+    assert storage.read_vector_storage(tmp_path / "version-1") == "faiss"
+    assert storage.read_vector_storage(None) == "faiss"
+
+
+# --------------------------------------------------------------------------- #
+# RAG instance caching
+# --------------------------------------------------------------------------- #
+
+
+def _stub_engine_counting(monkeypatch) -> list:
+    """Like _stub_engine but records every build_rag call."""
+    builds: list = []
+
+    def fake_build(wd, *_a):
+        builds.append(wd)
+        return _FakeRag(wd)
+
+    monkeypatch.setattr(engine, "build_rag", fake_build)
+
+    async def fake_insert(rag, content_list, *, file_name, doc_id):
+        (rag.working_dir / "vdb_chunks.json").write_text(json.dumps({"vectors": [[1.0]]}))
+        (rag.working_dir / "kv_store_doc_status.json").write_text(
+            json.dumps(
+                {doc_id: {"status": "processed", "file_path": file_name, "chunks_list": ["c1"]}}
+            )
+        )
+
+    async def fake_query(rag, question, mode):
+        return "A"
+
+    monkeypatch.setattr(engine, "insert", fake_insert)
+    monkeypatch.setattr(engine, "query", fake_query)
+    return builds
+
+
+def test_rag_instance_built_once_per_version(tmp_path, monkeypatch) -> None:
+    """LightRAG reloads every store on construction — a fresh instance per
+    query is what made large-KB queries block the loop (or OOM with nano)."""
+    _force_available(monkeypatch, True)
+    builds = _stub_engine_counting(monkeypatch)
+    _stub_parse(monkeypatch)
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF")
+    asyncio.run(pipe.initialize("kb", [str(pdf)]))
+    asyncio.run(pipe.search("q1", "kb"))
+    asyncio.run(pipe.search("q2", "kb"))
+    assert len(builds) == 1
+
+
+def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> None:
+    """Switching the embedding model mid-process must not reuse a cached
+    instance that still embeds with the old model."""
+    _force_available(monkeypatch, True)
+    builds = _stub_engine_counting(monkeypatch)
+    _stub_parse(monkeypatch)
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF")
+    asyncio.run(pipe.initialize("kb", [str(pdf)]))
+    asyncio.run(pipe.search("q1", "kb"))
+    assert len(builds) == 1
+
+    class _Sig:
+        model = "other-embed"
+        dim = 1024
+
+    monkeypatch.setattr(
+        "deeptutor.services.rag.embedding_signature.signature_from_embedding_config",
+        lambda: _Sig(),
+    )
+    asyncio.run(pipe.search("q2", "kb"))
+    assert len(builds) == 2
+
+
+def test_lean_faiss_load_skips_vector_reification(tmp_path, monkeypatch) -> None:
+    """Upstream FaissVectorDBStorage reifies every vector as a Python float
+    list on load (~80 KB per 2560-dim record, held forever). The lean subclass
+    must skip that while keeping on-demand reconstruction working."""
+    pytest.importorskip("faiss")
+    pytest.importorskip("lightrag")
+    import faiss
+    import numpy as np
+
+    engine._install_lean_faiss_storage()
+    from lightrag.kg.faiss_impl import FaissVectorDBStorage
+
+    dim = 8
+    vecs = np.random.rand(3, dim).astype(np.float32)
+    faiss.normalize_L2(vecs)
+    index = faiss.IndexFlatIP(dim)
+    index.add(vecs)
+    faiss.write_index(index, str(tmp_path / "faiss_index_chunks.index"))
+    (tmp_path / "faiss_index_chunks.index.meta.json").write_text(
+        json.dumps(
+            {
+                str(i): {"__id__": f"chunk-{i}", "__created_at__": 1, "content": f"doc{i}"}
+                for i in range(3)
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Emb:
+        embedding_dim = dim
+
+    global_config = {
+        "working_dir": str(tmp_path),
+        "embedding_batch_num": 4,
+        "vector_db_storage_cls_kwargs": {"cosine_better_than_threshold": 0.2},
+    }
+    store = FaissVectorDBStorage(
+        namespace="chunks", workspace="", global_config=global_config, embedding_func=_Emb()
+    )
+    assert store._index.ntotal == 3
+    assert all("__vector__" not in meta for meta in store._id_to_meta.values())
+
+    out = asyncio.run(store.get_vectors_by_ids(["chunk-1", "missing"]))
+    assert list(out) == ["chunk-1"]
+    assert np.allclose(out["chunk-1"], vecs[1], atol=1e-5)

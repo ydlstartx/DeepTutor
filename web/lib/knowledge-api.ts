@@ -65,6 +65,8 @@ export interface LightRagConfig {
   version: number;
   top_k: number;
   response_type: string;
+  /** Vector-storage engine for NEW index versions ("nano" | "faiss"). */
+  vector_storage: string;
 }
 
 export interface PreflightCheck {

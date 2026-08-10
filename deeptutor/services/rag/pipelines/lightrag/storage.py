@@ -142,14 +142,47 @@ def _read_doc_status(root_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def write_meta(root_dir: Path) -> None:
+def read_vector_storage(root_dir: Path | None) -> str:
+    """Resolve which vector-storage engine a version dir must be opened with.
+
+    Three cases:
+    * meta.json carries ``vector_storage`` → the engine the version was built
+      with (pinned; the global default must never retroactively switch an
+      existing index, which would read empty stores).
+    * The dir exists and has LightRAG output but no such field → a pre-feature
+      version → ``"nano"`` (the historical default).
+    * No meta/no output (fresh build) → the current global setting.
+    """
+    if root_dir is not None:
+        meta_path = Path(root_dir) / META_FILENAME
+        if meta_path.exists():
+            try:
+                with open(meta_path, encoding="utf-8") as handle:
+                    meta = json.load(handle)
+                value = str(meta.get("vector_storage") or "").strip().lower()
+                if value:
+                    return value
+            except Exception as exc:
+                logger.warning("Failed to read %s: %s", meta_path, exc)
+        if has_output(root_dir):
+            return "nano"
+    from deeptutor.services.config import load_lightrag_settings
+
+    try:
+        return str(load_lightrag_settings().get("vector_storage") or "nano")
+    except Exception:
+        return "nano"
+
+
+def write_meta(root_dir: Path, vector_storage: str = "nano") -> None:
     """Write a flat-layout ``meta.json`` so the version lists as ready.
 
     Mirrors ``index_versioning.write_version_meta`` but carries a synthetic
     ``lightrag`` signature instead of an embedding hash. The embedding identity
     is stamped alongside so an externally-linked index can be checked for
     embedding compatibility at connect time (LightRAG otherwise fails retrieval
-    silently on a dimension mismatch).
+    silently on a dimension mismatch). ``vector_storage`` pins the engine this
+    version was built with; readers fall back to "nano" when it is absent.
     """
     from deeptutor.services.rag.embedding_signature import embedding_meta_fields
 
@@ -160,6 +193,7 @@ def write_meta(root_dir: Path) -> None:
         "provider": PROVIDER,
         "layout": "flat",
         "created_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+        "vector_storage": vector_storage,
         **embedding_meta_fields(),
     }
     atomic_write_json(target / META_FILENAME, payload)
@@ -170,7 +204,8 @@ __all__ = [
     "PROVIDER",
     "document_error",
     "failure_summary",
-    "working_dir",
     "has_output",
+    "read_vector_storage",
+    "working_dir",
     "write_meta",
 ]

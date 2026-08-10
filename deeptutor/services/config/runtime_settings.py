@@ -249,6 +249,7 @@ DEFAULT_LIGHTRAG_SETTINGS: dict[str, Any] = {
     "version": 1,
     "top_k": 60,
     "response_type": "Multiple Paragraphs",
+    "vector_storage": "nano",
 }
 
 IGNORE_PROCESS_OVERRIDES_ENV = "DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES"
@@ -761,10 +762,17 @@ class RuntimeSettingsService:
         }
 
     def _normalize_lightrag(self, settings: dict[str, Any]) -> dict[str, Any]:
+        # Vector-storage engine for NEW index versions; existing versions keep
+        # the engine pinned in their meta.json. Unknown values fall back to
+        # nano (zero-dependency default) rather than breaking indexing.
+        vector_storage = str(settings.get("vector_storage") or "").strip().lower()
+        if vector_storage not in ("nano", "faiss"):
+            vector_storage = "nano"
         return {
             "version": 1,
             "top_k": _coerce_clamped_int(settings.get("top_k"), 60, 1, 200),
             "response_type": self._normalize_response_type(settings.get("response_type")),
+            "vector_storage": vector_storage,
         }
 
     def _normalize_document_parsing(self, settings: dict[str, Any]) -> dict[str, Any]:

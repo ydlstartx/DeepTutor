@@ -32,6 +32,7 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
     defaults = svc.load_lightrag()
     assert defaults["top_k"] == 60
     assert defaults["response_type"] == "Multiple Paragraphs"
+    assert defaults["vector_storage"] == "nano"
 
     saved = svc.save_lightrag({"top_k": 9999})
     assert saved["top_k"] == 200  # clamped to max
@@ -39,6 +40,15 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
 
     floored = svc.save_lightrag({"top_k": 0})
     assert floored["top_k"] == 1  # clamped to min
+
+
+def test_lightrag_vector_storage_normalization(tmp_path: Path) -> None:
+    svc = RuntimeSettingsService(tmp_path, process_env={})
+    assert svc.save_lightrag({"vector_storage": "faiss"})["vector_storage"] == "faiss"
+    assert svc.save_lightrag({"vector_storage": " Faiss "})["vector_storage"] == "faiss"
+    # Unknown / empty values never break indexing — they fall back to nano.
+    assert svc.save_lightrag({"vector_storage": "qdrant"})["vector_storage"] == "nano"
+    assert svc.save_lightrag({"vector_storage": ""})["vector_storage"] == "nano"
 
 
 def test_response_type_capped(tmp_path: Path) -> None:

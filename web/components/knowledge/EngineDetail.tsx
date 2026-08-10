@@ -877,6 +877,7 @@ function LightRagForm({
       const next = await updateLightRagConfig({
         top_k: form.top_k,
         response_type: form.response_type,
+        vector_storage: form.vector_storage,
       });
       setLoaded(next);
       setForm(next);
@@ -902,9 +903,45 @@ function LightRagForm({
           value={form.response_type}
           onChange={(v) => patch({ response_type: v })}
         />
+        <VectorStorageSelect
+          value={form.vector_storage || "nano"}
+          onChange={(v) => patch({ vector_storage: v })}
+        />
       </div>
       <SaveButton dirty={dirty} saving={saving} onSave={() => void save()} />
     </div>
+  );
+}
+
+function VectorStorageSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const { t } = useTranslation();
+  const known = value === "nano" || value === "faiss";
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-[12px] font-medium text-[var(--foreground)]">
+        {t("Vector storage engine")}
+      </span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full cursor-pointer rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-[13px] text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/25"
+      >
+        <option value="nano">{t("Nano VectorDB (default)")}</option>
+        <option value="faiss">{t("Faiss (low memory, recommended)")}</option>
+        {!known && <option value={value}>{value}</option>}
+      </select>
+      <span className="text-[11px] leading-snug text-[var(--muted-foreground)]">
+        {t(
+          "Applies to newly built or rebuilt indexes; existing indexes keep the engine they were built with.",
+        )}
+      </span>
+    </label>
   );
 }
 

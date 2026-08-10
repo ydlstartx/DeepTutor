@@ -10,6 +10,7 @@ every *required* (non-optional) check passes.
 
 from __future__ import annotations
 
+import importlib.util
 from typing import Any
 
 from .factory import (
@@ -173,6 +174,15 @@ def _lightrag_preflight() -> dict:
                 "Active chat model supports vision."
                 if vision_ok
                 else "Active chat model has no vision — multimodal documents fall back to text.",
+                optional=True,
+            ),
+            _check(
+                "faiss",
+                "Faiss vector storage available",
+                importlib.util.find_spec("faiss") is not None,
+                "Installed."
+                if importlib.util.find_spec("faiss") is not None
+                else "pip install faiss-cpu — only needed for the 'faiss' vector storage engine; 'nano' works without it.",
                 optional=True,
             ),
         ]

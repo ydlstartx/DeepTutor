@@ -16,6 +16,7 @@ message when it is not installed instead of an opaque ``ImportError``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 import shutil
@@ -43,8 +44,49 @@ class LightRagPipeline:
     def __init__(self, kb_base_dir: Optional[str] = None, **_: Any) -> None:
         self.logger = logging.getLogger(__name__)
         self.kb_base_dir = kb_base_dir or DEFAULT_KB_BASE_DIR
+        # One RAG-Anything instance per on-disk version. Building one reloads
+        # every LightRAG store (graph + vector index + KV JSONs); doing that on
+        # EVERY query blocked the event loop for minutes on large KBs and, with
+        # nano-vectordb, spiked memory until the OS killed the process.
+        # LightRAG storages are built for concurrent in-process use and reload
+        # on cross-process update flags, so reuse is safe.
+        self._rag_cache: dict[tuple[str, str, str], Any] = {}
+        self._rag_cache_lock = asyncio.Lock()
 
     # ----- helpers --------------------------------------------------------
+
+    async def _get_rag(self, root_dir: Path) -> Any:
+        """Return the cached RAG instance for ``root_dir``, building it once.
+
+        Cache key: version dir + vector-storage engine + active embedding
+        identity — switching the embedding model mid-process must not reuse an
+        instance that still embeds with the old model.
+        """
+        from deeptutor.services.rag.embedding_signature import (
+            signature_from_embedding_config,
+        )
+
+        engine_id = storage.read_vector_storage(root_dir)
+        signature = signature_from_embedding_config()
+        sig_key = f"{getattr(signature, 'model', '')}:{getattr(signature, 'dim', '')}"
+        key = (str(Path(root_dir).resolve()), engine_id, sig_key)
+        async with self._rag_cache_lock:
+            rag = self._rag_cache.get(key)
+            if rag is None:
+                rag = engine.build_rag(storage.working_dir(root_dir), engine_id)
+                self._rag_cache[key] = rag
+            # Ready under the same lock: RAG-Anything's init is not
+            # concurrency-guarded, so two first queries racing ensure_ready
+            # would double-load every store.
+            await engine.ensure_ready(rag)
+            return rag
+
+    def _drop_rag(self, root_dir: Path) -> None:
+        """Evict cached instances for ``root_dir`` (failed/partial builds)."""
+        prefix = str(Path(root_dir).resolve())
+        doomed = [key for key in self._rag_cache if key[0] == prefix]
+        for key in doomed:
+            self._rag_cache.pop(key, None)
 
     def _ensure_available(self) -> None:
         if not lr_config.is_lightrag_available():
@@ -120,10 +162,11 @@ class LightRagPipeline:
             "Initializing KB '%s' with %d file(s) using LightRAG", kb_name, len(file_paths)
         )
         try:
-            rag = engine.build_rag(storage.working_dir(root_dir))
+            rag = await self._get_rag(root_dir)
             count = await self._ingest(rag, file_paths)
             if count == 0:
                 self.logger.error("LightRAG: no extractable documents for '%s'", kb_name)
+                self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
                 return False
             if not storage.has_output(root_dir):
@@ -132,14 +175,16 @@ class LightRagPipeline:
                 if details:
                     message = f"{message}: {details}"
                 self.logger.error(message)
+                self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
-            storage.write_meta(root_dir)
+            storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
             self.logger.info("KB '%s' initialized with LightRAG (%d docs)", kb_name, count)
             return True
         except Exception as exc:
             self.logger.error("Failed to initialize LightRAG KB: %s", exc)
             self.logger.error(traceback.format_exc())
+            self._drop_rag(root_dir)
             self._cleanup_failed_version_dir(root_dir)
             raise
 
@@ -157,7 +202,7 @@ class LightRagPipeline:
             is_update,
         )
         try:
-            rag = engine.build_rag(storage.working_dir(root_dir))
+            rag = await self._get_rag(root_dir)
             count = await self._ingest(rag, file_paths)
             if count == 0:
                 self.logger.warning("LightRAG: no extractable documents to add for '%s'", kb_name)
@@ -169,15 +214,17 @@ class LightRagPipeline:
                     message = f"{message}: {details}"
                 self.logger.error(message)
                 if not is_update:
+                    self._drop_rag(root_dir)
                     self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
-            storage.write_meta(root_dir)
+            storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
             self.logger.info("Added %d doc(s) to LightRAG KB '%s'", count, kb_name)
             return True
         except Exception as exc:
             self.logger.error("Failed to add documents to LightRAG KB: %s", exc)
             self.logger.error(traceback.format_exc())
             if not is_update:
+                self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
             raise
 
@@ -202,7 +249,7 @@ class LightRagPipeline:
         mode = self._resolve_mode(kb_name, kwargs)
         try:
             self._ensure_available()
-            rag = engine.build_rag(storage.working_dir(root_dir))
+            rag = await self._get_rag(root_dir)
             answer = await engine.query(rag, query, mode)
         except lr_config.LightRagNotAvailableError as exc:
             return self._error_result(query, exc, error_type="not_configured")
