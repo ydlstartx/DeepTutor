@@ -10,10 +10,13 @@ index/search orchestration without the heavy deps.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import json
 from pathlib import Path
 import sys
+import threading
+import time
 import types
 
 import pytest
@@ -28,6 +31,7 @@ from deeptutor.services.rag.index_versioning import resolve_storage_dir_for_read
 from deeptutor.services.rag.pipelines.lightrag import config as lr_config
 from deeptutor.services.rag.pipelines.lightrag import engine, storage
 from deeptutor.services.rag.pipelines.lightrag.pipeline import LightRagPipeline
+from deeptutor.services.rag.pipelines.lightrag.worker import run_in_worker_loop
 
 # --------------------------------------------------------------------------- #
 # factory routing + config
@@ -159,6 +163,15 @@ class _FakeEmbeddingFunc:
         self.supports_asymmetric = supports_asymmetric
 
 
+class _RecordingBridge:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, factory):
+        self.calls += 1
+        return await factory()
+
+
 def _install_fake_lightrag(monkeypatch) -> None:
     fake_lightrag = types.ModuleType("lightrag")
     fake_utils = types.ModuleType("lightrag.utils")
@@ -193,12 +206,14 @@ def test_embedding_func_returns_numpy_array(monkeypatch) -> None:
     monkeypatch.setattr("deeptutor.services.embedding.get_embedding_config", lambda: _Config())
     monkeypatch.setattr("deeptutor.services.embedding.get_embedding_client", lambda: _Client())
 
-    embedding = lr_config.build_embedding_func()
+    bridge = _RecordingBridge()
+    embedding = lr_config.build_embedding_func(io_bridge=bridge)
     vectors = asyncio.run(embedding.func(["a", "b"]))
     assert embedding.embedding_dim == 3
     assert embedding.max_token_size == 99
     assert vectors.shape == (2, 3)
     assert hasattr(vectors, "size")
+    assert bridge.calls == 1
 
 
 def test_embedding_func_maps_lightrag_query_and_document_context(monkeypatch) -> None:
@@ -247,7 +262,8 @@ def test_lightrag_llm_adapter_preserves_messages_and_drops_extra_kwargs(
 
     monkeypatch.setattr("deeptutor.services.llm.get_llm_client", lambda: _Client())
 
-    func = lr_config.build_llm_model_func()
+    bridge = _RecordingBridge()
+    func = lr_config.build_llm_model_func(io_bridge=bridge)
     result = asyncio.run(
         func(
             "",
@@ -267,6 +283,7 @@ def test_lightrag_llm_adapter_preserves_messages_and_drops_extra_kwargs(
     assert "response_format" not in captured
     assert "hashing_kv" not in captured
     assert "keyword_extraction" not in captured
+    assert bridge.calls == 1
 
 
 def test_lightrag_vision_adapter_preserves_messages(monkeypatch) -> None:
@@ -283,7 +300,8 @@ def test_lightrag_vision_adapter_preserves_messages(monkeypatch) -> None:
 
     monkeypatch.setattr("deeptutor.services.llm.get_llm_client", lambda: _Client())
 
-    func = lr_config.build_vision_model_func()
+    bridge = _RecordingBridge()
+    func = lr_config.build_vision_model_func(io_bridge=bridge)
     result = asyncio.run(
         func(
             "",
@@ -296,6 +314,7 @@ def test_lightrag_vision_adapter_preserves_messages(monkeypatch) -> None:
     assert captured["prompt"] == ""
     assert captured["image_data"] == "abc123"
     assert captured["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    assert bridge.calls == 1
 
 
 def test_build_rag_skips_raganything_parser_install_check(monkeypatch) -> None:
@@ -395,7 +414,7 @@ def _force_available(monkeypatch, available: bool = True) -> None:
 def _stub_engine(monkeypatch, answer: str = "ANSWER") -> list[dict]:
     """Stub the engine so insert writes a readiness marker and query echoes."""
     inserts: list[dict] = []
-    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a: _FakeRag(wd))
+    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a, **_: _FakeRag(wd))
 
     async def fake_insert(rag, content_list, *, file_name, doc_id):
         inserts.append({"file": file_name, "doc_id": doc_id, "blocks": content_list})
@@ -436,6 +455,185 @@ def _stub_parse(monkeypatch, *, blocks=None, markdown: str = "# md") -> None:
             )
 
     monkeypatch.setattr("deeptutor.services.parsing.get_parse_service", lambda: _Service())
+
+
+def test_indexing_isolated_from_owner_loop_with_context_and_progress(tmp_path, monkeypatch) -> None:
+    """Regression for #761: local JSON work must not stall service I/O."""
+    from deeptutor.services.parsing.types import ParsedDocument
+
+    request_scope = contextvars.ContextVar("lightrag_test_scope", default="missing")
+    captured: dict[str, object] = {"inserts": [], "progress": [], "parse_threads": []}
+
+    class _ParseService:
+        def parse(self, path, **_):
+            captured["parse_threads"].append(threading.get_ident())
+            source = Path(path)
+            return ParsedDocument(
+                markdown="",
+                blocks=[{"type": "text", "text": source.stem, "page_idx": 0}],
+                source_hash=f"hash-{source.stem}",
+                engine="fake",
+            )
+
+    class _BlockingRag:
+        def __init__(self, working_dir, io_bridge) -> None:
+            self.working_dir = Path(working_dir)
+            self.io_bridge = io_bridge
+
+        async def insert_content_list(self, *, content_list, file_path, doc_id):
+            captured["worker_thread"] = threading.get_ident()
+            captured["worker_context"] = request_scope.get()
+            captured["block_started_at"] = time.monotonic()
+            time.sleep(0.15)
+
+            async def fake_network_io():
+                captured["io_thread"] = threading.get_ident()
+                captured["io_context"] = request_scope.get()
+                return "io-ok"
+
+            captured["io_result"] = await self.io_bridge.run(fake_network_io)
+            captured["inserts"].append(
+                {"content_list": content_list, "file_path": file_path, "doc_id": doc_id}
+            )
+            self.working_dir.mkdir(parents=True, exist_ok=True)
+            (self.working_dir / "kv_store_doc_status.json").write_text(
+                json.dumps(
+                    {
+                        doc_id: {
+                            "status": "processed",
+                            "file_path": file_path,
+                            "chunks_list": ["chunk-1"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    def fake_build_rag(working_dir, *_a, io_bridge=None, **_):
+        captured["build_thread"] = threading.get_ident()
+        return _BlockingRag(working_dir, io_bridge)
+
+    monkeypatch.setattr("deeptutor.services.parsing.get_parse_service", lambda: _ParseService())
+    monkeypatch.setattr(engine, "build_rag", fake_build_rag)
+    _force_available(monkeypatch, True)
+
+    docs = [tmp_path / "one.pdf", tmp_path / "two.pdf"]
+    for doc in docs:
+        doc.write_bytes(b"%PDF")
+
+    async def scenario() -> bool:
+        owner_thread = threading.get_ident()
+        captured["owner_thread"] = owner_thread
+        request_scope.set("user-761")
+
+        async def on_progress(current: int, total: int) -> None:
+            await asyncio.sleep(0)
+            captured["progress"].append(
+                (current, total, threading.get_ident(), request_scope.get())
+            )
+
+        async def heartbeat() -> None:
+            while "block_started_at" not in captured:
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+            captured["heartbeat_at"] = time.monotonic()
+
+        pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+        indexing = asyncio.create_task(
+            pipe.initialize("kb", [str(doc) for doc in docs], progress_callback=on_progress)
+        )
+        pulse = asyncio.create_task(heartbeat())
+        result = await indexing
+        await pulse
+        return result
+
+    assert asyncio.run(scenario()) is True
+    owner_thread = captured["owner_thread"]
+    assert captured["build_thread"] != owner_thread
+    assert captured["worker_thread"] != owner_thread
+    assert set(captured["parse_threads"]) == {captured["worker_thread"]}
+    assert captured["io_thread"] == owner_thread
+    assert captured["worker_context"] == "user-761"
+    assert captured["io_context"] == "user-761"
+    assert captured["io_result"] == "io-ok"
+    assert captured["heartbeat_at"] - captured["block_started_at"] < 0.1
+    assert captured["progress"] == [
+        (1, 2, owner_thread, "user-761"),
+        (2, 2, owner_thread, "user-761"),
+    ]
+    assert captured["inserts"] == [
+        {
+            "content_list": [{"type": "text", "text": "one", "page_idx": 0}],
+            "file_path": "one.pdf",
+            "doc_id": "hash-one",
+        },
+        {
+            "content_list": [{"type": "text", "text": "two", "page_idx": 0}],
+            "file_path": "two.pdf",
+            "doc_id": "hash-two",
+        },
+    ]
+
+
+def test_indexing_worker_exception_propagates_unchanged(tmp_path, monkeypatch) -> None:
+    class _IndexingFailure(RuntimeError):
+        pass
+
+    class _FailingRag:
+        def __init__(self, working_dir) -> None:
+            self.working_dir = Path(working_dir)
+
+        async def insert_content_list(self, **_):
+            raise _IndexingFailure("nano-vdb merge failed")
+
+    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a, **_: _FailingRag(wd))
+    _stub_parse(monkeypatch, blocks=[{"type": "text", "text": "x", "page_idx": 0}])
+    _force_available(monkeypatch, True)
+    document = tmp_path / "bad.pdf"
+    document.write_bytes(b"%PDF")
+
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    with pytest.raises(_IndexingFailure, match="nano-vdb merge failed"):
+        asyncio.run(pipe.initialize("kb", [str(document)]))
+
+
+def test_indexing_cancellation_waits_for_worker_loop_to_close() -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+    owner_callback_called = False
+    worker_loop: asyncio.AbstractEventLoop | None = None
+
+    async def scenario() -> None:
+        async def job(io_bridge) -> None:
+            nonlocal owner_callback_called, worker_loop
+            worker_loop = asyncio.get_running_loop()
+            started.set()
+            try:
+                # Stand in for an uninterruptible synchronous NanoVectorDB
+                # flush. Cancellation is observed at the next bridge call.
+                time.sleep(0.05)
+
+                def owner_callback() -> None:
+                    nonlocal owner_callback_called
+                    owner_callback_called = True
+
+                await io_bridge.call(owner_callback)
+            finally:
+                stopped.set()
+
+        task = asyncio.create_task(run_in_worker_loop(job))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert stopped.is_set()
+    assert worker_loop is not None
+    assert worker_loop.is_closed()
+    assert owner_callback_called is False
 
 
 def test_initialize_requires_lightrag(tmp_path, monkeypatch) -> None:
@@ -493,7 +691,7 @@ def test_initialize_no_content_returns_false(tmp_path, monkeypatch) -> None:
 
 def test_initialize_fails_when_lightrag_records_doc_failure(tmp_path, monkeypatch) -> None:
     _force_available(monkeypatch, True)
-    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a: _FakeRag(wd))
+    monkeypatch.setattr(engine, "build_rag", lambda wd, *_a, **_: _FakeRag(wd))
 
     async def fake_insert(rag, content_list, *, file_name, doc_id):
         (rag.working_dir / "kv_store_doc_status.json").write_text(
@@ -691,7 +889,7 @@ def _stub_engine_counting(monkeypatch) -> list:
     """Like _stub_engine but records every build_rag call."""
     builds: list = []
 
-    def fake_build(wd, *_a):
+    def fake_build(wd, *_a, **_):
         builds.append(wd)
         return _FakeRag(wd)
 
@@ -715,7 +913,9 @@ def _stub_engine_counting(monkeypatch) -> list:
 
 def test_rag_instance_built_once_per_version(tmp_path, monkeypatch) -> None:
     """LightRAG reloads every store on construction — a fresh instance per
-    query is what made large-KB queries block the loop (or OOM with nano)."""
+    query is what made large-KB queries block the loop (or OOM with nano).
+    Indexing builds its own worker-confined instance (loop isolation); the
+    searches that follow must share one cached instance."""
     _force_available(monkeypatch, True)
     builds = _stub_engine_counting(monkeypatch)
     _stub_parse(monkeypatch)
@@ -723,9 +923,10 @@ def test_rag_instance_built_once_per_version(tmp_path, monkeypatch) -> None:
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF")
     asyncio.run(pipe.initialize("kb", [str(pdf)]))
+    assert len(builds) == 1  # worker-confined indexing instance
     asyncio.run(pipe.search("q1", "kb"))
     asyncio.run(pipe.search("q2", "kb"))
-    assert len(builds) == 1
+    assert len(builds) == 2  # both searches share one cached instance
 
 
 def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> None:
@@ -739,7 +940,7 @@ def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> 
     pdf.write_bytes(b"%PDF")
     asyncio.run(pipe.initialize("kb", [str(pdf)]))
     asyncio.run(pipe.search("q1", "kb"))
-    assert len(builds) == 1
+    assert len(builds) == 2  # indexing worker + first search
 
     class _Sig:
         model = "other-embed"
@@ -750,7 +951,7 @@ def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> 
         lambda: _Sig(),
     )
     asyncio.run(pipe.search("q2", "kb"))
-    assert len(builds) == 2
+    assert len(builds) == 3
 
 
 def test_lean_faiss_load_skips_vector_reification(tmp_path, monkeypatch) -> None:
