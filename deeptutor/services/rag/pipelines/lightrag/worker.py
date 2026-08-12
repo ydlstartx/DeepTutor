@@ -134,4 +134,97 @@ async def run_in_worker_loop(
         raise
 
 
-__all__ = ["OwnerLoopBridge", "run_in_worker_loop"]
+# --------------------------------------------------------------------------- #
+# Process-wide shared worker loop
+# --------------------------------------------------------------------------- #
+#
+# LightRAG keeps its document-pipeline locks (``pipeline_status:*``) and
+# storage init flags in process-global registries (``kg.shared_storage``).
+# Those locks are plain ``asyncio.Lock`` objects: the first loop that
+# contends one owns it for the lock's lifetime.  A per-call worker loop (see
+# ``run_in_worker_loop``) therefore poisons every LATER LightRAG call — the
+# cached lock is still bound to the loop that already closed, and acquiring
+# it raises "bound to a different event loop".  Routing ALL LightRAG work
+# (indexing and query-side storage loads) through one long-lived loop keeps
+# the locks valid for the process lifetime, and keeps LightRAG's synchronous
+# graph/JSON work — including multi-second cold loads — off the service loop.
+
+_shared_loop: asyncio.AbstractEventLoop | None = None
+_shared_loop_guard = threading.Lock()
+
+
+def _ensure_shared_loop() -> asyncio.AbstractEventLoop:
+    """Start (once) the daemon thread running the shared worker loop."""
+    global _shared_loop
+    with _shared_loop_guard:
+        if _shared_loop is None or _shared_loop.is_closed():
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(
+                target=loop.run_forever, name="lightrag-shared-worker", daemon=True
+            )
+            thread.start()
+            _shared_loop = loop
+        return _shared_loop
+
+
+async def run_in_shared_worker_loop(
+    job: Callable[[OwnerLoopBridge], Awaitable[T]],
+) -> T:
+    """Run one async job on the process-wide LightRAG worker event loop.
+
+    Semantics match ``run_in_worker_loop`` — the caller's context is
+    propagated, DeepTutor-owned network I/O crosses back through the supplied
+    bridge, worker exceptions re-raise in the awaiting task — but the loop
+    survives the call.  Cancellation cancels the job's task on the shared
+    loop (so its ``finally`` blocks release LightRAG locks on the loop that
+    owns them) without ever touching the loop itself.
+    """
+    owner_loop = asyncio.get_running_loop()
+    bridge = OwnerLoopBridge(owner_loop)
+    caller_context = contextvars.copy_context()
+    loop = _ensure_shared_loop()
+
+    future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+    task_box: dict[str, asyncio.Task[Any]] = {}
+
+    def submit() -> None:
+        try:
+            task = loop.create_task(job(bridge), context=caller_context)
+        except Exception as exc:  # pragma: no cover - loop closing race
+            future.set_exception(exc)
+            return
+        task_box["task"] = task
+
+        def propagate(done: asyncio.Task[Any]) -> None:
+            if done.cancelled():
+                future.cancel()
+            elif done.exception() is not None:
+                future.set_exception(done.exception())
+            else:
+                future.set_result(done.result())
+
+        task.add_done_callback(propagate)
+
+    loop.call_soon_threadsafe(submit)
+    try:
+        return await asyncio.wrap_future(future)
+    except asyncio.CancelledError:
+        task = task_box.get("task")
+        if task is not None:
+            loop.call_soon_threadsafe(task.cancel)
+        # Wait for the worker task to finish unwinding — its cleanup must
+        # not be stranded — then let the caller's cancellation stand.
+        waiter = asyncio.wrap_future(future)
+        while not waiter.done():
+            try:
+                await asyncio.shield(waiter)
+            except asyncio.CancelledError:
+                pass
+        try:
+            waiter.result()
+        except BaseException:
+            pass
+        raise
+
+
+__all__ = ["OwnerLoopBridge", "run_in_shared_worker_loop", "run_in_worker_loop"]

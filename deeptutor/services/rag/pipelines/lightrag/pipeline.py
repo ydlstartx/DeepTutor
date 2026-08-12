@@ -33,7 +33,7 @@ from deeptutor.services.rag.kb_paths import resolve_kb_dir
 
 from . import config as lr_config
 from . import engine, storage
-from .worker import OwnerLoopBridge, run_in_worker_loop
+from .worker import OwnerLoopBridge, run_in_shared_worker_loop
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +52,30 @@ class LightRagPipeline:
         # nano-vectordb, spiked memory until the OS killed the process.
         # LightRAG storages are built for concurrent in-process use and reload
         # on cross-process update flags, so reuse is safe.
-        self._rag_cache: dict[tuple[str, str, str], Any] = {}
-        self._rag_cache_lock = asyncio.Lock()
+        # All entries are created and consumed on the shared worker loop (see
+        # ``worker.run_in_shared_worker_loop``), which serializes access — no
+        # lock is needed here — and keeps LightRAG's process-global asyncio
+        # locks bound to a loop that outlives any single request.
+        self._rag_cache: dict[tuple[str, str, str], tuple[Any, asyncio.AbstractEventLoop]] = {}
 
     # ----- helpers --------------------------------------------------------
 
-    async def _get_rag(self, root_dir: Path) -> Any:
+    async def _get_rag(
+        self,
+        root_dir: Path,
+        *,
+        io_bridge: OwnerLoopBridge,
+        owner_loop: asyncio.AbstractEventLoop,
+    ) -> Any:
         """Return the cached RAG instance for ``root_dir``, building it once.
 
-        Cache key: version dir + vector-storage engine + active embedding
-        identity — switching the embedding model mid-process must not reuse an
-        instance that still embeds with the old model.
+        Must run on the shared worker loop. Cache key: version dir +
+        vector-storage engine + active embedding identity — switching the
+        embedding model mid-process must not reuse an instance that still
+        embeds with the old model. Entries are additionally pinned to the
+        owner loop their network bridge targets: a cached bridge pointing at
+        a dead owner loop (e.g. a previous ``asyncio.run``) is useless, so
+        such an entry is rebuilt.
         """
         from deeptutor.services.rag.embedding_signature import (
             signature_from_embedding_config,
@@ -72,23 +85,27 @@ class LightRagPipeline:
         signature = signature_from_embedding_config()
         sig_key = f"{getattr(signature, 'model', '')}:{getattr(signature, 'dim', '')}"
         key = (str(Path(root_dir).resolve()), engine_id, sig_key)
-        async with self._rag_cache_lock:
-            rag = self._rag_cache.get(key)
-            if rag is None:
-                rag = engine.build_rag(storage.working_dir(root_dir), engine_id)
-                self._rag_cache[key] = rag
-            # Ready under the same lock: RAG-Anything's init is not
-            # concurrency-guarded, so two first queries racing ensure_ready
-            # would double-load every store.
-            await engine.ensure_ready(rag)
-            return rag
+        cached = self._rag_cache.get(key)
+        if cached is not None and cached[1] is owner_loop:
+            rag = cached[0]
+        else:
+            rag = engine.build_rag(storage.working_dir(root_dir), engine_id, io_bridge=io_bridge)
+            self._rag_cache[key] = (rag, owner_loop)
+        # Ready before use: RAG-Anything's init is not concurrency-guarded;
+        # the shared loop serializes this against other first uses.
+        await engine.ensure_ready(rag)
+        return rag
 
-    def _drop_rag(self, root_dir: Path) -> None:
+    async def _drop_rag(self, root_dir: Path) -> None:
         """Evict cached instances for ``root_dir`` (failed/partial builds)."""
-        prefix = str(Path(root_dir).resolve())
-        doomed = [key for key in self._rag_cache if key[0] == prefix]
-        for key in doomed:
-            self._rag_cache.pop(key, None)
+
+        async def job(_bridge: OwnerLoopBridge) -> None:
+            prefix = str(Path(root_dir).resolve())
+            doomed = [key for key in self._rag_cache if key[0] == prefix]
+            for key in doomed:
+                self._rag_cache.pop(key, None)
+
+        await run_in_shared_worker_loop(job)
 
     def _ensure_available(self) -> None:
         if not lr_config.is_lightrag_available():
@@ -197,7 +214,7 @@ class LightRagPipeline:
                 progress_callback=progress_callback,
             )
 
-        return await run_in_worker_loop(job)
+        return await run_in_shared_worker_loop(job)
 
     # ----- indexing -------------------------------------------------------
 
@@ -215,7 +232,7 @@ class LightRagPipeline:
             )
             if count == 0:
                 self.logger.error("LightRAG: no extractable documents for '%s'", kb_name)
-                self._drop_rag(root_dir)
+                await self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
                 return False
             if not storage.has_output(root_dir):
@@ -224,7 +241,7 @@ class LightRagPipeline:
                 if details:
                     message = f"{message}: {details}"
                 self.logger.error(message)
-                self._drop_rag(root_dir)
+                await self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
             storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
@@ -236,7 +253,7 @@ class LightRagPipeline:
         except Exception as exc:
             self.logger.error("Failed to initialize LightRAG KB: %s", exc)
             self.logger.error(traceback.format_exc())
-            self._drop_rag(root_dir)
+            await self._drop_rag(root_dir)
             self._cleanup_failed_version_dir(root_dir)
             raise
 
@@ -272,7 +289,7 @@ class LightRagPipeline:
                     message = f"{message}: {details}"
                 self.logger.error(message)
                 if not is_update:
-                    self._drop_rag(root_dir)
+                    await self._drop_rag(root_dir)
                     self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
             storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
@@ -286,7 +303,7 @@ class LightRagPipeline:
             self.logger.error("Failed to add documents to LightRAG KB: %s", exc)
             self.logger.error(traceback.format_exc())
             if not is_update:
-                self._drop_rag(root_dir)
+                await self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
             raise
 
@@ -309,10 +326,15 @@ class LightRagPipeline:
             }
 
         mode = self._resolve_mode(kb_name, kwargs)
+        owner_loop = asyncio.get_running_loop()
         try:
             self._ensure_available()
-            rag = await self._get_rag(root_dir)
-            answer = await engine.query(rag, query, mode)
+
+            async def job(io_bridge: OwnerLoopBridge) -> str:
+                rag = await self._get_rag(root_dir, io_bridge=io_bridge, owner_loop=owner_loop)
+                return await engine.query(rag, query, mode)
+
+            answer = await run_in_shared_worker_loop(job)
         except lr_config.LightRagNotAvailableError as exc:
             return self._error_result(query, exc, error_type="not_configured")
         except Exception as exc:

@@ -31,7 +31,10 @@ from deeptutor.services.rag.index_versioning import resolve_storage_dir_for_read
 from deeptutor.services.rag.pipelines.lightrag import config as lr_config
 from deeptutor.services.rag.pipelines.lightrag import engine, storage
 from deeptutor.services.rag.pipelines.lightrag.pipeline import LightRagPipeline
-from deeptutor.services.rag.pipelines.lightrag.worker import run_in_worker_loop
+from deeptutor.services.rag.pipelines.lightrag.worker import (
+    run_in_shared_worker_loop,
+    run_in_worker_loop,
+)
 
 # --------------------------------------------------------------------------- #
 # factory routing + config
@@ -636,6 +639,61 @@ def test_indexing_cancellation_waits_for_worker_loop_to_close() -> None:
     assert owner_callback_called is False
 
 
+def test_shared_worker_loop_survives_cancellation() -> None:
+    """Cancelling one job must leave the persistent loop usable — LightRAG's
+    process-global locks stay bound to it for the process lifetime."""
+
+    async def scenario() -> None:
+        started = threading.Event()
+
+        async def slow_job(_bridge) -> None:
+            started.set()
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(run_in_shared_worker_loop(slow_job))
+        while not started.is_set():
+            await asyncio.sleep(0.001)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        async def ping(_bridge) -> str:
+            return "alive"
+
+        assert await run_in_shared_worker_loop(ping) == "alive"
+
+    asyncio.run(scenario())
+
+
+def test_indexing_jobs_share_one_persistent_worker_loop(tmp_path, monkeypatch) -> None:
+    """Regression: LightRAG keeps asyncio locks in process-global registries
+    (``pipeline_status:*``). A fresh worker loop per indexing run leaves those
+    locks bound to a dead loop, so every later run fails with "bound to a
+    different event loop". All indexing jobs must ride one persistent loop,
+    even across separate requests (separate owner loops)."""
+    _force_available(monkeypatch, True)
+    _stub_engine_counting(monkeypatch)  # provides the insert/query fakes
+    build_threads: list[int] = []
+
+    def fake_build(wd, *_a, **_):
+        build_threads.append(threading.get_ident())
+        return _FakeRag(wd)
+
+    monkeypatch.setattr(engine, "build_rag", fake_build)
+    _stub_parse(monkeypatch)
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    one = tmp_path / "one.pdf"
+    one.write_bytes(b"%PDF")
+    two = tmp_path / "two.pdf"
+    two.write_bytes(b"%PDF")
+
+    asyncio.run(pipe.initialize("kb", [str(one)]))
+    asyncio.run(pipe.add_documents("kb", [str(two)]))
+
+    assert len(build_threads) == 2
+    assert build_threads[0] == build_threads[1]
+
+
 def test_initialize_requires_lightrag(tmp_path, monkeypatch) -> None:
     _force_available(monkeypatch, False)
     pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
@@ -915,18 +973,24 @@ def test_rag_instance_built_once_per_version(tmp_path, monkeypatch) -> None:
     """LightRAG reloads every store on construction — a fresh instance per
     query is what made large-KB queries block the loop (or OOM with nano).
     Indexing builds its own worker-confined instance (loop isolation); the
-    searches that follow must share one cached instance."""
+    searches that follow must share one cached instance. Cached instances
+    are pinned to their owner loop, so the scenario runs on one loop like
+    production's uvicorn loop."""
     _force_available(monkeypatch, True)
     builds = _stub_engine_counting(monkeypatch)
     _stub_parse(monkeypatch)
     pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF")
-    asyncio.run(pipe.initialize("kb", [str(pdf)]))
-    assert len(builds) == 1  # worker-confined indexing instance
-    asyncio.run(pipe.search("q1", "kb"))
-    asyncio.run(pipe.search("q2", "kb"))
-    assert len(builds) == 2  # both searches share one cached instance
+
+    async def scenario() -> None:
+        await pipe.initialize("kb", [str(pdf)])
+        assert len(builds) == 1  # worker-confined indexing instance
+        await pipe.search("q1", "kb")
+        await pipe.search("q2", "kb")
+        assert len(builds) == 2  # both searches share one cached instance
+
+    asyncio.run(scenario())
 
 
 def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> None:
@@ -938,20 +1002,23 @@ def test_embedding_signature_change_rebuilds_instance(tmp_path, monkeypatch) -> 
     pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF")
-    asyncio.run(pipe.initialize("kb", [str(pdf)]))
-    asyncio.run(pipe.search("q1", "kb"))
-    assert len(builds) == 2  # indexing worker + first search
 
     class _Sig:
         model = "other-embed"
         dim = 1024
 
-    monkeypatch.setattr(
-        "deeptutor.services.rag.embedding_signature.signature_from_embedding_config",
-        lambda: _Sig(),
-    )
-    asyncio.run(pipe.search("q2", "kb"))
-    assert len(builds) == 3
+    async def scenario() -> None:
+        await pipe.initialize("kb", [str(pdf)])
+        await pipe.search("q1", "kb")
+        assert len(builds) == 2  # indexing worker + first search
+        monkeypatch.setattr(
+            "deeptutor.services.rag.embedding_signature.signature_from_embedding_config",
+            lambda: _Sig(),
+        )
+        await pipe.search("q2", "kb")
+        assert len(builds) == 3
+
+    asyncio.run(scenario())
 
 
 def test_lean_faiss_load_skips_vector_reification(tmp_path, monkeypatch) -> None:
