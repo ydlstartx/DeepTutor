@@ -925,7 +925,9 @@ def test_read_vector_storage_legacy_version_defaults_nano(tmp_path, monkeypatch)
         json.dumps({"d1": {"status": "processed", "file_path": "a.pdf", "chunks_list": ["c1"]}}),
         encoding="utf-8",
     )
-    (root / storage.META_FILENAME).write_text(json.dumps({"version": "version-1"}), encoding="utf-8")
+    (root / storage.META_FILENAME).write_text(
+        json.dumps({"version": "version-1"}), encoding="utf-8"
+    )
     assert storage.read_vector_storage(root) == "nano"
 
 

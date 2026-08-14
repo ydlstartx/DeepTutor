@@ -114,9 +114,7 @@ def _install_lean_faiss_storage() -> None:
             except Exception as e:
                 if dim_mismatch:
                     raise
-                _lr_logger.error(
-                    f"[{self.workspace}] Failed to load Faiss index or metadata: {e}"
-                )
+                _lr_logger.error(f"[{self.workspace}] Failed to load Faiss index or metadata: {e}")
                 _lr_logger.warning(f"[{self.workspace}] Starting with an empty Faiss index.")
                 self._index = faiss.IndexFlatIP(self._dim)
                 self._id_to_meta = {}
