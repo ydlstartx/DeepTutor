@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 import inspect
 import json
+import math
+import os
 from typing import Any
 
 from loguru import logger
@@ -72,6 +74,16 @@ class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
+    # Wall-clock cap for ONE attempt. SDK-level read timeouts only fire on
+    # byte-level silence, so a proxy that trickles keep-alive bytes can hold
+    # an attempt open indefinitely (observed: 80+ min stall during KB
+    # indexing). The cap bounds the whole attempt; a timeout reads as a
+    # transient error and goes through the normal retry path.
+    # Streaming attempts get a much larger cap — long generations with
+    # continuous token flow are legitimate; mid-stream liveness stays with
+    # the providers' 90s idle watchdog. Override via env for unusual setups.
+    _CHAT_ATTEMPT_TIMEOUT_S = 900.0
+    _STREAM_ATTEMPT_TIMEOUT_S = 3600.0
     _TRANSIENT_ERROR_MARKERS = (
         "429",
         "rate limit",
@@ -112,6 +124,27 @@ class LLMProvider(ABC):
                 return float(value)
             except ValueError:
                 return default
+        return default
+
+    @staticmethod
+    def _attempt_timeout(env_name: str, default: float) -> float:
+        """Attempt wall-clock cap in seconds; env override, <=0 disables.
+
+        Unparsable, NaN and infinite values keep the default — a typo must
+        not silently switch off the safety net (NaN compares False to
+        everything, Infinity never elapses).
+        """
+        raw = os.getenv(env_name)
+        if raw:
+            try:
+                parsed = float(raw)
+            except ValueError:
+                return default
+            if not math.isfinite(parsed):
+                return default
+            if parsed > 0:
+                return parsed
+            return 0.0  # explicit non-positive disables the cap
         return default
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
@@ -283,6 +316,7 @@ class LLMProvider(ABC):
         tool_choice: str | dict[str, Any] | None,
         retry_delays: Sequence[float] | None,
         allow_image_fallback: bool = True,
+        attempt_timeout: float | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         from deeptutor.services.llm.multimodal import (
@@ -294,10 +328,23 @@ class LLMProvider(ABC):
         delays = self._normalize_retry_delays(retry_delays)
         attempt = 0
 
+        async def _invoke(**call_kwargs: Any) -> LLMResponse:
+            """One attempt under the wall-clock cap. EVERY call shape goes
+            through here — initial try, transient retries, and the Stage-2
+            image fallback — so none of them can hang past the cap."""
+            coro = call(**call_kwargs)
+            if attempt_timeout and attempt_timeout > 0:
+                # Bounds the whole attempt, not just socket reads: a proxy
+                # trickling keep-alive bytes defeats per-read timeouts but
+                # cannot defeat this. Cancellation of the caller still
+                # propagates through wait_for untouched.
+                return await asyncio.wait_for(coro, timeout=attempt_timeout)
+            return await coro
+
         while True:
             attempt += 1
             try:
-                response = await call(
+                response = await _invoke(
                     messages=messages,
                     tools=tools,
                     model=model,
@@ -309,6 +356,14 @@ class LLMProvider(ABC):
                 )
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError:
+                response = LLMResponse(
+                    content=(
+                        f"Error calling LLM: attempt timed out after "
+                        f"{attempt_timeout or 0:g}s without completing"
+                    ),
+                    finish_reason="error",
+                )
             except Exception as exc:
                 response = LLMResponse(
                     content=f"Error calling LLM: {exc}",
@@ -328,16 +383,29 @@ class LLMProvider(ABC):
                         "Non-transient LLM error with image content; model is not"
                         " known vision-capable, retrying once without images"
                     )
-                    retry_response = await call(
-                        messages=strip_image_parts(messages),
-                        tools=tools,
-                        model=model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
-                        tool_choice=tool_choice,
-                        **kwargs,
-                    )
+                    try:
+                        retry_response = await _invoke(
+                            messages=strip_image_parts(messages),
+                            tools=tools,
+                            model=model,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            reasoning_effort=reasoning_effort,
+                            tool_choice=tool_choice,
+                            **kwargs,
+                        )
+                    except asyncio.TimeoutError:
+                        # Same normalization as the main attempt: a hung
+                        # fallback returns an error response, not a raw
+                        # exception. Other exceptions keep this path's
+                        # pre-existing propagate-to-caller semantics.
+                        retry_response = LLMResponse(
+                            content=(
+                                f"Error calling LLM: attempt timed out after "
+                                f"{attempt_timeout or 0:g}s without completing"
+                            ),
+                            finish_reason="error",
+                        )
                     if retry_response.finish_reason != "error":
                         strip_image_parts_inplace(messages)
                     return retry_response
@@ -402,6 +470,9 @@ class LLMProvider(ABC):
             tool_choice=tool_choice,
             retry_delays=retry_delays,
             allow_image_fallback=allow_image_fallback,
+            attempt_timeout=self._attempt_timeout(
+                "DEEPTUTOR_LLM_ATTEMPT_TIMEOUT_S", self._CHAT_ATTEMPT_TIMEOUT_S
+            ),
             **kwargs,
         )
 
@@ -448,6 +519,9 @@ class LLMProvider(ABC):
             tool_choice=tool_choice,
             retry_delays=retry_delays,
             allow_image_fallback=allow_image_fallback,
+            attempt_timeout=self._attempt_timeout(
+                "DEEPTUTOR_LLM_STREAM_ATTEMPT_TIMEOUT_S", self._STREAM_ATTEMPT_TIMEOUT_S
+            ),
             on_content_delta=on_content_delta,
             on_reasoning_delta=on_reasoning_delta,
             **kwargs,
