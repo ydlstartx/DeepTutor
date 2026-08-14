@@ -142,9 +142,7 @@ def rename_raw_document(kb_dir: Path, file_path: Path, new_name: str) -> RawDocu
         hashes[new_key] = hashes.pop(old_key)
         _write_metadata(metadata_file, metadata)
 
-    return RawDocumentRename(
-        old_rel_path=old_key, new_rel_path=new_key, was_indexed=was_indexed
-    )
+    return RawDocumentRename(old_rel_path=old_key, new_rel_path=new_key, was_indexed=was_indexed)
 
 
 def remove_raw_document(kb_dir: Path, file_path: Path) -> RawDocumentRemoval:
@@ -382,25 +380,32 @@ async def add_documents(
     allow_duplicates: bool = False,
 ) -> int:
     """Convenience function used by CLI wrappers."""
-    from deeptutor.knowledge.manager import KnowledgeBaseManager
+    from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 
     manager = KnowledgeBaseManager(base_dir=base_dir)
-    try:
-        manager.update_kb_status(
-            name=kb_name,
-            status="processing",
-            progress={
-                "stage": "processing_documents",
-                "message": "Processing uploaded documents...",
-                "percent": 0,
-                "current": 0,
-                "total": max(len(source_files), 1),
-                "file_name": "",
-                "error": None,
-                "timestamp": datetime.now().isoformat(),
-            },
+    # Same atomic claim the API uses: with the backend running, a concurrent
+    # upload/reindex on this KB must fail loudly here instead of two tasks
+    # writing one index. No task id on this path — owner is (pid, boot, None).
+    owner: tuple[int, str, None] = (*get_process_identity()[:2], None)
+    if not manager.claim_kb_task(
+        name=kb_name,
+        status="processing",
+        progress={
+            "stage": "processing_documents",
+            "message": "Processing uploaded documents...",
+            "percent": 0,
+            "current": 0,
+            "total": max(len(source_files), 1),
+            "file_name": "",
+            "error": None,
+            "timestamp": datetime.now().isoformat(),
+        },
+    ):
+        raise RuntimeError(
+            f"Knowledge base '{kb_name}' is already being processed by another task. "
+            "Wait for it to finish before adding documents."
         )
-
+    try:
         adder = DocumentAdder(
             kb_name=kb_name,
             base_dir=base_dir,
@@ -422,6 +427,7 @@ async def add_documents(
                     "error": None,
                     "timestamp": datetime.now().isoformat(),
                 },
+                only_if_task=owner,
             )
             return 0
         result = await adder.process_new_documents(new_files)
@@ -448,6 +454,7 @@ async def add_documents(
                 "index_changed": result.processed_count > 0,
                 "index_action": "upload",
             },
+            only_if_task=owner,
         )
         return result.processed_count
     except Exception as exc:
@@ -464,6 +471,7 @@ async def add_documents(
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
             },
+            only_if_task=owner,
         )
         raise
 

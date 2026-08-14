@@ -228,3 +228,43 @@ class TestPersistence:
         assert fresh_service.get_default_kb() == "primary"
         fresh_service.set_default_kb(None)
         assert fresh_service.get_default_kb() is None
+
+
+class TestConcurrentWrites:
+    def test_service_and_manager_writes_stay_consistent(self, tmp_path: Path) -> None:
+        """The service and KnowledgeBaseManager share one file: writes from
+        both sides interleaved across threads must never tear it or lose the
+        other side's update."""
+        import threading
+
+        from deeptutor.knowledge.manager import KnowledgeBaseManager
+
+        base = tmp_path / "kbs"
+        (base / "alpha").mkdir(parents=True)
+        config_path = base / "kb_config.json"
+        _write_kb_config(config_path, {"knowledge_bases": {"alpha": {"path": "alpha"}}})
+
+        manager = KnowledgeBaseManager(base_dir=str(base))
+        service = KnowledgeBaseConfigService(config_path=config_path)
+
+        def status_writer() -> None:
+            for i in range(10):
+                manager.update_kb_status("alpha", "processing", progress={"task_id": f"t-{i}"})
+
+        def defaults_writer() -> None:
+            for i in range(10):
+                service.set_provider_mode("lightrag", f"mode-{i}")
+
+        threads = [
+            threading.Thread(target=status_writer),
+            threading.Thread(target=defaults_writer),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        on_disk = json.loads(config_path.read_text(encoding="utf-8"))
+        # Both writers' final state visible; nothing torn or lost.
+        assert on_disk["knowledge_bases"]["alpha"]["status"] == "processing"
+        assert on_disk["defaults"]["provider_modes"]["lightrag"].startswith("mode-")

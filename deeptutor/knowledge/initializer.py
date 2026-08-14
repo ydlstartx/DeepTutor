@@ -68,11 +68,10 @@ class KnowledgeBaseInitializer:
                     "total": 0,
                 },
             )
-            manager.config = manager._load_config()
-            manager.config.setdefault("knowledge_bases", {}).setdefault(self.kb_name, {})[
-                "rag_provider"
-            ] = self.rag_provider
-            manager._save_config()
+            with manager.transact() as config:
+                config.setdefault("knowledge_bases", {}).setdefault(self.kb_name, {})[
+                    "rag_provider"
+                ] = self.rag_provider
         except Exception as e:
             logger.warning(f"Failed to register KB to config: {e}")
 
@@ -251,7 +250,7 @@ async def initialize_knowledge_base(
     rag_provider: Optional[str] = None,
 ) -> bool:
     """Convenience initializer used by CLI wrappers."""
-    from deeptutor.knowledge.manager import KnowledgeBaseManager
+    from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 
     manager = KnowledgeBaseManager(base_dir=base_dir)
     initializer = KnowledgeBaseInitializer(
@@ -261,6 +260,28 @@ async def initialize_knowledge_base(
         base_url=base_url,
         rag_provider=rag_provider,
     )
+    # This flow claims the entry without a task id; the terminal writes are
+    # conditional so a newer task that claimed the KB meanwhile is not
+    # clobbered by this run's late completion.
+    owner: tuple[int, str, None] = (*get_process_identity()[:2], None)
+    # Same atomic claim the API uses: indexing an already-busy KB fails
+    # loudly instead of running two indexing tasks over one index.
+    if not manager.claim_kb_task(
+        name=kb_name,
+        status="initializing",
+        progress={
+            "stage": "initializing",
+            "message": "Initializing knowledge base...",
+            "percent": 0,
+            "current": 0,
+            "total": len(source_files),
+            "timestamp": datetime.now().isoformat(),
+        },
+    ):
+        raise RuntimeError(
+            f"Knowledge base '{kb_name}' is already being processed by another task. "
+            "Wait for it to finish before initializing."
+        )
     try:
         initializer.create_directory_structure()
         copied_files = initializer.copy_documents(source_files)
@@ -281,6 +302,7 @@ async def initialize_knowledge_base(
                 "index_changed": True,
                 "index_action": "create",
             },
+            only_if_task=owner,
         )
         return True
     except Exception as exc:
@@ -297,6 +319,7 @@ async def initialize_knowledge_base(
                 "error": str(exc),
                 "timestamp": datetime.now().isoformat(),
             },
+            only_if_task=owner,
         )
         raise
 

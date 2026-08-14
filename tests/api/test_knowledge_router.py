@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import importlib
 import json
 from pathlib import Path
@@ -47,13 +48,32 @@ class _FakeKBManager:
     def _save_config(self) -> None:
         pass
 
+    @contextmanager
+    def transact(self):
+        """Mirror the real manager's transaction shape for router code."""
+        self.config = self._load_config()
+        yield self.config
+        self._save_config()
+
+    def claim_kb_task(self, name: str, status: str, progress: dict | None = None) -> bool:
+        self.update_kb_status(name, status, progress)
+        return True
+
     def list_knowledge_bases(self) -> list[str]:
         return sorted(self.config.get("knowledge_bases", {}).keys())
 
-    def update_kb_status(self, name: str, status: str, progress: dict | None = None) -> None:
+    def update_kb_status(
+        self,
+        name: str,
+        status: str,
+        progress: dict | None = None,
+        *,
+        only_if_task: tuple | None = None,
+    ) -> bool:
         entry = self.config.setdefault("knowledge_bases", {}).setdefault(name, {"path": name})
         entry["status"] = status
         entry["progress"] = progress or {}
+        return True
 
     def get_default(self, *, available_names: list[str] | None = None) -> str | None:
         names = available_names if available_names is not None else self.list_knowledge_bases()
@@ -809,9 +829,7 @@ def test_rename_file_rekeys_hash_and_patches_index(monkeypatch, tmp_path: Path) 
     assert (raw / "renamed.txt").is_file()
     assert not (raw / "demo.txt").exists()
 
-    hashes = json.loads((kb_dir / "metadata.json").read_text(encoding="utf-8"))[
-        "file_hashes"
-    ]
+    hashes = json.loads((kb_dir / "metadata.json").read_text(encoding="utf-8"))["file_hashes"]
     assert hashes == {"renamed.txt": "abc123"}
 
     version_dir = kb_dir / "version-1"
@@ -822,14 +840,12 @@ def test_rename_file_rekeys_hash_and_patches_index(monkeypatch, tmp_path: Path) 
     ref_meta = docstore["docstore/ref_doc_info"]["d1"]["metadata"]
     assert ref_meta["file_name"] == "renamed.txt"
 
-    [row] = (version_dir / "bm25_retriever" / "corpus.jsonl").read_text(
-        encoding="utf-8"
-    ).splitlines()
+    [row] = (
+        (version_dir / "bm25_retriever" / "corpus.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     corpus_row = json.loads(row)
     assert corpus_row["file_name"] == "renamed.txt"
-    assert json.loads(corpus_row["_node_content"])["metadata"]["file_name"] == (
-        "renamed.txt"
-    )
+    assert json.loads(corpus_row["_node_content"])["metadata"]["file_name"] == ("renamed.txt")
 
 
 def test_rename_rejects_extension_change(monkeypatch, tmp_path: Path) -> None:
@@ -1379,3 +1395,61 @@ def test_assert_not_connected_kb_blocks_connected_writes() -> None:
         assert excinfo.value.status_code == 409
     # An ordinary KB is writable — the guard is a no-op.
     guard("kb", {"path": "kb", "status": "ready"})
+
+
+def test_create_rejected_with_409_cleans_task_record(monkeypatch, tmp_path: Path) -> None:
+    """A busy-KB 409 must not leak a 'running' task record (only terminal
+    records are ever cleaned up)."""
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    manager.claim_kb_task = lambda *a, **k: False  # KB owned by a live task
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setattr(knowledge_router_module, "_kb_base_dir", tmp_path / "knowledge_bases")
+
+    task_manager = knowledge_router_module.TaskIDManager.get_instance()
+    running_before = {
+        tid for tid, m in task_manager._task_metadata.items() if m.get("status") == "running"
+    }
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/create",
+            data={"name": "kb-busy", "rag_provider": "llamaindex"},
+            files=_upload_payload(),
+        )
+
+    assert response.status_code == 409
+    running_after = {
+        tid for tid, m in task_manager._task_metadata.items() if m.get("status") == "running"
+    }
+    assert running_after == running_before  # the rejected task was terminated
+
+
+def test_create_dispatch_failure_releases_claim(monkeypatch, tmp_path: Path) -> None:
+    """A failure between claim and background dispatch must flip the KB to
+    error — otherwise it stays live-owned and every retry gets 409."""
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setattr(knowledge_router_module, "KnowledgeBaseInitializer", _FakeInitializer)
+    monkeypatch.setattr(knowledge_router_module, "_kb_base_dir", tmp_path / "knowledge_bases")
+
+    async def _failing_save(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(knowledge_router_module, "_save_uploaded_files_off_loop", _failing_save)
+
+    with TestClient(_build_app()) as client:
+        response = client.post(
+            "/api/v1/knowledge/create",
+            data={"name": "kb-fail", "rag_provider": "llamaindex"},
+            files=_upload_payload(),
+        )
+
+    assert response.status_code == 500
+    entry = manager.config["knowledge_bases"]["kb-fail"]
+    assert entry["status"] == "error"  # not stuck at initializing
+    task_manager = knowledge_router_module.TaskIDManager.get_instance()
+    assert all(
+        m.get("status") != "running"
+        for m in task_manager._task_metadata.values()
+        if m.get("task_key", "").startswith("kb-fail_")
+    )

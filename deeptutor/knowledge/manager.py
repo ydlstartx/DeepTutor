@@ -15,7 +15,10 @@ from pathlib import Path
 import shutil
 import stat
 import sys
+import threading
+import time
 from typing import Any
+import uuid
 
 from deeptutor.knowledge.kb_types import (
     IMA_KB_TYPE,
@@ -27,7 +30,7 @@ from deeptutor.knowledge.kb_types import (
     is_connected_kb,
 )
 from deeptutor.knowledge.manifest import iter_kb_documents
-from deeptutor.services.file_io import atomic_write_json
+from deeptutor.services.file_io import atomic_write_json, exclusive_write_lock
 from deeptutor.services.rag.factory import (
     DEFAULT_PROVIDER,
     IMA_PROVIDER,
@@ -112,6 +115,62 @@ def file_lock_shared(file_handle):
             yield
         finally:
             fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+
+
+_process_identity_cache: tuple[int, str, float] | None = None
+
+
+def get_process_identity() -> tuple[int, str, float]:
+    """(pid, per-boot instance id, process create time) — computed once."""
+    global _process_identity_cache
+    if _process_identity_cache is None:
+        try:
+            import psutil
+
+            proc = psutil.Process()
+            create_time = proc.create_time()
+        except Exception:  # psutil is a soft dependency in some installs
+            create_time = time.time()
+        _process_identity_cache = (os.getpid(), uuid.uuid4().hex, create_time)
+    return _process_identity_cache
+
+
+# Live KB statuses: an indexing task (init/upload/reindex/sync) is running.
+LIVE_STATUSES = frozenset({"initializing", "processing"})
+
+# create_time is a float of seconds; allow for JSON round-trips and clock fuzz.
+_CREATE_TIME_TOLERANCE_S = 1.0
+
+
+def owner_process_alive(entry: dict) -> bool | None:
+    """Liveness of the task owner stamped on a KB entry.
+
+    True = alive (a task is genuinely running), False = gone / pid reused,
+    None = no usable stamp (legacy entry — treated as not-owned-by-a-live
+    task). Uses psutil: ``os.kill(pid, 0)`` would terminate the process on
+    Windows.
+    """
+    pid = entry.get("task_owner_pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        import psutil
+
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        # AccessDenied and friends: cannot prove death — assume alive;
+        # a false skip is far cheaper than clobbering a live build.
+        return True
+    stamped = entry.get("task_owner_started")
+    if isinstance(stamped, (int, float)) and not isinstance(stamped, bool):
+        try:
+            if abs(proc.create_time() - float(stamped)) > _CREATE_TIME_TOLERANCE_S:
+                return False  # same pid, different process — pid was reused
+        except psutil.Error:
+            return True
+    return True
 
 
 def _get_embedding_fingerprint() -> tuple[str, int] | None:
@@ -261,93 +320,118 @@ class KnowledgeBaseManager:
 
     def _load_config(self) -> dict:
         """Load knowledge base configuration from the canonical kb_config.json file."""
-        if self.config_file.exists():
-            try:
+        if not self.config_file.exists():
+            return {"knowledge_bases": {}}
+        try:
+            with open(self.config_file, encoding="utf-8") as f:
+                with file_lock_shared(f):
+                    content = f.read()
+            if not content.strip():
+                # Empty file, return default
+                return {"knowledge_bases": {}}
+            config = json.loads(content)
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Error loading config: {e}")
+            return {"knowledge_bases": {}}
+
+        if not self._normalize_config(config):
+            return config
+        # Persisting the normalization must not resurrect a stale snapshot:
+        # another writer may have saved since the unlocked read above, so
+        # re-read under the write lock and normalize THAT copy instead.
+        try:
+            with exclusive_write_lock(self.config_file):
                 with open(self.config_file, encoding="utf-8") as f:
-                    with file_lock_shared(f):
-                        content = f.read()
-                        if not content.strip():
-                            # Empty file, return default
-                            return {"knowledge_bases": {}}
-                        config = json.loads(content)
+                    fresh = json.load(f)
+                if self._normalize_config(fresh):
+                    atomic_write_json(self.config_file, fresh)
+                return fresh
+        except Exception as save_err:
+            logger.warning(f"Failed to persist normalized KB config: {save_err}")
+            return config
 
-                # Ensure knowledge_bases key exists
-                if "knowledge_bases" not in config:
-                    config["knowledge_bases"] = {}
+    def _normalize_config(self, config: dict) -> bool:
+        """Apply load-time migrations/normalization in place; return whether
+        anything changed (and therefore should be persisted)."""
+        # Ensure knowledge_bases key exists
+        if "knowledge_bases" not in config:
+            config["knowledge_bases"] = {}
 
-                # Migration: remove old "default" field if present
-                if "default" in config:
-                    del config["default"]
-                    # Note: Don't save during load to avoid recursion issues
-                    # The next _save_config() call will persist this change
+        # Migration: remove old "default" field if present
+        if "default" in config:
+            del config["default"]
+            # Note: Don't save during load to avoid recursion issues
+            # The next _save_config() call will persist this change
 
-                # Migration: normalize unknown/removed providers to the default
-                # and mark them for rebuild. Known non-default providers are
-                # first-class engines and must be preserved.
-                knowledge_bases = config.get("knowledge_bases", {})
-                config_changed = False
-                for kb_name, kb_entry in knowledge_bases.items():
-                    if not isinstance(kb_entry, dict):
-                        continue
+        # Migration: normalize unknown/removed providers to the default
+        # and mark them for rebuild. Known non-default providers are
+        # first-class engines and must be preserved.
+        knowledge_bases = config.get("knowledge_bases", {})
+        config_changed = False
+        for kb_name, kb_entry in knowledge_bases.items():
+            if not isinstance(kb_entry, dict):
+                continue
 
-                    # Connected KBs (Obsidian vaults, linked indexes) are
-                    # pointers with no index pipeline — none of the
-                    # provider/embedding normalization below applies. Leave
-                    # their type/external pointer untouched.
-                    if is_connected_kb(kb_entry):
-                        continue
+            # Connected KBs (Obsidian vaults, linked indexes) are
+            # pointers with no index pipeline — none of the
+            # provider/embedding normalization below applies. Leave
+            # their type/external pointer untouched.
+            if is_connected_kb(kb_entry):
+                continue
 
-                    raw_provider = kb_entry.get("rag_provider")
-                    provider = normalize_provider_name(raw_provider)
-                    if kb_entry.get("rag_provider") != provider:
-                        kb_entry["rag_provider"] = provider
-                        config_changed = True
+            raw_provider = kb_entry.get("rag_provider")
+            provider = normalize_provider_name(raw_provider)
+            if kb_entry.get("rag_provider") != provider:
+                kb_entry["rag_provider"] = provider
+                config_changed = True
 
-                    raw_provider_text = str(raw_provider or "").strip().lower()
-                    if raw_provider_text and raw_provider_text not in KNOWN_PROVIDERS:
-                        if not kb_entry.get("needs_reindex", False):
-                            kb_entry["needs_reindex"] = True
-                            config_changed = True
-
-                    kb_dir = self.base_dir / kb_name
-                    legacy_storage = kb_dir / "rag_storage"
-                    has_llamaindex_index = has_ready_provider_index(kb_dir, DEFAULT_PROVIDER)
-                    if (
-                        provider == DEFAULT_PROVIDER
-                        and legacy_storage.exists()
-                        and legacy_storage.is_dir()
-                        and not has_llamaindex_index
-                    ):
-                        if not kb_entry.get("needs_reindex", False):
-                            kb_entry["needs_reindex"] = True
-                            config_changed = True
-                        if kb_entry.get("status") == "ready":
-                            kb_entry["status"] = "needs_reindex"
-                            config_changed = True
-
-                if _reconcile_embedding_flags(knowledge_bases, self.base_dir):
+            raw_provider_text = str(raw_provider or "").strip().lower()
+            if raw_provider_text and raw_provider_text not in KNOWN_PROVIDERS:
+                if not kb_entry.get("needs_reindex", False):
+                    kb_entry["needs_reindex"] = True
                     config_changed = True
 
-                if config_changed:
-                    try:
-                        atomic_write_json(self.config_file, config)
-                    except Exception as save_err:
-                        logger.warning(f"Failed to persist normalized KB config: {save_err}")
+            kb_dir = self.base_dir / kb_name
+            legacy_storage = kb_dir / "rag_storage"
+            try:
+                has_llamaindex_index = has_ready_provider_index(kb_dir, DEFAULT_PROVIDER)
+            except OSError:
+                # Unreadable dir (e.g. mid-deletion with a mangled mode) —
+                # reconciliation is best-effort; leave this KB's flags alone.
+                continue
+            if (
+                provider == DEFAULT_PROVIDER
+                and legacy_storage.exists()
+                and legacy_storage.is_dir()
+                and not has_llamaindex_index
+            ):
+                if not kb_entry.get("needs_reindex", False):
+                    kb_entry["needs_reindex"] = True
+                    config_changed = True
+                if kb_entry.get("status") == "ready":
+                    kb_entry["status"] = "needs_reindex"
+                    config_changed = True
 
-                return config
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Error loading config: {e}")
-                return {"knowledge_bases": {}}
-        return {"knowledge_bases": {}}
+        try:
+            if _reconcile_embedding_flags(knowledge_bases, self.base_dir):
+                config_changed = True
+        except OSError:
+            # Best-effort reconciliation; an unreadable KB dir (mid-deletion)
+            # must not break config loads.
+            pass
+        return config_changed
 
     def _save_config(self):
         """Save knowledge base configuration.
 
         Written via temp-file + ``os.replace`` so concurrent readers only
         ever see the previous or the new file — ``open(..., "w")`` used to
-        truncate the config before the lock was even acquired.
+        truncate the config before the lock was even acquired. The write runs
+        under the cross-process ``.lock`` file (reentrant in-thread), so it
+        serializes against ``update_kb_status``'s read-check-write cycle.
         """
-        atomic_write_json(self.config_file, self.config)
+        with exclusive_write_lock(self.config_file):
+            atomic_write_json(self.config_file, self.config)
 
     def _sync_kb_to_pb(self, name: str, kb_entry: dict) -> None:
         """
@@ -378,17 +462,57 @@ class KnowledgeBaseManager:
         except Exception as exc:
             logger.debug(f"PocketBase KB sync failed for '{name}': {exc}")
 
+    def claim_kb_task(self, name: str, status: str, progress: dict | None = None) -> bool:
+        """Atomically claim a KB for a new indexing task.
+
+        Fails (returns False) when the KB is currently owned by a task whose
+        owner process is still alive — an upload/sync/rebuild genuinely
+        running, possibly in another process. Terminal-state entries and
+        dead-owner zombies may be claimed; the claim stamps this process and
+        task as the owner.
+        """
+        with exclusive_write_lock(self.config_file):
+            self.config = self._load_config()
+            current = self.config.get("knowledge_bases", {}).get(name) or {}
+            if str(current.get("status") or "") in LIVE_STATUSES and owner_process_alive(current):
+                return False
+            written, _ = self._update_kb_status_locked(name, status, progress, None, None)
+            return written
+
+    @contextmanager
+    def transact(self):
+        """One atomic reload → mutate → save cycle on kb_config.json.
+
+        Holds the cross-process write lock for the whole cycle, so mutations
+        always apply to the freshest on-disk state and the save can neither
+        interleave nor be clobbered by another writer. ``_save_config`` alone
+        serializes only the write, not the decision — every read-modify-write
+        of the config belongs in here. Raising inside the block aborts
+        without saving.
+        """
+        with exclusive_write_lock(self.config_file):
+            self.config = self._load_config()
+            yield self.config
+            self._save_config()
+
     def update_kb_status(
         self,
         name: str,
         status: str,
         progress: dict | None = None,
-    ):
+        *,
+        only_if_status_in: tuple[str, ...] | None = None,
+        only_if_task: tuple[int | None, str | None, str | None] | None = None,
+    ) -> bool:
         """
         Update knowledge base status and progress in kb_config.json.
 
         When PocketBase is enabled, the updated entry is also mirrored to the
         PocketBase knowledge_bases collection (best-effort).
+
+        The whole read-modify-write cycle runs under an exclusive cross-process
+        lock (``kb_config.json.lock``), so concurrent updaters — API and CLI
+        processes alike — are fully serialized.
 
         Args:
             name: Knowledge base name
@@ -401,12 +525,66 @@ class KnowledgeBaseManager:
                 - total: Total items
                 - file_name: Current file being processed
                 - error: Error message (if status is "error")
+            only_if_status_in: Compare-and-set guard — the update is applied
+                only when the KB's *persisted* status (re-read under the write
+                lock) is in this set. Returns False when skipped, so a state
+                change from another process is never clobbered.
+            only_if_task: Optional ``(task_owner_pid, task_owner_instance,
+                task_owner_task_id)`` the persisted entry must still match.
+                Combined with ``only_if_status_in`` this distinguishes "still
+                the same interrupted task" from "a new task started after my
+                scan" — both carry a live status, only the former matches.
+
+        Returns:
+            True when the status was written, False when the guard skipped it.
         """
+        with exclusive_write_lock(self.config_file):
+            written, kb_config = self._update_kb_status_locked(
+                name, status, progress, only_if_status_in, only_if_task
+            )
+        if not written:
+            return False
+        self._sync_kb_to_pb(name, kb_config)
+        return True
+
+    def _update_kb_status_locked(
+        self,
+        name: str,
+        status: str,
+        progress: dict | None,
+        only_if_status_in: tuple[str, ...] | None,
+        only_if_task: tuple[int | None, str | None, str | None] | None,
+    ) -> tuple[bool, dict]:
+        """Body of :meth:`update_kb_status`; runs under the write lock."""
         # Reload config to get latest state
         self.config = self._load_config()
 
         if "knowledge_bases" not in self.config:
             self.config["knowledge_bases"] = {}
+
+        if only_if_status_in is not None or only_if_task is not None:
+            current = self.config["knowledge_bases"].get(name) or {}
+            if only_if_status_in is not None and current.get("status") not in only_if_status_in:
+                return False, {}
+            if only_if_task is not None:
+                task_key = (
+                    current.get("task_owner_pid"),
+                    current.get("task_owner_instance"),
+                    current.get("task_owner_task_id"),
+                )
+                if any(value is not None for value in task_key):
+                    # Owned: only the owning task may write.
+                    if task_key != only_if_task:
+                        return False, {}
+                else:
+                    # Unowned (a terminal write cleared ownership): only the
+                    # task that produced that terminal state may follow up —
+                    # an older task's late write must not flip the newer
+                    # terminal state. An entry with no recorded terminal task
+                    # (never completed) accepts the write.
+                    last_task_id = current.get("last_task_id")
+                    if last_task_id is not None and last_task_id != only_if_task[2]:
+                        return False, {}
 
         if name not in self.config["knowledge_bases"]:
             # Auto-register if not exists
@@ -418,6 +596,35 @@ class KnowledgeBaseManager:
         kb_config = self.config["knowledge_bases"][name]
         kb_config["status"] = status
         kb_config["updated_at"] = datetime.now().isoformat()
+        if status in ("initializing", "processing"):
+            # Task ownership: startup recovery uses this to tell a zombie
+            # (owner process gone) apart from a live build in another
+            # process (CLI, sibling uvicorn worker, rolling deploy). The
+            # create time detects PID reuse; the instance id separates
+            # backend boots; the task id separates sequential tasks of one
+            # process. All three anchor the recovery compare-and-set.
+            pid, instance_id, create_time = get_process_identity()
+            kb_config["task_owner_pid"] = pid
+            kb_config["task_owner_instance"] = instance_id
+            kb_config["task_owner_started"] = create_time
+            kb_config["task_owner_task_id"] = (
+                progress.get("task_id") if isinstance(progress, dict) else None
+            )
+        else:
+            # Record who finished before clearing ownership, so a superseded
+            # task's late terminal write is still rejected (see only_if_task).
+            terminal_task = (
+                progress.get("task_id") if isinstance(progress, dict) else None
+            ) or kb_config.get("task_owner_task_id")
+            if terminal_task is not None:
+                kb_config["last_task_id"] = terminal_task
+            for key in (
+                "task_owner_pid",
+                "task_owner_instance",
+                "task_owner_started",
+                "task_owner_task_id",
+            ):
+                kb_config.pop(key, None)
         index_changed = False
         indexed_count: int | None = None
         index_action: str | None = None
@@ -486,7 +693,7 @@ class KnowledgeBaseManager:
                 pass
 
         self._save_config()
-        self._sync_kb_to_pb(name, kb_config)
+        return True, kb_config
 
     def get_kb_entry(self, name: str) -> dict | None:
         """The KB's raw ``kb_config.json`` record, or ``None`` if unregistered.
@@ -527,7 +734,8 @@ class KnowledgeBaseManager:
 
         config_kbs = self.config.get("knowledge_bases", {})
         kb_list: set[str] = set()
-        config_changed = False
+        to_prune: list[str] = []
+        to_register: list[str] = []
 
         # Filter out orphan entries whose KB directory is gone. The on-disk
         # folder is the source of truth for existence — without it the KB
@@ -561,8 +769,7 @@ class KnowledgeBaseManager:
                     kb_name,
                     kb_dir,
                 )
-                del config_kbs[kb_name]
-                config_changed = True
+                to_prune.append(kb_name)
                 continue
             kb_list.add(kb_name)
 
@@ -590,19 +797,38 @@ class KnowledgeBaseManager:
                 if is_valid_kb:
                     # Auto-register this KB to kb_config.json
                     kb_list.add(item.name)
-                    self._auto_register_kb(item.name)
-                    config_changed = True
+                    to_register.append(item.name)
 
-        # Save config if we pruned orphans or registered new KBs
-        if config_changed:
-            self._save_config()
+        # Persist prunes/registrations as one transaction: reload under the
+        # write lock and re-apply the decisions onto fresh state, so a status
+        # update that landed during the scans above is never overwritten by
+        # this method's stale snapshot.
+        if to_prune or to_register:
+            with self.transact() as config:
+                fresh_kbs = config.setdefault("knowledge_bases", {})
+                for kb_name in to_prune:
+                    # Re-verify against fresh state: an entry re-created (or a
+                    # directory restored) after the scan must survive.
+                    fresh_entry = fresh_kbs.get(kb_name)
+                    if fresh_entry is None or is_connected_kb(fresh_entry):
+                        continue
+                    if _entry_updated_after(fresh_entry, grace_cutoff):
+                        continue
+                    fresh_path = (fresh_entry or {}).get("path", kb_name)
+                    if (self.base_dir / fresh_path).exists():
+                        continue
+                    fresh_kbs.pop(kb_name, None)
+                for name in to_register:
+                    if name not in fresh_kbs:
+                        fresh_kbs[name] = self._auto_register_entry(name)
 
         return sorted(kb_list)
 
-    def _auto_register_kb(self, name: str):
-        """Auto-register an existing KB to kb_config.json.
+    def _auto_register_entry(self, name: str) -> dict:
+        """Build the config entry for an existing on-disk KB.
 
         Reads info from metadata.json (if exists) for backward compatibility.
+        Pure builder — the caller installs the entry inside a transaction.
         """
         kb_dir = self.base_dir / name
         from deeptutor.services.rag.index_versioning import list_kb_versions
@@ -664,12 +890,8 @@ class KnowledgeBaseManager:
         else:
             kb_entry["status"] = "unknown"
 
-        # Add to config
-        if "knowledge_bases" not in self.config:
-            self.config["knowledge_bases"] = {}
-        self.config["knowledge_bases"][name] = kb_entry
-
         logger.info(f"Auto-registered KB '{name}' to kb_config.json")
+        return kb_entry
 
     def register_knowledge_base(self, name: str, description: str = "", set_default: bool = False):
         """Register a knowledge base"""
@@ -677,16 +899,29 @@ class KnowledgeBaseManager:
         if not kb_dir.exists():
             raise ValueError(f"Knowledge base directory does not exist: {kb_dir}")
 
-        if "knowledge_bases" not in self.config:
-            self.config["knowledge_bases"] = {}
-
-        self.config["knowledge_bases"][name] = {"path": name, "description": description}
+        with self.transact() as config:
+            config.setdefault("knowledge_bases", {})[name] = {
+                "path": name,
+                "description": description,
+            }
 
         # Only set default if explicitly requested
         if set_default:
             self.set_default(name)
 
-        self._save_config()
+    def _register_entry(self, name: str, entry: dict) -> dict:
+        """Install a new KB entry atomically; raises ValueError on a name clash.
+
+        Runs inside :meth:`transact`, so the clash check and the write see
+        the freshest on-disk config and cannot be interleaved by another
+        process's update.
+        """
+        with self.transact() as config:
+            knowledge_bases = config.setdefault("knowledge_bases", {})
+            if name in knowledge_bases:
+                raise ValueError(f"A knowledge base named '{name}' already exists.")
+            knowledge_bases[name] = entry
+        return entry
 
     def register_obsidian_vault(self, name: str, vault_path: str, description: str = "") -> dict:
         """Register a connected Obsidian vault as a pointer-type KB.
@@ -703,11 +938,6 @@ class KnowledgeBaseManager:
         if not vault.is_dir():
             raise ValueError(f"Vault path is not a directory: {vault_path}")
 
-        self.config = self._load_config()
-        knowledge_bases = self.config.setdefault("knowledge_bases", {})
-        if name in knowledge_bases:
-            raise ValueError(f"A knowledge base named '{name}' already exists.")
-
         now = datetime.now().isoformat()
         entry = {
             "path": name,
@@ -718,9 +948,7 @@ class KnowledgeBaseManager:
             "created_at": now,
             "updated_at": now,
         }
-        knowledge_bases[name] = entry
-        self._save_config()
-        return entry
+        return self._register_entry(name, entry)
 
     def register_linked_kb(
         self,
@@ -749,11 +977,6 @@ class KnowledgeBaseManager:
         if not folder.is_dir():
             raise ValueError(f"Folder path is not a directory: {external_path}")
 
-        self.config = self._load_config()
-        knowledge_bases = self.config.setdefault("knowledge_bases", {})
-        if name in knowledge_bases:
-            raise ValueError(f"A knowledge base named '{name}' already exists.")
-
         now = datetime.now().isoformat()
         entry: dict[str, Any] = {
             "path": name,
@@ -772,9 +995,7 @@ class KnowledgeBaseManager:
         if stats and stats.get("doc_count") is not None:
             entry["last_indexed_count"] = stats["doc_count"]
             entry["last_indexed_action"] = "link"
-        knowledge_bases[name] = entry
-        self._save_config()
-        return entry
+        return self._register_entry(name, entry)
 
     def register_subagent_connection(
         self,
@@ -808,11 +1029,6 @@ class KnowledgeBaseManager:
                 raise ValueError(f"Working directory is not a directory: {cwd}")
             resolved_cwd = str(folder.resolve())
 
-        self.config = self._load_config()
-        knowledge_bases = self.config.setdefault("knowledge_bases", {})
-        if name in knowledge_bases:
-            raise ValueError(f"A knowledge base named '{name}' already exists.")
-
         now = datetime.now().isoformat()
         entry = {
             "path": name,
@@ -825,9 +1041,7 @@ class KnowledgeBaseManager:
             "created_at": now,
             "updated_at": now,
         }
-        knowledge_bases[name] = entry
-        self._save_config()
-        return entry
+        return self._register_entry(name, entry)
 
     def register_lightrag_server_kb(
         self,
@@ -855,11 +1069,6 @@ class KnowledgeBaseManager:
         if not server_url:
             raise ValueError("LightRAG server URL is required.")
 
-        self.config = self._load_config()
-        knowledge_bases = self.config.setdefault("knowledge_bases", {})
-        if name in knowledge_bases:
-            raise ValueError(f"A knowledge base named '{name}' already exists.")
-
         now = datetime.now().isoformat()
         entry: dict[str, Any] = {
             "path": name,
@@ -876,9 +1085,7 @@ class KnowledgeBaseManager:
         search_mode = (search_mode or "").strip().lower()
         if search_mode:
             entry["search_mode"] = search_mode
-        knowledge_bases[name] = entry
-        self._save_config()
-        return entry
+        return self._register_entry(name, entry)
 
     def register_ima_kb(
         self,
@@ -909,11 +1116,6 @@ class KnowledgeBaseManager:
         if not knowledge_base_id:
             raise ValueError("IMA knowledge base ID is required.")
 
-        self.config = self._load_config()
-        knowledge_bases = self.config.setdefault("knowledge_bases", {})
-        if name in knowledge_bases:
-            raise ValueError(f"A knowledge base named '{name}' already exists.")
-
         now = datetime.now().isoformat()
         entry: dict[str, Any] = {
             "path": name,
@@ -928,9 +1130,7 @@ class KnowledgeBaseManager:
             "created_at": now,
             "updated_at": now,
         }
-        knowledge_bases[name] = entry
-        self._save_config()
-        return entry
+        return self._register_entry(name, entry)
 
     def get_knowledge_base_path(self, name: str | None = None) -> Path:
         """Get path to a knowledge base.
@@ -1400,16 +1600,16 @@ class KnowledgeBaseManager:
                 f"KB directory '{kb_dir}' missing on disk; cleaning up orphaned config entry."
             )
 
-        # Remove from config
-        if name in self.config.get("knowledge_bases", {}):
-            del self.config["knowledge_bases"][name]
+        # Remove from config — one transaction so the deletion applies to the
+        # freshest on-disk state (the rmtree above can take seconds).
+        with self.transact() as config:
+            config.get("knowledge_bases", {}).pop(name, None)
 
-        # Update default if this was the default
-        if self.config.get("default") == name:
-            remaining = [n for n in self.config.get("knowledge_bases", {}).keys() if n != name]
-            self.config["default"] = sorted(remaining)[0] if remaining else None
+            # Update default if this was the default
+            if config.get("default") == name:
+                remaining = [n for n in config.get("knowledge_bases", {}) if n != name]
+                config["default"] = sorted(remaining)[0] if remaining else None
 
-        self._save_config()
         return True
 
     def clean_rag_storage(self, name: str | None = None, backup: bool = True) -> bool:

@@ -76,8 +76,15 @@ class ProgressTracker:
             except Exception as e:
                 _logger_instance().debug("Progress callback error: %s", e)
 
-    def _save_progress(self, progress: dict):
-        """Save progress to kb_config.json and local .progress.json file"""
+    def _save_progress(self, progress: dict) -> bool:
+        """Save progress to kb_config.json and local .progress.json file.
+
+        Returns False when the central write was rejected because another
+        task now owns the KB — the caller must then skip the snapshot and
+        the broadcast, or the UI would still show the superseded task's
+        progress from ``.progress.json``.
+        """
+        accepted = True
         # Save to kb_config.json (centralized config)
         try:
             from deeptutor.knowledge.manager import KnowledgeBaseManager
@@ -99,8 +106,21 @@ class ProgressTracker:
             else:
                 status = "initializing"
 
+            # A task only publishes while it still owns the KB entry: when a
+            # newer task (upload/sync/rebuild) has claimed it, this task's
+            # late progress/completion must not clobber the new state. The
+            # claim itself happens at task-start call sites (router /
+            # initializer), not here.
+            task_id = progress.get("task_id")
+            only_if_task = None
+            if task_id:
+                from deeptutor.knowledge.manager import get_process_identity
+
+                pid, instance_id, _ = get_process_identity()
+                only_if_task = (pid, instance_id, task_id)
+
             # Update kb_config.json with status and progress
-            manager.update_kb_status(
+            written = manager.update_kb_status(
                 name=self.kb_name,
                 status=status,
                 progress={
@@ -117,18 +137,28 @@ class ProgressTracker:
                     "index_changed": progress.get("index_changed"),
                     "index_action": progress.get("index_action"),
                 },
+                only_if_task=only_if_task,
             )
+            if not written:
+                accepted = False
+                _logger_instance().warning(
+                    "Progress update from task %s dropped: KB '%s' is now owned by another task",
+                    task_id,
+                    self.kb_name,
+                )
         except Exception as e:
             _logger_instance().warning("Failed to save progress to kb_config.json: %s", e)
 
-        # Persist the last seen progress snapshot so websocket subscribers and
-        # page reloads can recover the live state without relying on in-memory callbacks.
-        try:
-            atomic_write_json(self.progress_file, progress)
-        except Exception as e:
-            _logger_instance().warning(
-                "Failed to persist progress snapshot for '%s': %s", self.kb_name, e
-            )
+        if accepted:
+            # Persist the last seen progress snapshot so websocket subscribers and
+            # page reloads can recover the live state without relying on in-memory callbacks.
+            try:
+                atomic_write_json(self.progress_file, progress)
+            except Exception as e:
+                _logger_instance().warning(
+                    "Failed to persist progress snapshot for '%s': %s", self.kb_name, e
+                )
+        return accepted
 
     def update(
         self,
@@ -198,7 +228,9 @@ class ProgressTracker:
             if error:
                 fallback_logger.error("%s [ProgressTracker] Error: %s", prefix, error)
 
-        self._save_progress(progress)
+        if not self._save_progress(progress):
+            # Superseded by a newer task — don't emit or broadcast its state.
+            return
 
         if self.task_id:
             try:

@@ -121,6 +121,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to initialize LLM client at startup: {e}")
 
+    # Indexing tasks live in this process, so at startup no KB can legitimately
+    # be "processing" — any live status is a zombie left by a killed/stalled
+    # run. Reset those to error so the UI offers re-indexing instead of an
+    # endless spinner.
+    try:
+        from deeptutor.knowledge.recovery import recover_all_interrupted_kb_tasks
+        from deeptutor.runtime.home import get_runtime_data_root
+
+        recovered = recover_all_interrupted_kb_tasks(get_runtime_data_root())
+        if recovered:
+            logger.warning(f"Recovered interrupted KB tasks: {', '.join(recovered)}")
+    except Exception as e:
+        logger.warning(f"KB startup recovery failed: {e}")
+
     try:
         from deeptutor.events.event_bus import get_event_bus
 

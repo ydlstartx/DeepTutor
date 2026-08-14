@@ -40,7 +40,7 @@ from deeptutor.knowledge.add_documents import (
 )
 from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
 from deeptutor.knowledge.kb_types import is_connected_kb, supports_local_raw_files
-from deeptutor.knowledge.manager import KnowledgeBaseManager
+from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 from deeptutor.knowledge.naming import validate_knowledge_base_name
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
 from deeptutor.multi_user.context import get_current_user
@@ -208,7 +208,7 @@ def _mark_kb_queued_for_processing(
     message: str,
     *,
     status: str = "processing",
-) -> None:
+) -> bool:
     """Flip an existing KB to a live processing status before its background task is dispatched.
 
     ``run_upload_processing_task`` only writes status once it starts running;
@@ -217,8 +217,12 @@ def _mark_kb_queued_for_processing(
     Mirrors the pre-dispatch update ``create_knowledge_base`` already does.
     ``stage`` must be a member of the frontend's ``LIVE_PROGRESS_STAGES`` set
     (web/lib/knowledge-helpers.ts).
+
+    This is an atomic claim: returns False when another live task owns the
+    KB (caller responds 409) — two indexing tasks writing one index would
+    corrupt it, and status guards only protect the status file.
     """
-    manager.update_kb_status(
+    return manager.claim_kb_task(
         name=kb_name,
         status=status,
         progress={
@@ -229,6 +233,33 @@ def _mark_kb_queued_for_processing(
             "timestamp": datetime.now().isoformat(),
         },
     )
+
+
+def _task_owner(task_id: str | None) -> tuple[int, str, str | None]:
+    """Identity tuple for task-conditional KB status writes (CAS guard).
+
+    A task's terminal write is applied only while the KB entry is still
+    owned by that task — a superseded task's late completion must not
+    clobber the newer task's state.
+    """
+    pid, instance_id, _ = get_process_identity()
+    return (pid, instance_id, task_id)
+
+
+def _terminate_task_record(task_id: str, error: str) -> None:
+    """Mark a never-dispatched task as terminal so its record is cleanable.
+
+    Task records and stream buffers are created before the KB claim; when
+    the claim fails (409) or dispatch never happens, the record would
+    otherwise sit in "running" forever — the cleaner only evicts terminal
+    tasks.
+    """
+    try:
+        TaskIDManager.get_instance().update_task_status(
+            task_id, "error", error=error, finished_at=datetime.now().isoformat()
+        )
+    except Exception:
+        pass
 
 
 def _save_zip_archive(
@@ -803,6 +834,7 @@ async def run_initialization_task(initializer: KnowledgeBaseInitializer, task_id
                     "index_changed": True,
                     "index_action": "create",
                 },
+                only_if_task=_task_owner(task_id),
             )
 
             _task_log(
@@ -835,6 +867,7 @@ async def run_initialization_task(initializer: KnowledgeBaseInitializer, task_id
                     "task_id": task_id,
                     "timestamp": datetime.now().isoformat(),
                 },
+                only_if_task=_task_owner(task_id),
             )
 
             if initializer.progress_tracker:
@@ -2342,20 +2375,50 @@ async def upload_files(
         # archive itself is never indexed (``safe_extract_zip`` skips ``.zip``).
         upload_extensions = allowed_extensions | {".zip"}
         _validate_upload_batch(files, allowed_extensions=upload_extensions, rel_paths=rel_paths)
-        uploaded_files, uploaded_file_paths = await _save_uploaded_files_off_loop(
-            files, raw_dir, allowed_extensions=upload_extensions, rel_paths=rel_paths
-        )
         task_id = _build_unique_task_id("kb_upload", kb_name)
-        get_task_stream_manager().ensure_task(task_id)
 
-        logger.info(f"Uploading {len(uploaded_files)} files to KB '{kb_name}'")
+        logger.info(f"Uploading {len(files)} files to KB '{kb_name}'")
 
-        _mark_kb_queued_for_processing(
+        # Claim before writing anything: a busy KB rejects the upload with
+        # 409 and no half-saved files are left behind in raw/.
+        if not _mark_kb_queued_for_processing(
             manager,
             kb_name,
             task_id,
-            f"Processing {len(uploaded_files)} uploaded file(s)...",
-        )
+            f"Processing {len(files)} uploaded file(s)...",
+        ):
+            _terminate_task_record(task_id, "KB busy — upload rejected")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Knowledge base '{kb_name}' is already being processed by another "
+                    "task. Wait for it to finish before uploading more files."
+                ),
+            )
+        get_task_stream_manager().ensure_task(task_id)
+
+        try:
+            uploaded_files, uploaded_file_paths = await _save_uploaded_files_off_loop(
+                files, raw_dir, allowed_extensions=upload_extensions, rel_paths=rel_paths
+            )
+        except BaseException:
+            # Saving failed or was cancelled — release the claim so the KB
+            # isn't stuck live, and terminate the task record.
+            manager.update_kb_status(
+                name=kb_name,
+                status="error",
+                progress={
+                    "stage": "error",
+                    "message": "Failed to save uploaded files",
+                    "percent": 0,
+                    "error": "Failed to save uploaded files",
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                only_if_task=_task_owner(task_id),
+            )
+            _terminate_task_record(task_id, "upload save failed")
+            raise
 
         background_tasks.add_task(
             run_upload_processing_task,
@@ -2409,11 +2472,12 @@ async def create_knowledge_base(
 
         logger.info(f"Creating KB: {name} (provider={rag_provider})")
         task_id = _build_unique_task_id("kb_init", name)
-        get_task_stream_manager().ensure_task(task_id)
 
         # Register KB to kb_config.json immediately with "initializing" status
-        # This ensures the KB appears in the list right away
-        manager.update_kb_status(
+        # This ensures the KB appears in the list right away. It is also the
+        # task claim: a same-name create racing in gets a 409 instead of
+        # double-initializing the same directory.
+        if not manager.claim_kb_task(
             name=name,
             status="initializing",
             progress={
@@ -2424,43 +2488,73 @@ async def create_knowledge_base(
                 "total": len(files),
                 "task_id": task_id,
             },
-        )
-        # Also store rag_provider in config (reload and update)
-        manager.config = manager._load_config()
-        if name in manager.config.get("knowledge_bases", {}):
-            manager.config["knowledge_bases"][name]["rag_provider"] = rag_provider
-            manager.config["knowledge_bases"][name]["needs_reindex"] = False
-            manager._save_config()
+        ):
+            _terminate_task_record(task_id, "KB busy — create rejected")
+            raise HTTPException(
+                status_code=409,
+                detail=f"Knowledge base '{name}' is already being created by another task.",
+            )
+        get_task_stream_manager().ensure_task(task_id)
 
-        progress_tracker = ProgressTracker(name, kb_base_dir)
+        try:
+            # Also store rag_provider in config (reload and update)
+            with manager.transact() as config:
+                if name in config.get("knowledge_bases", {}):
+                    config["knowledge_bases"][name]["rag_provider"] = rag_provider
+                    config["knowledge_bases"][name]["needs_reindex"] = False
 
-        initializer = KnowledgeBaseInitializer(
-            kb_name=name,
-            base_dir=str(kb_base_dir),
-            progress_tracker=progress_tracker,
-            rag_provider=rag_provider,
-        )
+            progress_tracker = ProgressTracker(name, kb_base_dir)
 
-        initializer.create_directory_structure()
-        progress_tracker.task_id = task_id
+            initializer = KnowledgeBaseInitializer(
+                kb_name=name,
+                base_dir=str(kb_base_dir),
+                progress_tracker=progress_tracker,
+                rag_provider=rag_provider,
+            )
 
-        manager = get_kb_manager()
-        if name not in manager.list_knowledge_bases():
-            logger.warning(f"KB {name} not found in config, registering manually")
-            initializer._register_to_config()
+            initializer.create_directory_structure()
+            progress_tracker.task_id = task_id
 
-        uploaded_files, _ = await _save_uploaded_files_off_loop(
-            files, initializer.raw_dir, allowed_extensions=allowed_extensions, rel_paths=rel_paths
-        )
+            manager = get_kb_manager()
+            if name not in manager.list_knowledge_bases():
+                logger.warning(f"KB {name} not found in config, registering manually")
+                initializer._register_to_config()
 
-        progress_tracker.update(
-            ProgressStage.PROCESSING_DOCUMENTS,
-            f"Saved {len(uploaded_files)} files, preparing to process...",
-            current=0,
-            total=len(uploaded_files),
-        )
+            uploaded_files, _ = await _save_uploaded_files_off_loop(
+                files,
+                initializer.raw_dir,
+                allowed_extensions=allowed_extensions,
+                rel_paths=rel_paths,
+            )
 
-        background_tasks.add_task(run_initialization_task, initializer, task_id)
+            progress_tracker.update(
+                ProgressStage.PROCESSING_DOCUMENTS,
+                f"Saved {len(uploaded_files)} files, preparing to process...",
+                current=0,
+                total=len(uploaded_files),
+            )
+
+            background_tasks.add_task(run_initialization_task, initializer, task_id)
+        except BaseException:
+            # Anything between claim and dispatch (config transaction, dir
+            # setup, file save, cancellation) must release the claim —
+            # otherwise the KB stays live-owned by this process and every
+            # retry gets a 409 until the backend restarts.
+            manager.update_kb_status(
+                name=name,
+                status="error",
+                progress={
+                    "stage": "error",
+                    "message": "KB creation failed before processing started",
+                    "percent": 0,
+                    "error": "KB creation failed before processing started",
+                    "task_id": task_id,
+                    "timestamp": datetime.now().isoformat(),
+                },
+                only_if_task=_task_owner(task_id),
+            )
+            _terminate_task_record(task_id, "create dispatch failed")
+            raise
 
         logger.info(f"KB '{name}' created, processing {len(uploaded_files)} files in background")
 
@@ -2584,19 +2678,15 @@ async def run_reindex_task(kb_name: str, base_dir: str, task_id: str, signature_
                     "index_changed": True,
                     "index_action": "reindex",
                 },
+                only_if_task=_task_owner(task_id),
             )
             # Clear the legacy mismatch / needs_reindex flags now that an
             # index version matching the active config exists on disk.
-            kb_entry = manager.config.get("knowledge_bases", {}).get(kb_name) or {}
-            mutated = False
-            if kb_entry.get("needs_reindex"):
-                kb_entry["needs_reindex"] = False
-                mutated = True
-            if kb_entry.get("embedding_mismatch"):
+            with manager.transact() as config:
+                kb_entry = config.get("knowledge_bases", {}).get(kb_name) or {}
+                if kb_entry.get("needs_reindex"):
+                    kb_entry["needs_reindex"] = False
                 kb_entry.pop("embedding_mismatch", None)
-                mutated = True
-            if mutated:
-                manager._save_config()
 
             _task_log(task_id, f"Re-index of '{kb_name}' complete", level="success")
             task_manager.update_task_status(task_id, "completed")
@@ -2610,7 +2700,9 @@ async def run_reindex_task(kb_name: str, base_dir: str, task_id: str, signature_
             _task_log(task_id, f"Stack trace:\n{trace}", level="error")
             task_manager.update_task_status(task_id, "error", error=error_msg)
             try:
-                ProgressTracker(kb_name, Path(base_dir)).update(
+                tracker = ProgressTracker(kb_name, Path(base_dir))
+                tracker.task_id = task_id  # route through the ownership guard
+                tracker.update(
                     ProgressStage.ERROR,
                     f"Re-index failed: {error_msg}",
                     error=error_msg,
@@ -2679,11 +2771,19 @@ async def reindex_knowledge_base(
                 }
 
         task_id = _build_unique_task_id("kb_reindex", kb_name)
-        get_task_stream_manager().ensure_task(task_id)
 
-        _mark_kb_queued_for_processing(
+        if not _mark_kb_queued_for_processing(
             manager, kb_name, task_id, "Queueing re-index...", status="initializing"
-        )
+        ):
+            _terminate_task_record(task_id, "KB busy — reindex rejected")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Knowledge base '{kb_name}' is already being processed by another "
+                    "task. Wait for it to finish before re-indexing."
+                ),
+            )
+        get_task_stream_manager().ensure_task(task_id)
 
         background_tasks.add_task(
             run_reindex_task,
@@ -3012,18 +3112,26 @@ async def sync_folder(kb_name: str, folder_id: str, background_tasks: Background
             f"Syncing {len(files_to_process)} files from folder '{folder_path}' to KB '{kb_name}'"
         )
         task_id = _build_unique_task_id("kb_upload", f"{kb_name}_folder_{folder_id}")
-        get_task_stream_manager().ensure_task(task_id)
 
         # NOTE: We DO NOT update sync state here anymore.
         # It is updated in run_upload_processing_task only after successful processing.
         # This prevents marking files as synced if processing fails (race condition fix).
 
-        _mark_kb_queued_for_processing(
+        if not _mark_kb_queued_for_processing(
             manager,
             kb_name,
             task_id,
             f"Syncing {len(files_to_process)} file(s) from linked folder...",
-        )
+        ):
+            _terminate_task_record(task_id, "KB busy — sync rejected")
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Knowledge base '{kb_name}' is already being processed by another "
+                    "task. Wait for it to finish before syncing."
+                ),
+            )
+        get_task_stream_manager().ensure_task(task_id)
 
         # Add background task to process files
         background_tasks.add_task(

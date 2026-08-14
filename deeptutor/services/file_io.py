@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+import threading
 from typing import Any
 
 
@@ -60,4 +63,58 @@ def atomic_write_text(path: Path, text: str) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-__all__ = ["atomic_write_json", "atomic_write_text"]
+@contextmanager
+def file_lock_exclusive(file_handle):
+    """Acquire an exclusive (write) lock on a file - cross-platform."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(file_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+
+
+_lock_local = threading.local()
+
+
+@contextmanager
+def exclusive_write_lock(path: Path):
+    """Serialize read-modify-write cycles on a JSON file across processes.
+
+    Locks a sibling ``<name>.lock`` file whose inode is stable — locking the
+    target file itself would not work with atomic replacement: a lock on the
+    old inode excludes nobody opening the path afterwards.
+
+    Reentrant within a thread (a higher-level transaction may hold the lock
+    while a lower-level save acquires it again).
+    """
+    key = str(Path(path))
+    held = getattr(_lock_local, "exclusive_write_locks", None)
+    if held is None:
+        held = _lock_local.exclusive_write_locks = set()
+    if key in held:  # this thread already holds it
+        yield
+        return
+    lock_path = Path(path).with_name(Path(path).name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        with file_lock_exclusive(handle):
+            held.add(key)
+            try:
+                yield
+            finally:
+                held.discard(key)
+
+
+__all__ = ["atomic_write_json", "atomic_write_text", "exclusive_write_lock", "file_lock_exclusive"]

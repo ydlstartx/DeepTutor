@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
+from deeptutor.services.file_io import atomic_write_json, exclusive_write_lock
 from deeptutor.services.path_service import get_path_service
 from deeptutor.services.rag.factory import (
     DEFAULT_PROVIDER,
@@ -92,7 +94,11 @@ class KnowledgeBaseConfigService:
 
             kb_dir = kb_base_dir / kb_name
             legacy_storage = kb_dir / "rag_storage"
-            has_llamaindex_index = has_ready_provider_index(kb_dir, DEFAULT_PROVIDER)
+            try:
+                has_llamaindex_index = has_ready_provider_index(kb_dir, DEFAULT_PROVIDER)
+            except OSError:
+                # Unreadable dir (e.g. mid-deletion) — leave flags alone.
+                continue
             if (
                 config["rag_provider"] == DEFAULT_PROVIDER
                 and legacy_storage.exists()
@@ -108,8 +114,24 @@ class KnowledgeBaseConfigService:
     def _save(self) -> None:
         self._config = self._normalize_payload(self._config)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_path, "w", encoding="utf-8") as handle:
-            json.dump(self._config, handle, indent=2, ensure_ascii=False)
+        # Same file KnowledgeBaseManager writes — same atomic write and the
+        # same cross-process lock file, so the two services can neither tear
+        # nor interleave each other's updates.
+        with exclusive_write_lock(self.config_path):
+            atomic_write_json(self.config_path, self._config)
+
+    @contextmanager
+    def _transact(self):
+        """One reload → mutate → save cycle under the shared write lock.
+
+        ``_refresh`` alone reads without the lock; mutating that snapshot and
+        saving it later would clobber a concurrent ``KnowledgeBaseManager``
+        status update. Holding the lock across the whole cycle prevents it.
+        """
+        with exclusive_write_lock(self.config_path):
+            self._refresh()
+            yield self._config
+            self._save()
 
     def _refresh(self) -> None:
         """Re-read kb_config.json so this singleton sees changes made by
@@ -145,10 +167,9 @@ class KnowledgeBaseConfigService:
         return merged
 
     def set_kb_config(self, kb_name: str, config: dict[str, Any]) -> None:
-        self._refresh()
-        entry = self._ensure_kb(kb_name)
-        entry.update(config)
-        self._save()
+        with self._transact():
+            entry = self._ensure_kb(kb_name)
+            entry.update(config)
 
     def get_rag_provider(self, kb_name: str) -> str:
         return normalize_provider_name(self.get_kb_config(kb_name).get("rag_provider"))
@@ -169,33 +190,31 @@ class KnowledgeBaseConfigService:
         return str(modes.get(provider, "")) if isinstance(modes, dict) else ""
 
     def set_provider_mode(self, provider: str, mode: str) -> None:
-        self._refresh()
-        defaults = self._config.setdefault("defaults", _default_payload()["defaults"])
-        modes = defaults.setdefault("provider_modes", {})
-        modes[provider] = mode
-        self._save()
+        with self._transact():
+            defaults = self._config.setdefault("defaults", _default_payload()["defaults"])
+            modes = defaults.setdefault("provider_modes", {})
+            modes[provider] = mode
 
     def delete_kb_config(self, kb_name: str) -> None:
-        self._refresh()
-        knowledge_bases = self._config.get("knowledge_bases", {})
-        if kb_name in knowledge_bases:
-            del knowledge_bases[kb_name]
-            self._save()
+        with self._transact():
+            knowledge_bases = self._config.get("knowledge_bases", {})
+            if kb_name in knowledge_bases:
+                del knowledge_bases[kb_name]
 
     def get_all_configs(self) -> dict[str, Any]:
         self._refresh()
         return self._config
 
     def set_global_defaults(self, defaults: dict[str, Any]) -> None:
-        self._refresh()
-        current = self._config.setdefault("defaults", _default_payload()["defaults"])
-        current.update(defaults)
-        self._save()
+        with self._transact():
+            current = self._config.setdefault("defaults", _default_payload()["defaults"])
+            current.update(defaults)
 
     def set_default_kb(self, kb_name: str | None) -> None:
-        self._refresh()
-        self._config.setdefault("defaults", _default_payload()["defaults"])["default_kb"] = kb_name
-        self._save()
+        with self._transact():
+            self._config.setdefault("defaults", _default_payload()["defaults"])["default_kb"] = (
+                kb_name
+            )
 
     def get_default_kb(self) -> str | None:
         self._refresh()
