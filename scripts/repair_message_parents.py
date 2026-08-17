@@ -25,9 +25,9 @@ longer match the signature.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sqlite3
 import sys
-from pathlib import Path
 
 DEFAULT_DB = Path("data/user/chat_history.db")
 
@@ -71,9 +71,7 @@ def main() -> int:
         default=str(DEFAULT_DB),
         help=f"path to chat_history.db (default: {DEFAULT_DB})",
     )
-    parser.add_argument(
-        "--apply", action="store_true", help="write the repairs (default: dry-run)"
-    )
+    parser.add_argument("--apply", action="store_true", help="write the repairs (default: dry-run)")
     args = parser.parse_args()
 
     db_path = Path(args.db)

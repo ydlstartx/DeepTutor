@@ -8,8 +8,8 @@ Every tool — built-in or contributed via plugin — implements ``BaseTool``.
 
 from __future__ import annotations
 
-import copy
 from abc import ABC, abstractmethod
+import copy
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any, Protocol

@@ -93,9 +93,7 @@ def test_rename_leaves_same_basename_in_other_folder_untouched(tmp_path: Path) -
     storage_dir = tmp_path / "version-1"
     _write_index(storage_dir, raw_dir)
 
-    rename_source_references(
-        storage_dir, old_path=raw_dir / "a.txt", new_path=raw_dir / "b.txt"
-    )
+    rename_source_references(storage_dir, old_path=raw_dir / "a.txt", new_path=raw_dir / "b.txt")
 
     docstore = json.loads((storage_dir / "docstore.json").read_text(encoding="utf-8"))
     other = docstore["docstore/data"]["node-2"]["__data__"]["metadata"]

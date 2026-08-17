@@ -1366,6 +1366,8 @@ def test_llm_provider_choices_include_reasoning_efforts() -> None:
     assert llm["openai"]["reasoning_efforts"] == []
     assert llm["dashscope"]["thinking_toggle"] is True
     assert llm["openai"]["thinking_toggle"] is False
+
+
 def test_get_ui_settings_is_public_without_auth(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """Auth pages bootstrap the interface language *before* a session exists.
 

@@ -639,9 +639,7 @@ def _source_build_fingerprint(source: Path, env: dict[str, str]) -> str:
         )
         root = Path(dirpath)
         candidates.extend(
-            root / name
-            for name in sorted(filenames)
-            if name not in SOURCE_BUILD_EXCLUDED_FILES
+            root / name for name in sorted(filenames) if name not in SOURCE_BUILD_EXCLUDED_FILES
         )
     if version_file.is_file():
         candidates.append(version_file)

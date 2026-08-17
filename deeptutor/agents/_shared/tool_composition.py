@@ -20,10 +20,10 @@ Callers resolve their own flags (chat checks selected KBs / source index
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 import json
+import time
 from typing import Any
 
 from deeptutor.tools.builtin import (

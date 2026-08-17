@@ -110,6 +110,8 @@ def test_qwen37_native_vl_models_enable_vision() -> None:
     assert supports_vision("dashscope", "qwen3.7-flash") is True
     assert supports_vision("dashscope", "qwen3.7-flash-2026-07-15") is True
     assert supports_vision("dashscope", "qwen3.7-max") is False
+
+
 def test_claude_model_ids_are_vision_capable() -> None:
     """Anthropic's post-Claude-3 ids are `claude-<family>-<version>`.
 

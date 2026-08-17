@@ -15,7 +15,6 @@ from pathlib import Path
 import shutil
 import stat
 import sys
-import threading
 import time
 from typing import Any
 import uuid

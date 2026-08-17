@@ -5,7 +5,6 @@ Manages system status checks and model connection tests
 
 import asyncio
 from datetime import datetime
-import asyncio
 import time
 
 from fastapi import APIRouter

@@ -42,9 +42,7 @@ _NATIVE_TOOL_BLOCKED_BINDINGS: frozenset[str] = frozenset(
 # backend needs an adapter branch, or tool schemas would be attached to a plain
 # AsyncOpenAI client pointed at a non-OpenAI wire format. github_copilot is
 # adapter-routed but deliberately excluded from this set.
-_NATIVE_TOOL_BACKENDS: frozenset[str] = frozenset(
-    {"anthropic", "openai_codex", "codebuddy"}
-)
+_NATIVE_TOOL_BACKENDS: frozenset[str] = frozenset({"anthropic", "openai_codex", "codebuddy"})
 # Pool sized for mixed model usage in one session (chat + title + RAG).
 _AGENTIC_CLIENT_POOL_MAXSIZE = 16
 _agentic_client_pool: "OrderedDict[tuple[Any, ...], Any]" = OrderedDict()

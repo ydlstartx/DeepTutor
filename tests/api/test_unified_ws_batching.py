@@ -18,15 +18,15 @@ import pytest
 
 from deeptutor.api.routers.unified_ws import (
     _forward_subscription,
-    _Inbox,
     _forward_with_content_batching,
+    _Inbox,
 )
 from deeptutor.core.stream import StreamEvent, StreamEventType
 from deeptutor.services.session.sqlite_store import SQLiteSessionStore
 from deeptutor.services.session.turn_runtime import (
+    TurnRuntimeManager,
     _LiveSubscriber,
     _TurnExecution,
-    TurnRuntimeManager,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -131,9 +131,7 @@ class TestSlowConsumerTermination:
         execution.subscribers.append(slow_subscriber)
 
         for i in range(10):
-            event = StreamEvent(
-                type=StreamEventType.CONTENT, source="chat", content=f"tok{i}"
-            )
+            event = StreamEvent(type=StreamEventType.CONTENT, source="chat", content=f"tok{i}")
             await mgr._publish_live_event(execution, event)
 
         # 终止信号：最后一个条目是 None；订阅者立即从列表移除
@@ -206,9 +204,7 @@ class TestForwardSubscription:
         await _forward_subscription(events, lambda e: asyncio.sleep(0), on_interrupted)
         assert interrupted == [], "normal DONE end must not close the socket"
 
-    async def test_slow_consumer_overflow_chain_reaches_on_interrupted(
-        self, tmp_path
-    ):
+    async def test_slow_consumer_overflow_chain_reaches_on_interrupted(self, tmp_path):
         """End-to-end backpressure: slow client -> inbox full -> pump stalls
         -> runtime subscriber queue overflows -> subscription terminated
         without DONE -> on_interrupted invoked (the WS layer closes the
@@ -239,9 +235,7 @@ class TestForwardSubscription:
         async def on_interrupted() -> None:
             interrupted.append(True)
 
-        forward_task = asyncio.create_task(
-            _forward_subscription(events, slow_send, on_interrupted)
-        )
+        forward_task = asyncio.create_task(_forward_subscription(events, slow_send, on_interrupted))
 
         # Overflow the chain while the client is stalled: the pump only stops
         # consuming once the 1024-entry inbox is full, so we need more events
@@ -250,9 +244,7 @@ class TestForwardSubscription:
         for i in range(1600):
             await runtime._publish_live_event(
                 execution,
-                StreamEvent(
-                    type=StreamEventType.CONTENT, source="chat", content=f"tok{i}"
-                ),
+                StreamEvent(type=StreamEventType.CONTENT, source="chat", content=f"tok{i}"),
             )
             await asyncio.sleep(0)
 

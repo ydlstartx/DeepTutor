@@ -32,10 +32,10 @@ Supported client message ``type`` values:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 import json
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -104,9 +104,7 @@ async def _forward_with_content_batching(
 
     while True:
         try:
-            event = await asyncio.wait_for(
-                anext(events), timeout=_CONTENT_FLUSH_INTERVAL_S
-            )
+            event = await asyncio.wait_for(anext(events), timeout=_CONTENT_FLUSH_INTERVAL_S)
         except StopAsyncIteration:
             break
         except TimeoutError:
@@ -241,9 +239,7 @@ async def unified_websocket(ws: WebSocket) -> None:
             runtime = get_turn_runtime_manager()
 
             async def _events() -> AsyncIterator[dict[str, Any]]:
-                async for event in runtime.subscribe_session(
-                    session_id, after_seq=after_seq
-                ):
+                async for event in runtime.subscribe_session(session_id, after_seq=after_seq):
                     yield event
 
             async def _on_interrupted() -> None:
