@@ -5,6 +5,10 @@ import ThemeScript from "@/components/ThemeScript";
 import ToastViewport from "@/components/common/ToastViewport";
 import { AppShellProvider } from "@/context/AppShellContext";
 import { I18nClientBridge } from "@/i18n/I18nClientBridge";
+import {
+  PUBLIC_PRODUCT_DESCRIPTION,
+  PUBLIC_PRODUCT_NAME,
+} from "@/lib/public-brand";
 
 // Geist matches the public site (deeptutor.info) and stays crisp at the
 // small UI sizes the composer/toolbars use, unlike the rounder Jakarta.
@@ -21,14 +25,10 @@ const fontSerif = Lora({
 });
 
 export const metadata: Metadata = {
-  title: "DeepTutor",
-  description: "Agent-native intelligent learning companion",
+  title: PUBLIC_PRODUCT_NAME,
+  description: PUBLIC_PRODUCT_DESCRIPTION,
   icons: {
-    icon: [
-      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
-      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
-    ],
-    apple: "/apple-touch-icon.png",
+    icon: [{ url: "/public-brand.svg", type: "image/svg+xml" }],
   },
 };
 

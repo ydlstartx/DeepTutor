@@ -108,6 +108,7 @@ import {
 import { downloadChatMarkdown } from "@/lib/chat-export";
 import { buildChatOutline } from "@/lib/chat-outline";
 import { isPlaceholderSessionTitle } from "@/lib/session-title";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 import type { SpaceMemoryFile } from "@/lib/space-items";
 import {
   selectedBooksToPayload,
@@ -1995,13 +1996,10 @@ export default function ChatPage() {
             ) : !hasMessages ? (
               <div className="flex w-full flex-1 min-h-0 items-end justify-center pb-14 animate-fade-in px-6">
                 <div className="w-full max-w-[960px] flex items-center justify-center gap-4">
-                  <img
-                    src="/logo_black-sm.png"
-                    alt="DeepTutor"
-                    width={40}
-                    height={40}
-                    className="h-10 w-10 select-none"
-                    draggable={false}
+                  <GraduationCap
+                    aria-label={PUBLIC_PRODUCT_NAME}
+                    className="h-10 w-10 text-[var(--foreground)]"
+                    strokeWidth={1.45}
                   />
                   <h1 className="font-serif text-[40px] font-medium leading-[1.1] tracking-[-0.015em] text-[var(--foreground)]">
                     {t(welcomeGreeting)}

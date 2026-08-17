@@ -5,6 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useTranslation } from "react-i18next";
 import { login, fetchAuthStatus, checkIsFirstUser } from "@/lib/auth";
+import {
+  PUBLIC_PRODUCT_DESCRIPTION,
+  PUBLIC_PRODUCT_NAME,
+} from "@/lib/public-brand";
 
 function LoginPageContent() {
   const { t } = useTranslation();
@@ -53,7 +57,7 @@ function LoginPageContent() {
       {/* Logo / Title */}
       <div className="text-center mb-8">
         <h1 className="font-serif text-2xl font-semibold text-[var(--foreground)] tracking-tight">
-          DeepTutor
+          {PUBLIC_PRODUCT_NAME}
         </h1>
         <p className="mt-1 text-sm text-[var(--muted-foreground)]">
           {t("Sign in to your account")}
@@ -151,7 +155,7 @@ function LoginPageContent() {
       </p>
 
       <p className="mt-3 text-center text-xs text-[var(--muted-foreground)]">
-        DeepTutor · Agent-Native Learning
+        {PUBLIC_PRODUCT_DESCRIPTION}
       </p>
     </div>
   );

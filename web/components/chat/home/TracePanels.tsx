@@ -19,6 +19,7 @@ import {
   type ToolProvider,
 } from "@/lib/trace-tools";
 import type { StreamEvent } from "@/lib/unified-ws";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 type TraceMetadata = {
   call_id?: string;
@@ -2323,7 +2324,7 @@ export function StreamingStatus({
     Boolean(isStreaming),
   );
 
-  const name = agentName?.trim() || "DeepTutor";
+  const name = agentName?.trim() || PUBLIC_PRODUCT_NAME;
   let modeLabel = t("{{name}} Reasoning…", { name });
   if (mode === "tool_using") modeLabel = t("Tool Calling…");
   else if (mode === "planning") modeLabel = t("{{name}} Planning…", { name });

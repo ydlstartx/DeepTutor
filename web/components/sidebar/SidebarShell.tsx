@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
@@ -32,6 +31,7 @@ import type { SessionSummary } from "@/lib/session-api";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useCapabilityAccess } from "@/components/access/CapabilityAccessContext";
 import type { Capability } from "@/lib/capability-routes";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 interface NavEntry {
   href: string;
@@ -209,17 +209,10 @@ export function SidebarShell({
         <div className="relative mb-2 flex h-9 w-9 items-center justify-center">
           <Link
             href="/"
-            aria-label="DeepTutor"
+            aria-label={PUBLIC_PRODUCT_NAME}
             className="flex items-center justify-center transition-opacity duration-150 group-hover/sb:opacity-0"
           >
-            <Image
-              src="/logo-sm.png"
-              alt="DeepTutor"
-              width={22}
-              height={22}
-              unoptimized
-              className="h-[22px] w-[22px] rounded-md"
-            />
+            <BookOpen className="h-[22px] w-[22px]" strokeWidth={1.7} />
           </Link>
           <button
             onClick={() => setCollapsed(false)}
@@ -341,24 +334,18 @@ export function SidebarShell({
     <aside className="flex w-[220px] h-dvh shrink-0 flex-col bg-[var(--secondary)] transition-all duration-200">
       {/* Header: logo + collapse toggle */}
       <div className="flex h-14 items-center justify-between px-4">
-        <Link href="/" className="group flex items-center gap-1.5">
-          <Image
-            src="/logo-sm.png"
-            alt="DeepTutor"
-            width={22}
-            height={22}
-            unoptimized
+        <Link
+          href="/"
+          aria-label={PUBLIC_PRODUCT_NAME}
+          className="group flex items-center gap-1.5"
+        >
+          <BookOpen
             className="h-[22px] w-[22px] transition-transform duration-200 group-hover:scale-105"
+            strokeWidth={1.7}
           />
-          <Image
-            src="/banner-sm.png"
-            alt="DeepTutor"
-            width={200}
-            height={53}
-            priority
-            unoptimized
-            className="h-[22px] w-auto transition-transform duration-200 group-hover:scale-105"
-          />
+          <span className="font-serif text-[15px] font-semibold tracking-wide">
+            {PUBLIC_PRODUCT_NAME}
+          </span>
         </Link>
         {/* The rail is a desktop affordance; in the drawer the scrim and the
             top-bar toggle already own "make this go away". */}

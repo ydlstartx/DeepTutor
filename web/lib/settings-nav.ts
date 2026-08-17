@@ -32,6 +32,7 @@ import {
   OpencodeGlyph,
 } from "@/components/agents/agent-icons";
 import type { ServiceName } from "@/components/settings/SettingsContext";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 /**
  * Settings information architecture.
@@ -213,7 +214,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/claude-code",
     label: { zh: "Claude Code", en: "Claude Code" },
     blurb: {
-      zh: "DeepTutor 调用本机 Claude Code 时的模型、推理强度与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 Claude Code 时的模型、推理强度与运行参数。`,
       en: "Model, reasoning effort, and run params for the local Claude Code.",
     },
     // Brand glyph shares the lucide call signature (size/className).
@@ -226,7 +227,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/codex",
     label: { zh: "Codex", en: "Codex" },
     blurb: {
-      zh: "DeepTutor 调用本机 Codex 时的模型、推理强度与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 Codex 时的模型、推理强度与运行参数。`,
       en: "Model, reasoning effort, and run params for the local Codex.",
     },
     icon: CodexGlyph as unknown as LucideIcon,
@@ -238,7 +239,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/gemini",
     label: { zh: "Gemini CLI", en: "Gemini CLI" },
     blurb: {
-      zh: "DeepTutor 调用本机 Gemini CLI 时的模型与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 Gemini CLI 时的模型与运行参数。`,
       en: "Model and run params for the local Gemini CLI.",
     },
     icon: GeminiGlyph as unknown as LucideIcon,
@@ -250,7 +251,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/kimi",
     label: { zh: "Kimi CLI", en: "Kimi CLI" },
     blurb: {
-      zh: "DeepTutor 调用本机 Kimi CLI 时的模型与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 Kimi CLI 时的模型与运行参数。`,
       en: "Model and run params for the local Kimi CLI.",
     },
     icon: KimiGlyph as unknown as LucideIcon,
@@ -262,7 +263,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/opencode",
     label: { zh: "opencode", en: "opencode" },
     blurb: {
-      zh: "DeepTutor 调用本机 opencode 时的模型、推理强度与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 opencode 时的模型、推理强度与运行参数。`,
       en: "Model, reasoning effort, and run params for the local opencode.",
     },
     icon: OpencodeGlyph as unknown as LucideIcon,
@@ -274,7 +275,7 @@ const AGENT_CHILDREN: SettingsLeaf[] = [
     href: "/settings/agents/mimo",
     label: { zh: "MiMo Code", en: "MiMo Code" },
     blurb: {
-      zh: "DeepTutor 调用本机 MiMo Code 时的模型、推理强度与运行参数。",
+      zh: `${PUBLIC_PRODUCT_NAME}调用本机 MiMo Code 时的模型、推理强度与运行参数。`,
       en: "Model, reasoning effort, and run params for the local MiMo Code.",
     },
     icon: MimoGlyph as unknown as LucideIcon,

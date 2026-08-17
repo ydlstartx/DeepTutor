@@ -1,4 +1,5 @@
 import { apiFetch, apiUrl } from "@/lib/api";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 export type CodexReasoningModel = {
   model: string;
@@ -149,7 +150,7 @@ export async function requestCodex<T>(
     } catch {
       throw new CodexOAuthApiError(
         "invalid_response",
-        "DeepTutor returned an invalid Codex OAuth response.",
+        `${PUBLIC_PRODUCT_NAME} returned an invalid Codex OAuth response.`,
       );
     }
   }

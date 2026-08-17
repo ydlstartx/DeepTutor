@@ -7,13 +7,14 @@ import {
   useEffect,
   useState,
 } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Menu } from "lucide-react";
+import { GraduationCap, Menu } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useDevice } from "@/hooks/useDevice";
 import type { ReactNode } from "react";
+import PublicSiteFooter from "@/components/layout/PublicSiteFooter";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 /* Lets the sidebar dismiss the drawer after a nav click without every layout
    threading a callback down through WorkspaceSidebar/UtilitySidebar. Null on
@@ -110,27 +111,20 @@ export default function AppShell({ sidebar, children }: AppShellProps) {
             >
               <Menu size={18} strokeWidth={1.7} />
             </button>
-            <Link href="/" className="flex items-center gap-1.5">
-              <Image
-                src="/logo-sm.png"
-                alt="DeepTutor"
-                width={20}
-                height={20}
-                unoptimized
-                className="h-5 w-5"
-              />
-              <Image
-                src="/banner-sm.png"
-                alt="DeepTutor"
-                width={200}
-                height={53}
-                unoptimized
-                className="h-[18px] w-auto"
-              />
+            <Link
+              href="/"
+              aria-label={PUBLIC_PRODUCT_NAME}
+              className="flex items-center gap-1.5"
+            >
+              <GraduationCap className="h-5 w-5" strokeWidth={1.7} />
+              <span className="font-serif text-[15px] font-semibold tracking-wide">
+                {PUBLIC_PRODUCT_NAME}
+              </span>
             </Link>
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+          <PublicSiteFooter />
         </main>
       </div>
     </SidebarDrawerContext.Provider>

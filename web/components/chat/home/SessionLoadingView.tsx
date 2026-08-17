@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Loader2, X } from "lucide-react";
+import { GraduationCap, Loader2, X } from "lucide-react";
+import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
 
 /**
  * Indeterminate loading overlay shown while a chat session is fetched from
@@ -47,13 +48,10 @@ export default function SessionLoadingView({
 
       {/* Logo + spinner */}
       <div className="flex items-center gap-3">
-        <img
-          src="/logo_black-sm.png"
-          alt="DeepTutor"
-          width={32}
-          height={32}
-          className="h-8 w-8 select-none"
-          draggable={false}
+        <GraduationCap
+          aria-label={PUBLIC_PRODUCT_NAME}
+          className="h-8 w-8 text-[var(--foreground)]"
+          strokeWidth={1.5}
         />
         <Loader2 className="h-5 w-5 animate-spin text-[var(--primary)]" />
       </div>

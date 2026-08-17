@@ -1,8 +1,13 @@
+import {
+  PUBLIC_PRODUCT_NAME,
+  PUBLIC_SITE_URL,
+} from "@/lib/public-brand";
+
 const FENCE = "```";
 
-export const CO_WRITER_SAMPLE_TEMPLATE = `# DeepTutor Co-Writer
+export const CO_WRITER_SAMPLE_TEMPLATE = `# ${PUBLIC_PRODUCT_NAME} Co-Writer
 
-> DeepTutor's built-in writing canvas for notes, reports, tutorials, and AI-assisted drafts.
+> ${PUBLIC_PRODUCT_NAME}的内置写作画布，适用于笔记、报告、教程和 AI 辅助草稿。
 
 ### Features
 
@@ -10,14 +15,14 @@ export const CO_WRITER_SAMPLE_TEMPLATE = `# DeepTutor Co-Writer
 - Real-time preview for headings, tables, code, math, flowchart, and sequence diagrams
 - AI editing workflows for rewrite, shorten, and expand
 - HTML tag decoding for tags like <sub>, <sup>, <abbr>, and <mark>
-- A practical starter draft for DeepTutor product docs and learning content
+- A practical starter draft for ${PUBLIC_PRODUCT_NAME} product docs and learning content
 
 ## Headers (Underline)
 
-DeepTutor Learning Note
+${PUBLIC_PRODUCT_NAME} Learning Note
 =============
 
-DeepTutor Study Outline
+${PUBLIC_PRODUCT_NAME} Study Outline
 -------------
 
 ### Characters
@@ -33,21 +38,21 @@ Superscript: X<sup>2</sup>, Subscript: O<sub>2</sub>
 
 **Abbreviation(link HTML abbr tag)**
 
-The <abbr title="Large Language Model">LLM</abbr> layer powers DeepTutor while the <abbr title="Retrieval Augmented Generation">RAG</abbr> layer provides grounded knowledge support.
+The <abbr title="Large Language Model">LLM</abbr> layer powers ${PUBLIC_PRODUCT_NAME} while the <abbr title="Retrieval Augmented Generation">RAG</abbr> layer provides grounded knowledge support.
 
 ### Blockquotes
 
-> DeepTutor helps students turn questions into structured understanding.
+> ${PUBLIC_PRODUCT_NAME} helps students turn questions into structured understanding.
 >
-> "Learn deeply, write clearly.", [DeepTutor](#deeptutor-co-writer)
+> "Learn deeply, write clearly.", [${PUBLIC_PRODUCT_NAME}](#知序求索-co-writer)
 
 ### Links
 
-[DeepTutor Co-Writer](#deeptutor-co-writer "co-writer section")
+[${PUBLIC_PRODUCT_NAME} Co-Writer](#知序求索-co-writer "co-writer section")
 
-[DeepTutor Learning Note](#deeptutor-learning-note)
+[${PUBLIC_PRODUCT_NAME} Learning Note](#知序求索-learning-note)
 
-[DeepTutor Website](https://deeptutor.info)
+[${PUBLIC_PRODUCT_NAME} Website](${PUBLIC_SITE_URL})
 
 [Reference link][deeptutor-doc]
 
@@ -63,7 +68,7 @@ The <abbr title="Large Language Model">LLM</abbr> layer powers DeepTutor while t
 
     from deeptutor.runtime.orchestrator import ChatOrchestrator
     orchestrator = ChatOrchestrator()
-    print("DeepTutor is ready.")
+    print("${PUBLIC_PRODUCT_NAME} is ready.")
 
 #### Python
 
@@ -86,7 +91,7 @@ ${FENCE}
 
 ${FENCE}json
 {
-  "app_name": "DeepTutor",
+  "app_name": "${PUBLIC_PRODUCT_NAME}",
   "default_capability": "chat",
   "enabled_tools": ["rag", "web_search", "code_execution", "reason"],
   "ui": {
@@ -99,22 +104,22 @@ ${FENCE}
 
 ${FENCE}html
 <section class="deeptutor-card">
-  <h1>DeepTutor</h1>
+  <h1>${PUBLIC_PRODUCT_NAME}</h1>
   <p>Write, revise, and organize learning content with AI.</p>
 </section>
 ${FENCE}
 
 ### Images
 
-![](/logo-ver2.png)
+![](/public-brand.svg)
 
-> DeepTutor brand mark used inside the co-writer template.
+> ${PUBLIC_PRODUCT_NAME} brand mark used inside the co-writer template.
 
 ### Lists
 
-- DeepTutor Chat
-- DeepTutor Co-Writer
-- DeepTutor Research
+- ${PUBLIC_PRODUCT_NAME} Chat
+- ${PUBLIC_PRODUCT_NAME} Co-Writer
+- ${PUBLIC_PRODUCT_NAME} Research
 
 1. Draft a concept note
 2. Ask AI to refine it
@@ -136,7 +141,7 @@ Research      | Build structured multi-step reports
 
 ### Markdown extras
 
-- [x] Draft a DeepTutor product note
+- [x] Draft a ${PUBLIC_PRODUCT_NAME} product note
 - [x] Add references and structure
 - [ ] Polish the final explanation
   - [ ] Check headings
@@ -156,7 +161,7 @@ $$ \\sin(\\alpha)^{\\theta}=\\sum_{i=0}^{n}(x^i + \\cos(f))$$
 
 ${FENCE}flow
 st=>start: Student asks a question
-op=>operation: DeepTutor analyzes intent
+op=>operation: ${PUBLIC_PRODUCT_NAME} analyzes intent
 cond=>condition: Need deep workflow?
 chat=>operation: Answer with chat capability
 solve=>operation: Route to deep solve
@@ -172,11 +177,11 @@ ${FENCE}
 ### Sequence Diagram
 
 ${FENCE}seq
-Student->DeepTutor: Ask for help
-DeepTutor->KnowledgeBase: Load context
-Note right of DeepTutor: Collect memory\\nand relevant knowledge
-DeepTutor-->Student: Return guided response
-Student->>DeepTutor: Request rewrite in co-writer
+Student->${PUBLIC_PRODUCT_NAME}: Ask for help
+${PUBLIC_PRODUCT_NAME}->KnowledgeBase: Load context
+Note right of ${PUBLIC_PRODUCT_NAME}: Collect memory\\nand relevant knowledge
+${PUBLIC_PRODUCT_NAME}-->Student: Return guided response
+Student->>${PUBLIC_PRODUCT_NAME}: Request rewrite in co-writer
 ${FENCE}
 
 ### End
