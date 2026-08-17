@@ -54,6 +54,7 @@ export type CatalogModel = {
   // that gate "thinking" via extra_body (e.g. DashScope enable_thinking)
   // treat "minimal" as thinking-off.
   reasoning_effort?: string;
+  codex_supported_reasoning_levels?: string[];
   // Voice (TTS): free-form provider/model-specific voice string, e.g.
   // "alloy", "autumn", "model:voice". `response_format` is the TTS output
   // codec (mp3/wav/...) and is reused by imagegen ("url"/"b64_json").
@@ -84,6 +85,7 @@ export type CatalogProfile = {
   id: string;
   name: string;
   managed_by?: string;
+  codex_account_binding?: string;
   read_only?: boolean;
   binding?: string;
   provider?: string;
@@ -174,6 +176,13 @@ export type ProviderOption = {
   auth_mode?: "api_key" | "oauth";
   reasoning_efforts?: { pattern: string; options: string[]; default: string }[];
   thinking_toggle?: boolean;
+  // Search providers only, from the backend SEARCH_PROVIDERS spec table:
+  // which connection fields the provider consumes, whether missing ones fall
+  // back to a free provider or fail hard, and whether it is still offered.
+  requires_api_key?: boolean;
+  requires_base_url?: boolean;
+  soft_fallback?: boolean;
+  status?: "supported" | "deprecated";
 };
 
 export type SystemStatus = {

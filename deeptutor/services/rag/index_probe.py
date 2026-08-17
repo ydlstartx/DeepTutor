@@ -9,6 +9,7 @@ answer without knowing provider-specific filenames.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import json
 from pathlib import Path
 from typing import Any
@@ -111,10 +112,17 @@ def provider_failure_summary(
     provider: str | None,
     *,
     limit: int = 3,
+    versions: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Return the first provider-specific failure summary under ``kb_dir``."""
+    """Return the first provider-specific failure summary under ``kb_dir``.
+
+    ``versions`` may carry a pre-computed :func:`inspect_kb_versions` result so
+    bulk callers (e.g. ``KnowledgeBaseManager.get_info``) do not rescan and
+    re-parse every index version just to collect failure text.
+    """
+    entries = versions if versions is not None else inspect_kb_versions(kb_dir, provider)
     failures: list[str] = []
-    for entry in inspect_kb_versions(kb_dir, provider):
+    for entry in entries:
         summary = str(entry.get("failure_summary") or "").strip()
         if summary:
             failures.append(summary)
@@ -222,34 +230,28 @@ def _inspect_lightrag(storage_dir: Path) -> ProviderIndexProbe:
     )
 
 
-# docstore.json grows with the KB (tens of MB for large libraries), and the
-# readiness probe above runs several times per API request. Parsing it on
-# every probe made each KB-touching request cost ~1s. Memoize per path on
-# (mtime, size): persistence is atomic (temp-file + os.replace), so an
-# unchanged stamp guarantees an unchanged file.
-_JSON_PARSE_CACHE: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+# docstore.json holds one entry per chunk/node and can be multi-MB, so parsing
+# it is the dominant cost of a LlamaIndex readiness probe. The count only
+# changes when the file itself changes, so it is cached keyed on size +
+# mtime_ns (same freshness convention as storage._freshness_token).
+_DOCSTORE_COUNT_CACHE_SIZE = 128
 
 
-def _read_json_cached(path: Path) -> dict[str, Any] | None:
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    key = str(path)
-    cached = _JSON_PARSE_CACHE.get(key)
-    if cached is not None and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
-        return cached[2]
-    payload = _read_json(path)
-    _JSON_PARSE_CACHE[key] = (stat.st_mtime_ns, stat.st_size, payload)
-    return payload
-
-
-def _llamaindex_doc_count(docstore_path: Path) -> int | None:
-    payload = _read_json_cached(docstore_path)
+@lru_cache(maxsize=_DOCSTORE_COUNT_CACHE_SIZE)
+def _llamaindex_doc_count_cached(path: str, size: int, mtime_ns: int) -> int | None:
+    payload = _read_json(Path(path))
     if not isinstance(payload, dict):
         return None
     data = payload.get("docstore/data")
     return len(data) if isinstance(data, dict) else None
+
+
+def _llamaindex_doc_count(docstore_path: Path) -> int | None:
+    try:
+        stat = docstore_path.stat()
+    except OSError:
+        return None
+    return _llamaindex_doc_count_cached(str(docstore_path), stat.st_size, stat.st_mtime_ns)
 
 
 def _lightrag_doc_count(storage_dir: Path) -> int | None:

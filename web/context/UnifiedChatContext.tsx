@@ -90,6 +90,8 @@ export interface ChatState {
   activeCapability: string | null;
   knowledgeBases: string[];
   llmSelection: LLMSelection | null;
+  /** Persistent mastery state associated with this conversation. */
+  masteryPathId: string | null;
   /** Session-level persona preference; "" = Default (no persona). Applies
    *  to every following message until changed (persisted on the session). */
   personaSelection: string;
@@ -140,6 +142,7 @@ export interface MessageRequestSnapshot {
   historyReferences?: HistoryReferencePayload;
   questionNotebookReferences?: QuestionNotebookReferencePayload;
   bookReferences?: BookReferencePayload[];
+  masteryPathId?: string;
   persona?: string;
   memoryReferences?: MemoryReferencePayload;
   llmSelection?: LLMSelection | null;
@@ -188,6 +191,7 @@ interface SessionSnapshot {
   capability?: string | null;
   knowledgeBases?: string[];
   llmSelection?: LLMSelection | null;
+  masteryPathId?: string | null;
   personaSelection?: string;
   language?: string;
   selectedBranches?: Record<string, number>;
@@ -198,6 +202,10 @@ type Action =
   | { type: "SET_CAPABILITY"; cap: string | null }
   | { type: "SET_KB"; kbs: string[] }
   | { type: "SET_LLM_SELECTION"; selection: LLMSelection | null }
+  // ``key`` targets a specific conversation — a backend push belongs to the
+  // session that produced it, which may no longer be the selected one. The
+  // composer omits it and means "the one on screen".
+  | { type: "SET_MASTERY_PATH_ID"; masteryPathId: string | null; key?: string }
   | { type: "SET_PERSONA_SELECTION"; persona: string }
   | { type: "SET_LANGUAGE"; lang: string }
   | {
@@ -238,6 +246,7 @@ type Action =
     }
   | { type: "DELETE_TURN"; key: string; messageId: number }
   | { type: "NEW_SESSION"; key: string }
+  | { type: "ENSURE_DRAFT_SESSION"; key: string }
   | {
       type: "SET_SELECTED_BRANCH";
       key: string;
@@ -263,6 +272,7 @@ function createSessionEntry(
     activeCapability: null,
     knowledgeBases: [],
     llmSelection: null,
+    masteryPathId: null,
     personaSelection: "",
     messages: [],
     isStreaming: false,
@@ -301,6 +311,24 @@ function updateSelectedSession(
   };
 }
 
+/** Add an empty session under ``key`` and make it the selected one. */
+function selectFreshDraft(state: ProviderState, key: string): ProviderState {
+  const MAX_CACHED_SESSIONS = 20;
+  const nextSessions = {
+    ...state.sessions,
+    [key]: createSessionEntry(key),
+  };
+  const keys = Object.keys(nextSessions);
+  if (keys.length > MAX_CACHED_SESSIONS) {
+    const evictable = keys
+      .filter((k) => k !== key && nextSessions[k].status !== "running")
+      .sort((a, b) => nextSessions[a].updatedAt - nextSessions[b].updatedAt);
+    const toRemove = evictable.slice(0, keys.length - MAX_CACHED_SESSIONS);
+    for (const k of toRemove) delete nextSessions[k];
+  }
+  return { ...state, selectedKey: key, sessions: nextSessions };
+}
+
 function isSameTurnEvent(a: StreamEvent, b: StreamEvent): boolean {
   const aSeq = Number(a.seq || 0);
   const bSeq = Number(b.seq || 0);
@@ -332,6 +360,23 @@ function reducer(state: ProviderState, action: Action): ProviderState {
         ...session,
         llmSelection: action.selection,
       }));
+    case "SET_MASTERY_PATH_ID": {
+      if (!action.key) {
+        return updateSelectedSession(state, (session) => ({
+          ...session,
+          masteryPathId: action.masteryPathId,
+        }));
+      }
+      const target = state.sessions[action.key];
+      if (!target) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [action.key]: { ...target, masteryPathId: action.masteryPathId },
+        },
+      };
+    }
     case "SET_PERSONA_SELECTION":
       return updateSelectedSession(state, (session) => ({
         ...session,
@@ -608,6 +653,10 @@ function reducer(state: ProviderState, action: Action): ProviderState {
               action.llmSelection !== undefined
                 ? action.llmSelection
                 : existing.llmSelection,
+            masteryPathId:
+              action.masteryPathId !== undefined
+                ? action.masteryPathId
+                : existing.masteryPathId,
             personaSelection:
               action.personaSelection !== undefined
                 ? action.personaSelection
@@ -746,26 +795,16 @@ function reducer(state: ProviderState, action: Action): ProviderState {
         ...state,
         sidebarRefreshToken: state.sidebarRefreshToken + 1,
       };
-    case "NEW_SESSION": {
-      const MAX_CACHED_SESSIONS = 20;
-      let nextSessions = {
-        ...state.sessions,
-        [action.key]: createSessionEntry(action.key),
-      };
-      const keys = Object.keys(nextSessions);
-      if (keys.length > MAX_CACHED_SESSIONS) {
-        const evictable = keys
-          .filter(
-            (k) => k !== action.key && nextSessions[k].status !== "running",
-          )
-          .sort(
-            (a, b) => nextSessions[a].updatedAt - nextSessions[b].updatedAt,
-          );
-        const toRemove = evictable.slice(0, keys.length - MAX_CACHED_SESSIONS);
-        for (const k of toRemove) delete nextSessions[k];
-      }
-      return { ...state, selectedKey: action.key, sessions: nextSessions };
-    }
+    case "NEW_SESSION":
+      return selectFreshDraft(state, action.key);
+    // Idempotent variant of NEW_SESSION: guarantees there is *a* selected
+    // session without discarding one a page already selected and configured.
+    // The check belongs here rather than in the caller because a mount effect
+    // only ever sees the state of the render that created it, which is stale
+    // the moment anything else has dispatched.
+    case "ENSURE_DRAFT_SESSION":
+      if (state.selectedKey && state.sessions[state.selectedKey]) return state;
+      return selectFreshDraft(state, action.key);
     default:
       return state;
   }
@@ -788,6 +827,7 @@ interface ChatContextValue {
   setCapability: (cap: string | null) => void;
   setKBs: (kbs: string[]) => void;
   setLLMSelection: (selection: LLMSelection | null) => void;
+  setMasteryPathId: (masteryPathId: string | null) => void;
   setPersonaSelection: (persona: string) => void;
   setLanguage: (lang: string) => void;
   sendMessage: (
@@ -988,6 +1028,10 @@ function hydrateRequestSnapshot(
   const memoryReferences = asMemoryReferences(stored.memoryReferences);
   const bookReferences = normalizeBookReferences(stored.bookReferences);
   const llmSelection = asLLMSelection(stored.llmSelection);
+  const masteryPathId =
+    typeof (stored.masteryPathId ?? stored.mastery_path_id) === "string"
+      ? String(stored.masteryPathId ?? stored.mastery_path_id).trim()
+      : "";
 
   if (config && Object.keys(config).length) snapshot.config = config;
   if (notebookReferences.length)
@@ -1000,6 +1044,7 @@ function hydrateRequestSnapshot(
   if (persona) snapshot.persona = persona;
   if (memoryReferences.length) snapshot.memoryReferences = memoryReferences;
   if (llmSelection) snapshot.llmSelection = llmSelection;
+  if (masteryPathId) snapshot.masteryPathId = masteryPathId;
   return snapshot;
 }
 
@@ -1118,21 +1163,30 @@ export function UnifiedChatProvider({
         return;
       }
       if (event.type === "session_meta") {
-        // Post-turn metadata push (currently only used for the
-        // LLM-generated session title). The backend writes the new
-        // title to its store *before* sending this event. Update the
-        // active header immediately and bump the sidebar so history
-        // rows refresh to the generated title without a flicker.
-        const title = String(
-          (event.metadata as { title?: string } | undefined)?.title || "",
-        ).trim();
+        // Post-turn metadata push: session state the backend settled during
+        // the turn. It writes each value to its store *before* sending this,
+        // so applying it here only catches the open client up to what a
+        // reload would already show.
+        const meta = event.metadata as
+          | { title?: string; mastery_path_id?: string }
+          | undefined;
+        // The tutor can move a conversation between mastery paths mid-turn;
+        // without this the composer would keep naming the path it started on.
+        if (typeof meta?.mastery_path_id === "string") {
+          dispatch({
+            type: "SET_MASTERY_PATH_ID",
+            key: effectiveKey,
+            masteryPathId: meta.mastery_path_id.trim() || null,
+          });
+        }
+        const title = String(meta?.title || "").trim();
         if (title) {
           dispatch({
             type: "SET_SESSION_TITLE",
             key: effectiveKey,
             title,
           });
-        } else {
+        } else if (!meta?.mastery_path_id) {
           dispatch({ type: "BUMP_SIDEBAR_REFRESH" });
         }
         return;
@@ -1379,6 +1433,10 @@ export function UnifiedChatProvider({
           ? session.preferences.knowledge_bases
           : [],
         llmSelection: asLLMSelection(session.preferences?.llm_selection),
+        masteryPathId:
+          typeof session.preferences?.mastery_path_id === "string"
+            ? session.preferences.mastery_path_id
+            : null,
         personaSelection:
           typeof session.preferences?.persona === "string"
             ? session.preferences.persona
@@ -1444,11 +1502,15 @@ export function UnifiedChatProvider({
   // URL is now the source of truth for session loading.
   // Chat pages load sessions based on URL params; no sessionStorage restore needed.
   // Initialize a draft session so the provider always has a selected key.
+  //
+  // React flushes a child's effects before its parent's, so any page under
+  // this provider has already picked and configured its session by the time
+  // this runs — a plain NEW_SESSION here would throw that away (it is what
+  // used to silently drop ``/home?capability=…&mastery_path_id=…``). The
+  // reducer decides on live state; this only supplies the key it may need.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (!state.selectedKey) {
-      dispatch({ type: "NEW_SESSION", key: makeDraftKey() });
-    }
+    dispatch({ type: "ENSURE_DRAFT_SESSION", key: makeDraftKey() });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Idle timeout: if a streaming session receives no events for the configured
@@ -1532,6 +1594,8 @@ export function UnifiedChatProvider({
         replaySnapshot && "llmSelection" in replaySnapshot
           ? (replaySnapshot.llmSelection ?? null)
           : session.llmSelection;
+      const effectiveMasteryPathId =
+        replaySnapshot?.masteryPathId ?? session.masteryPathId;
       const effectiveLanguage =
         replaySnapshot?.language ?? readStoredResponseLanguage();
       // Persona resolution: replay snapshot wins; then an explicit per-call
@@ -1586,6 +1650,9 @@ export function UnifiedChatProvider({
           : {}),
         ...(effectiveBookReferences?.length
           ? { bookReferences: effectiveBookReferences }
+          : {}),
+        ...(effectiveMasteryPathId
+          ? { masteryPathId: effectiveMasteryPathId }
           : {}),
         ...(effectivePersona ? { persona: effectivePersona } : {}),
         ...(effectiveMemoryReferences?.length
@@ -1654,6 +1721,9 @@ export function UnifiedChatProvider({
           : {}),
         ...(effectiveBookReferences?.length
           ? { book_references: effectiveBookReferences }
+          : {}),
+        ...(effectiveMasteryPathId
+          ? { mastery_path_id: effectiveMasteryPathId }
           : {}),
         // Always sent (possibly ""): an explicit key is the backend's signal
         // to persist the value into session.preferences — "" clears back to
@@ -1781,6 +1851,7 @@ export function UnifiedChatProvider({
       activeCapability: current.activeCapability,
       knowledgeBases: current.knowledgeBases,
       llmSelection: current.llmSelection,
+      masteryPathId: current.masteryPathId,
       personaSelection: current.personaSelection,
       messages: current.messages,
       isStreaming: current.isStreaming,
@@ -1802,6 +1873,7 @@ export function UnifiedChatProvider({
       activeCapability: derivedState.activeCapability,
       knowledgeBases: derivedState.knowledgeBases,
       llmSelection: derivedState.llmSelection,
+      masteryPathId: derivedState.masteryPathId,
       personaSelection: derivedState.personaSelection,
       language: derivedState.language,
       messages: EMPTY_MESSAGES,
@@ -1816,6 +1888,7 @@ export function UnifiedChatProvider({
       derivedState.activeCapability,
       derivedState.knowledgeBases,
       derivedState.llmSelection,
+      derivedState.masteryPathId,
       derivedState.personaSelection,
       derivedState.language,
     ],
@@ -1865,6 +1938,11 @@ export function UnifiedChatProvider({
 
   const setLLMSelection = useCallback((selection: LLMSelection | null) => {
     dispatch({ type: "SET_LLM_SELECTION", selection });
+  }, []);
+
+  const setMasteryPathId = useCallback((masteryPathId: string | null) => {
+    const normalized = masteryPathId?.trim() || null;
+    dispatch({ type: "SET_MASTERY_PATH_ID", masteryPathId: normalized });
   }, []);
 
   const setPersonaSelection = useCallback((persona: string) => {
@@ -2016,6 +2094,7 @@ export function UnifiedChatProvider({
       setCapability,
       setKBs,
       setLLMSelection,
+      setMasteryPathId,
       setPersonaSelection,
       setLanguage,
       sendMessage,
@@ -2039,6 +2118,7 @@ export function UnifiedChatProvider({
       setCapability,
       setKBs,
       setLLMSelection,
+      setMasteryPathId,
       setPersonaSelection,
       setLanguage,
       sendMessage,
