@@ -194,6 +194,61 @@ def test_rag_providers_lists_llamaindex_and_pageindex(monkeypatch) -> None:
     assert not by_id["ima"].get("modes")
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "kwargs"),
+    [
+        ("post", "/api/v1/knowledge/create", {}),
+        ("post", "/api/v1/knowledge/demo/upload", {}),
+        ("post", "/api/v1/knowledge/demo/reindex", {}),
+        ("post", "/api/v1/knowledge/demo/retry", {}),
+        ("delete", "/api/v1/knowledge/demo", {}),
+        ("put", "/api/v1/knowledge/demo/config", {"json": {}}),
+        ("post", "/api/v1/knowledge/connect-folder", {"json": {}}),
+    ],
+)
+def test_query_only_api_rejects_kb_mutations_with_403(
+    monkeypatch, method: str, path: str, kwargs: dict
+) -> None:
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    with TestClient(_build_app()) as client:
+        response = getattr(client, method)(path, **kwargs)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Knowledge base modification is disabled on this server. "
+        "This deployment is configured for query-only access."
+    )
+
+
+def test_query_only_policy_and_read_endpoints_remain_available(monkeypatch, tmp_path: Path) -> None:
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    manager.config["knowledge_bases"]["existing"] = {
+        "path": "existing",
+        "status": "ready",
+        "rag_provider": "llamaindex",
+    }
+    manager.get_info = lambda name, **_kwargs: {  # type: ignore[attr-defined]
+        "name": name,
+        "is_default": True,
+        "status": "ready",
+        "statistics": {"rag_initialized": True, "rag_provider": "llamaindex"},
+        "metadata": {"name": name, "rag_provider": "llamaindex"},
+        "path": str(manager.base_dir / name),
+    }
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    with TestClient(_build_app()) as client:
+        policy = client.get("/api/v1/knowledge/policy")
+        listing = client.get("/api/v1/knowledge/list")
+
+    assert policy.status_code == 200
+    assert policy.json()["query_only"] is True
+    assert policy.json()["modification_allowed"] is False
+    assert listing.status_code == 200
+    assert [item["name"] for item in listing.json()] == ["existing"]
+
+
 class _ImaListStub:
     def __init__(self, *, result: dict | None = None, error: Exception | None = None) -> None:
         self.result = result or {

@@ -3083,5 +3083,10 @@
   "Generate a chapter on this": "就此生成一章",
   "This book was written without reading your sources.": "这本书生成时没有读取你的资料来源。",
   "Retrieval failed while planning it, so the chapters come from the proposal alone. Rebuilding will try your knowledge bases again.": "规划阶段检索失败，因此各章仅基于方案生成。重建会重新尝试读取你的知识库。",
-  "Source sweep failed": "来源扫描失败"
+  "Source sweep failed": "来源扫描失败",
+  "Query-only knowledge server": "只查询知识库服务器",
+  "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.": "知识库由管理员离线构建并发布，已有知识库仍可正常检索。",
+  "This server provides query-only access. Knowledge bases are built offline and published by an administrator.": "此服务器为只查询知识库环境；知识库由管理员离线构建并发布。",
+  "Disabled by the server's query-only policy.": "服务器只查询策略已禁用此操作。",
+  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "查询功能可用；索引构建和知识库修改已被服务器策略禁用。"
 }

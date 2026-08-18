@@ -22,6 +22,10 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, Any] = {
     "cors_origins": [],
     "disable_ssl_verify": False,
     "chat_attachment_dir": "",
+    # Deployment policy: existing knowledge bases remain queryable, while all
+    # create/index/update/delete operations are rejected.  This is independent
+    # from NODE_ENV and defaults off for normal local/source installs.
+    "kb_query_only": False,
     # Enable the restricted-subprocess code-execution sandbox (the `exec` /
     # `code_execution` tools the office skills — docx/pdf/pptx/xlsx — run on).
     # Default on so document generation works out of the box across all
@@ -565,6 +569,7 @@ class RuntimeSettingsService:
             "CORS_ORIGINS": ",".join(system["cors_origins"]),
             "DISABLE_SSL_VERIFY": _bool_env(system["disable_ssl_verify"]),
             "CHAT_ATTACHMENT_DIR": system["chat_attachment_dir"],
+            "DEEPTUTOR_KB_QUERY_ONLY": _bool_env(system["kb_query_only"]),
             "DEEPTUTOR_SANDBOX_ALLOW_SUBPROCESS": _bool_env(system["sandbox_allow_subprocess"]),
             "AUTH_ENABLED": _bool_env(auth["enabled"]),
             "AUTH_USERNAME": auth["username"],
@@ -665,6 +670,12 @@ class RuntimeSettingsService:
 
     def _apply_system_process_overrides(self, settings: dict[str, Any]) -> dict[str, Any]:
         payload = dict(settings)
+        # This is an explicit deployment policy, not a user-tunable runtime
+        # convenience.  It must remain effective in production images, which
+        # intentionally set DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES=1 for the
+        # ordinary JSON-backed settings.
+        if value := self.process_env.get("DEEPTUTOR_KB_QUERY_ONLY", ""):
+            payload["kb_query_only"] = value
         if value := self._process_env_value("BACKEND_PORT"):
             payload["backend_port"] = value
         if value := self._process_env_value("FRONTEND_PORT"):
@@ -1002,6 +1013,7 @@ class RuntimeSettingsService:
             "cors_origins": _coerce_origins(settings.get("cors_origins")),
             "disable_ssl_verify": _coerce_bool(settings.get("disable_ssl_verify"), False),
             "chat_attachment_dir": _string(settings.get("chat_attachment_dir")),
+            "kb_query_only": _coerce_bool(settings.get("kb_query_only"), False),
             "sandbox_allow_subprocess": _coerce_bool(
                 settings.get("sandbox_allow_subprocess"), True
             ),

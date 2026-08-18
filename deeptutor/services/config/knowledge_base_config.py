@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from deeptutor.knowledge.policy import ensure_kb_write_allowed
 from deeptutor.services.file_io import atomic_write_json, exclusive_write_lock
 from deeptutor.services.path_service import get_path_service
 from deeptutor.services.rag.factory import (
@@ -112,6 +113,7 @@ class KnowledgeBaseConfigService:
         return payload
 
     def _save(self) -> None:
+        ensure_kb_write_allowed()
         self._config = self._normalize_payload(self._config)
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         # Same file KnowledgeBaseManager writes — same atomic write and the
@@ -128,6 +130,7 @@ class KnowledgeBaseConfigService:
         saving it later would clobber a concurrent ``KnowledgeBaseManager``
         status update. Holding the lock across the whole cycle prevents it.
         """
+        ensure_kb_write_allowed()
         with exclusive_write_lock(self.config_path):
             self._refresh()
             yield self._config

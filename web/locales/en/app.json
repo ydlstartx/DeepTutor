@@ -3083,5 +3083,10 @@
   "Generate a chapter on this": "Generate a chapter on this",
   "This book was written without reading your sources.": "This book was written without reading your sources.",
   "Retrieval failed while planning it, so the chapters come from the proposal alone. Rebuilding will try your knowledge bases again.": "Retrieval failed while planning it, so the chapters come from the proposal alone. Rebuilding will try your knowledge bases again.",
-  "Source sweep failed": "Source sweep failed"
+  "Source sweep failed": "Source sweep failed",
+  "Query-only knowledge server": "Query-only knowledge server",
+  "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.": "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.",
+  "This server provides query-only access. Knowledge bases are built offline and published by an administrator.": "This server provides query-only access. Knowledge bases are built offline and published by an administrator.",
+  "Disabled by the server's query-only policy.": "Disabled by the server's query-only policy.",
+  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "Query is available; indexing and knowledge-base modification are disabled by server policy."
 }

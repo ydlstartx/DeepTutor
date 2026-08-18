@@ -16,6 +16,7 @@ import KbFilePreview from "./KbFilePreview";
 interface KbFilesTabProps {
   kb: KnowledgeBase;
   task?: TaskState;
+  readOnly?: boolean;
 }
 
 /**
@@ -24,7 +25,7 @@ interface KbFilesTabProps {
  * `/knowledge`) and this file list can be collapsed to icon-only strips
  * to reclaim horizontal space for the actual preview content.
  */
-export default function KbFilesTab({ kb, task }: KbFilesTabProps) {
+export default function KbFilesTab({ kb, task, readOnly = false }: KbFilesTabProps) {
   const [selectedFile, setSelectedFile] = useState<KnowledgeBaseFile | null>(
     null,
   );
@@ -60,6 +61,7 @@ export default function KbFilesTab({ kb, task }: KbFilesTabProps) {
     <div className="flex h-full min-h-0">
       <KbDocumentList
         kbName={kb.name}
+        readOnly={readOnly}
         refreshKey={refreshKey}
         selectedFile={selectedFile?.name ?? null}
         onSelect={setSelectedFile}

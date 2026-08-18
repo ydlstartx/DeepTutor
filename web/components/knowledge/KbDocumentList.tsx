@@ -30,6 +30,7 @@ import { docIconFor, formatBytes } from "@/lib/doc-attachments";
 
 interface KbDocumentListProps {
   kbName: string;
+  readOnly?: boolean;
   /** Refresh trigger: bumping this prop forces a re-fetch (e.g. after upload). */
   refreshKey?: number;
   selectedFile: string | null;
@@ -113,6 +114,7 @@ function buildTree(entries: KnowledgeBaseFile[]): {
 
 export default function KbDocumentList({
   kbName,
+  readOnly = false,
   refreshKey = 0,
   selectedFile,
   onSelect,
@@ -482,7 +484,7 @@ export default function KbDocumentList({
     return (
       <li key={`f:${node.path}`} className="group/row relative">
         <div
-          draggable
+          draggable={!readOnly}
           onDragStart={(e) => {
             e.dataTransfer.setData("text/plain", node.path);
             e.dataTransfer.effectAllowed = "move";
@@ -498,15 +500,17 @@ export default function KbDocumentList({
                 : "hover:bg-[var(--muted)]/50"
           } ${dragPath === node.path ? "opacity-50" : ""}`}
         >
-          <input
-            type="checkbox"
-            checked={selectedPaths.has(node.path)}
-            onChange={() => toggleSelect(node.path)}
-            onClick={(e) => e.stopPropagation()}
-            title={t("Select file")}
-            aria-label={t("Select file")}
-            className="h-3 w-3 shrink-0 cursor-pointer accent-[var(--primary)]"
-          />
+          {!readOnly && (
+            <input
+              type="checkbox"
+              checked={selectedPaths.has(node.path)}
+              onChange={() => toggleSelect(node.path)}
+              onClick={(e) => e.stopPropagation()}
+              title={t("Select file")}
+              aria-label={t("Select file")}
+              className="h-3 w-3 shrink-0 cursor-pointer accent-[var(--primary)]"
+            />
+          )}
           {renameFor === node.path ? (
             <input
               value={renameValue}
@@ -545,7 +549,7 @@ export default function KbDocumentList({
               </div>
             </button>
           )}
-          <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100">
+          {!readOnly && <div className="flex shrink-0 items-center opacity-0 transition-opacity group-hover/row:opacity-100">
             <button
               type="button"
               onClick={() => {
@@ -573,7 +577,7 @@ export default function KbDocumentList({
             >
               <MoveRight className="h-3.5 w-3.5" />
             </button>
-          </div>
+          </div>}
         </div>
 
         {moveMenuFor === node.path && (
@@ -634,7 +638,7 @@ export default function KbDocumentList({
           </span>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <button
+          {!readOnly && <button
             type="button"
             onClick={() => {
               setNewFolderOpen((v) => !v);
@@ -645,7 +649,7 @@ export default function KbDocumentList({
             className="rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] hover:text-[var(--foreground)]"
           >
             <FolderPlus size={13} strokeWidth={1.7} />
-          </button>
+          </button>}
           <button
             type="button"
             onClick={() => void load(true)}
@@ -672,7 +676,7 @@ export default function KbDocumentList({
         </div>
       </div>
 
-      {newFolderOpen && (
+      {!readOnly && newFolderOpen && (
         <div className="flex items-center gap-1 px-2.5 pb-1.5">
           <input
             value={newFolderName}
@@ -738,7 +742,7 @@ export default function KbDocumentList({
         )}
       </div>
 
-      {selectedPaths.size > 0 && (
+      {!readOnly && selectedPaths.size > 0 && (
         <div className="relative flex shrink-0 items-center gap-1.5 border-t border-[var(--border)] px-2.5 py-2">
           <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--muted-foreground)]">
             {t("{{count}} selected", { count: selectedPaths.size })}

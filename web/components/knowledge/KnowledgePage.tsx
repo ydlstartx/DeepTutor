@@ -23,6 +23,7 @@ export default function KnowledgePage() {
     kbs: allKbs,
     providers,
     uploadPolicy,
+    policy,
     loading,
     error,
     setError,
@@ -253,6 +254,7 @@ export default function KnowledgePage() {
             <KnowledgeHome
               kbs={kbs}
               providers={providers}
+              queryOnly={policy.query_only}
               onOpenKb={openKb}
               onOpenEngine={openEngine}
               onCreate={openCreate}
@@ -262,6 +264,7 @@ export default function KnowledgePage() {
             <EngineDetail
               provider={selectedProvider}
               kbs={kbs}
+              queryOnly={policy.query_only}
               onBack={() => setView("home")}
               onOpenKb={openKb}
               onSelectMode={handleSelectMode}
@@ -273,6 +276,7 @@ export default function KnowledgePage() {
             <KnowledgeHome
               kbs={kbs}
               providers={providers}
+              queryOnly={policy.query_only}
               onOpenKb={openKb}
               onOpenEngine={openEngine}
               onCreate={openCreate}
@@ -281,6 +285,7 @@ export default function KnowledgePage() {
           ) : (
             <KnowledgeBaseDetail
               kb={selectedKb}
+              queryOnly={policy.query_only}
               uploadPolicy={uploadPolicy}
               task={selectedKb ? tasksByKb[selectedKb.name] : undefined}
               history={selectedKb ? (historyByKb[selectedKb.name] ?? []) : []}
@@ -297,7 +302,7 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      <CreateKbModal
+      {!policy.query_only && <CreateKbModal
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
         providers={providers}
@@ -313,7 +318,7 @@ export default function KnowledgePage() {
           setCreateOpen(false);
           setPipelineOpen(true);
         }}
-      />
+      />}
 
       <PageIndexSettingsModal
         isOpen={pipelineOpen}

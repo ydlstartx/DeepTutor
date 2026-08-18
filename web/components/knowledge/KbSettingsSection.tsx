@@ -11,12 +11,14 @@ interface KbSettingsSectionProps {
   kb: KnowledgeBase;
   onSetDefault: () => Promise<void>;
   onDelete: () => Promise<void>;
+  readOnly?: boolean;
 }
 
 export default function KbSettingsSection({
   kb,
   onSetDefault,
   onDelete,
+  readOnly = false,
 }: KbSettingsSectionProps) {
   const { t } = useTranslation();
   const meta = kb.metadata || {};
@@ -58,7 +60,7 @@ export default function KbSettingsSection({
         </dl>
       </section>
 
-      <section className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
+      {!readOnly && <section className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3">
         <div>
           <div className="text-[12.5px] font-medium text-[var(--foreground)]">
             {t("Default knowledge base")}
@@ -82,9 +84,9 @@ export default function KbSettingsSection({
             {t("Set as default")}
           </button>
         )}
-      </section>
+      </section>}
 
-      <section className="space-y-3 rounded-lg border border-red-200 bg-red-50/40 p-3 dark:border-red-900/60 dark:bg-red-950/15">
+      {!readOnly && <section className="space-y-3 rounded-lg border border-red-200 bg-red-50/40 p-3 dark:border-red-900/60 dark:bg-red-950/15">
         <div>
           <div className="text-[12.5px] font-medium text-red-700 dark:text-red-300">
             {t("Danger zone")}
@@ -103,7 +105,7 @@ export default function KbSettingsSection({
           <Trash2 className="h-3 w-3" />
           {t("Delete knowledge base")}
         </button>
-      </section>
+      </section>}
     </div>
   );
 }

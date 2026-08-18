@@ -84,6 +84,15 @@ class ProgressTracker:
         the broadcast, or the UI would still show the superseded task's
         progress from ``.progress.json``.
         """
+        from deeptutor.knowledge.policy import is_kb_query_only
+
+        if is_kb_query_only():
+            _logger_instance().warning(
+                "Dropped progress write for '%s': knowledge bases are query-only",
+                self.kb_name,
+            )
+            return False
+
         accepted = True
         # Save to kb_config.json (centralized config)
         try:
@@ -277,6 +286,9 @@ class ProgressTracker:
 
     def clear(self):
         """Clear progress file"""
+        from deeptutor.knowledge.policy import ensure_kb_write_allowed
+
+        ensure_kb_write_allowed()
         if self.progress_file.exists():
             try:
                 self.progress_file.unlink()

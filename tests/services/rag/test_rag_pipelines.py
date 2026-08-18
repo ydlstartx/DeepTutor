@@ -80,6 +80,37 @@ async def test_search_forwards_mode_kwarg_to_pipeline(fake_service) -> None:
     assert last["kwargs"].get("top_k") == 5
 
 
+@pytest.mark.asyncio
+async def test_query_only_allows_search_but_blocks_all_rag_mutations(
+    fake_service, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.knowledge.policy import KnowledgeBaseWriteDisabledError
+
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    service, pipeline = fake_service
+
+    result = await service.search(query="still readable", kb_name="kb", mode="hybrid")
+    assert result["answer"] == "fake answer"
+    assert pipeline.calls[-1]["op"] == "search"
+
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        await service.initialize("kb", ["doc.txt"])
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        await service.add_documents("kb", ["doc.txt"])
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        await service.delete("kb")
+
+    # The same invariant applies to the LightRAG route specifically: native
+    # query modes remain callable, while graph/index construction never starts.
+    light_service = RAGService(kb_base_dir=service.kb_base_dir, provider="lightrag")
+    light_service._pipelines["lightrag"] = pipeline  # type: ignore[attr-defined]
+    light_result = await light_service.search(query="graph query", kb_name="kb", mode="mix")
+    assert light_result["provider"] == "lightrag"
+    assert pipeline.calls[-1]["kwargs"]["mode"] == "mix"
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        await light_service.initialize("kb", ["doc.txt"])
+
+
 def test_ragservice_routes_provider_from_kb_config_when_metadata_missing(tmp_path) -> None:
     kb = tmp_path / "kb"
     kb.mkdir()

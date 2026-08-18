@@ -63,6 +63,7 @@ import {
 interface EngineDetailProps {
   provider: RagProviderSummary;
   kbs: KnowledgeBase[];
+  queryOnly?: boolean;
   onBack: () => void;
   onOpenKb: (name: string) => void;
   onSelectMode: (providerId: string, mode: string) => Promise<void> | void;
@@ -266,9 +267,11 @@ function NumberField({
 function ModeSelector({
   provider,
   onSelectMode,
+  disabled = false,
 }: {
   provider: RagProviderSummary;
   onSelectMode: (providerId: string, mode: string) => Promise<void> | void;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const modes = useMemo(() => provider.modes ?? [], [provider.modes]);
@@ -302,6 +305,8 @@ function ModeSelector({
             key={mode}
             type="button"
             onClick={() => void pick(mode)}
+            disabled={disabled}
+            title={disabled ? t("Disabled by the server's query-only policy.") : undefined}
             className={`flex flex-col gap-1 rounded-xl border p-3 text-left transition-colors ${
               active
                 ? "border-[var(--primary)] bg-[var(--primary)]/5"
@@ -1480,6 +1485,7 @@ function EnvRequirements({
 export default function EngineDetail({
   provider,
   kbs,
+  queryOnly = false,
   onBack,
   onOpenKb,
   onSelectMode,
@@ -1536,6 +1542,12 @@ export default function EngineDetail({
           onError={onError}
         />
 
+        {queryOnly && (
+          <div className="mt-5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11.5px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-200">
+            {t("Query is available; indexing and knowledge-base modification are disabled by server policy.")}
+          </div>
+        )}
+
         {/* Retrieval modes (graphrag / lightrag) */}
         {hasModes && (
           <Section label={t("Retrieval mode")} icon={Workflow}>
@@ -1544,7 +1556,11 @@ export default function EngineDetail({
                 "The default for new searches. A knowledge base can still override it per-KB.",
               )}
             </p>
-            <ModeSelector provider={provider} onSelectMode={onSelectMode} />
+            <ModeSelector
+              provider={provider}
+              onSelectMode={onSelectMode}
+              disabled={queryOnly}
+            />
           </Section>
         )}
 

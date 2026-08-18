@@ -178,6 +178,16 @@ def build_rag(
     storage_cls = VECTOR_STORAGE_CLASSES[engine_id]
 
     lightrag_kwargs: dict[str, Any] = {}
+    from deeptutor.knowledge.policy import is_kb_query_only
+
+    if is_kb_query_only():
+        # LightRAG enables a persistent LLM response cache by default. A query
+        # miss would therefore write into the published index tree even though
+        # no indexing endpoint ran. Query-only deployments must keep retrieval
+        # fully read-only, so skip that cache while retaining query embeddings
+        # and every native retrieval mode.
+        lightrag_kwargs["enable_llm_cache"] = False
+        lightrag_kwargs["enable_llm_cache_for_entity_extract"] = False
     if storage_cls is not None:
         if not importlib.util.find_spec("faiss"):
             raise RuntimeError(

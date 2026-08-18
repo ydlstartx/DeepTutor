@@ -74,6 +74,8 @@ services:
       - ./data:/app/data
 
     environment:
+      # Explicit deployment policy; defaults to full build + query behavior.
+      - DEEPTUTOR_KB_QUERY_ONLY=${DEEPTUTOR_KB_QUERY_ONLY:-false}
       # Route untrusted shell exec to the runner sidecar (SYSTEM isolation).
       # When this is set, the main app NEVER runs untrusted code in its own
       # process — see deeptutor/services/sandbox/config.py:build_backend().

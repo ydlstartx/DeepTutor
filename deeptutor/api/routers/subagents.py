@@ -24,6 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from deeptutor.api.routers.auth import require_admin
+from deeptutor.api.routers.knowledge import require_kb_write_access
 from deeptutor.knowledge.kb_types import SUBAGENT_KB_TYPE
 from deeptutor.multi_user.knowledge_access import current_kb_manager
 from deeptutor.multi_user.partner_access import assert_partner_allowed, visible_partner_cards
@@ -129,7 +130,7 @@ async def list_connections():
     return {"connections": connections}
 
 
-@router.post("/connections")
+@router.post("/connections", dependencies=[Depends(require_kb_write_access)])
 async def create_connection(payload: ConnectSubagentRequest):
     """Connect a subagent (a local CLI, or one of the user's partners) as a selectable KB.
 
@@ -190,7 +191,7 @@ async def create_connection(payload: ConnectSubagentRequest):
     }
 
 
-@router.delete("/connections/{name}")
+@router.delete("/connections/{name}", dependencies=[Depends(require_kb_write_access)])
 async def delete_connection(name: str):
     """Disconnect a subagent (removes the pointer KB; touches no files)."""
     manager = current_kb_manager()

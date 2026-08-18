@@ -14,6 +14,7 @@ from pathlib import Path
 import shutil
 from typing import List, Optional
 
+from deeptutor.knowledge.policy import ensure_kb_write_allowed
 from deeptutor.services.config import resolve_llm_runtime_config
 from deeptutor.services.file_io import atomic_write_json
 from deeptutor.services.rag.factory import (
@@ -126,6 +127,7 @@ def rename_raw_document(kb_dir: Path, file_path: Path, new_name: str) -> RawDocu
     state. ``file_path`` must already be sandbox-resolved under the KB's raw/
     dir and the caller must have verified the destination name is free.
     """
+    ensure_kb_write_allowed()
     raw_dir = kb_dir / "raw"
     old_key = _raw_hash_key(file_path, raw_dir)
 
@@ -158,6 +160,7 @@ def remove_raw_document(kb_dir: Path, file_path: Path) -> RawDocumentRemoval:
 
     ``file_path`` must already be sandbox-resolved under the KB's raw/ dir.
     """
+    ensure_kb_write_allowed()
     raw_dir = kb_dir / "raw"
     hash_key = _raw_hash_key(file_path, raw_dir)
 
@@ -188,6 +191,7 @@ class DocumentAdder:
         progress_tracker=None,
         rag_provider: str | None = None,
     ):
+        ensure_kb_write_allowed()
         self.kb_name = kb_name
         self.base_dir = Path(base_dir)
         self.kb_dir = self.base_dir / kb_name
@@ -250,6 +254,7 @@ class DocumentAdder:
 
     def add_documents(self, source_files: List[str], allow_duplicates: bool = False) -> List[Path]:
         """Validate and stage files into raw/ before indexing."""
+        ensure_kb_write_allowed()
         logger.info(f"Validating documents for '{self.kb_name}'...")
 
         ingested_hashes = self.get_ingested_hashes()
@@ -292,6 +297,7 @@ class DocumentAdder:
 
     async def process_new_documents(self, new_files: List[Path]) -> DocumentIndexResult:
         """Index staged files via the KB's bound provider."""
+        ensure_kb_write_allowed()
         if not new_files:
             return DocumentIndexResult(processed_files=[], failures=[])
 
@@ -380,6 +386,7 @@ async def add_documents(
     allow_duplicates: bool = False,
 ) -> int:
     """Convenience function used by CLI wrappers."""
+    ensure_kb_write_allowed()
     from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 
     manager = KnowledgeBaseManager(base_dir=base_dir)

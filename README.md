@@ -316,6 +316,28 @@ Open [http://127.0.0.1:3782](http://127.0.0.1:3782). The container creates `/app
 - **Different host ports:** change the left side of each `-p host:container` mapping (e.g. `-p 127.0.0.1:8088:3782`). If you change container-side ports in `/app/data/user/settings/system.json`, restart and update the right side of each mapping to match.
 - **Detached:** add `-d`, then `docker logs -f deeptutor` to follow, `docker stop deeptutor` to stop, `docker rm deeptutor` before reusing the name. The `deeptutor-data` volume keeps your settings and workspace across restarts.
 
+**Query-only knowledge-base production mode.** Build indexes on a compatible
+development machine, publish the complete knowledge-base tree (the
+`kb_config.json` plus each KB directory, including `raw/`, `metadata.json`, and
+all `version-N/` directories), then start the server with:
+
+```bash
+docker run ... \
+  -e DEEPTUTOR_KB_QUERY_ONLY=true \
+  -v /host/data:/app/data \
+  ghcr.io/hkuds/deeptutor:latest
+```
+
+This blocks KB creation, upload/index/re-index, file/config mutation, linking,
+and deletion for every user (including administrators), while list, metadata,
+status, RAG queries, and chat attachments remain available. The production
+image includes the LightRAG query runtime even though indexing is disabled.
+Keep the DeepTutor commit/image tag, LightRAG version, embedding provider/model
+and dimension, and the index storage backend compatible between the builder and
+server. Admin KBs live under `data/knowledge_bases`; per-user KBs live under
+`data/users/<user-id>/knowledge_bases`. Set the flag to `false` (or leave it
+unset) on the offline build machine.
+
 **Remote Docker / reverse proxy:** the browser only talks to the frontend
 origin (`:3782`); the in-container Next.js middleware forwards `/api/*` and
 `/ws/*` to the backend server-side. For the common single-container case you

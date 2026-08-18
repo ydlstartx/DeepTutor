@@ -13,6 +13,7 @@ import shutil
 from typing import Optional
 
 from deeptutor.knowledge.naming import validate_knowledge_base_name
+from deeptutor.knowledge.policy import ensure_kb_write_allowed
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
 from deeptutor.services.config import resolve_llm_runtime_config
 from deeptutor.services.file_io import atomic_write_json
@@ -49,6 +50,7 @@ class KnowledgeBaseInitializer:
 
     def _register_to_config(self) -> None:
         """Register KB in kb_config.json with initializing state."""
+        ensure_kb_write_allowed()
         try:
             from deeptutor.knowledge.manager import KnowledgeBaseManager
 
@@ -76,6 +78,7 @@ class KnowledgeBaseInitializer:
             logger.warning(f"Failed to register KB to config: {e}")
 
     def _update_metadata_with_provider(self, provider: str) -> None:
+        ensure_kb_write_allowed()
         metadata_file = self.kb_dir / "metadata.json"
         metadata: dict = {}
         if metadata_file.exists():
@@ -107,6 +110,7 @@ class KnowledgeBaseInitializer:
 
     def create_directory_structure(self) -> None:
         """Create KB directory structure."""
+        ensure_kb_write_allowed()
         logger.info(f"Creating directory structure for knowledge base: {self.kb_name}")
 
         for dir_path in [
@@ -129,6 +133,7 @@ class KnowledgeBaseInitializer:
 
     def copy_documents(self, source_files: list[str]) -> list[str]:
         """Copy source documents into raw directory."""
+        ensure_kb_write_allowed()
         copied_files: list[str] = []
         for source in source_files:
             source_path = Path(source)
@@ -144,6 +149,7 @@ class KnowledgeBaseInitializer:
         self,
     ) -> bool:
         """Process documents with the KB's bound provider."""
+        ensure_kb_write_allowed()
         provider = self.rag_provider
 
         self.progress_tracker.update(
@@ -250,6 +256,7 @@ async def initialize_knowledge_base(
     rag_provider: Optional[str] = None,
 ) -> bool:
     """Convenience initializer used by CLI wrappers."""
+    ensure_kb_write_allowed()
     from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 
     manager = KnowledgeBaseManager(base_dir=base_dir)

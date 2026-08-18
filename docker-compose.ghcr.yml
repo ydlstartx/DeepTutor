@@ -56,6 +56,10 @@ services:
       # CONTAINERIZATION.md → "One-time migration".
       - ./data:/app/data
 
+    environment:
+      # Explicit deployment policy; defaults to full build + query behavior.
+      - DEEPTUTOR_KB_QUERY_ONLY=${DEEPTUTOR_KB_QUERY_ONLY:-false}
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${DEEPTUTOR_DOCKER_BACKEND_PORT:-8001}/"]
       interval: 30s

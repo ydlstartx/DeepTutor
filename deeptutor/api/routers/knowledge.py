@@ -20,6 +20,7 @@ from uuid import uuid4
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Depends,
     File,
     Form,
     HTTPException,
@@ -42,6 +43,12 @@ from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
 from deeptutor.knowledge.kb_types import is_connected_kb, supports_local_raw_files
 from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 from deeptutor.knowledge.naming import validate_knowledge_base_name
+from deeptutor.knowledge.policy import (
+    KB_QUERY_ONLY_MESSAGE,
+    KnowledgeBaseWriteDisabledError,
+    ensure_kb_write_allowed,
+    is_kb_query_only,
+)
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
 from deeptutor.logging import PROCESS_LOG_PRIVATE_ATTR
 from deeptutor.multi_user.context import get_current_user
@@ -100,6 +107,14 @@ router = APIRouter()
 # Constants for byte conversions
 BYTES_PER_GB = 1024**3
 BYTES_PER_MB = 1024**2
+
+
+def require_kb_write_access() -> None:
+    """Map the shared deployment guard to a stable HTTP 403 response."""
+    try:
+        ensure_kb_write_allowed()
+    except KnowledgeBaseWriteDisabledError as exc:
+        raise HTTPException(status_code=403, detail=KB_QUERY_ONLY_MESSAGE) from exc
 
 
 def format_bytes_human_readable(size_bytes: int) -> str:
@@ -838,6 +853,7 @@ def _matching_index_is_valid(kb_name: str, matching_version: dict | None) -> boo
 
 async def run_initialization_task(initializer: KnowledgeBaseInitializer, task_id: str):
     """Background task for knowledge base initialization"""
+    ensure_kb_write_allowed()
     task_manager = TaskIDManager.get_instance()
     task_stream_manager = get_task_stream_manager()
     task_stream_manager.ensure_task(task_id)
@@ -951,6 +967,7 @@ async def run_upload_processing_task(
         rag_provider: RAG provider already matched against the KB binding
         folder_id: Optional folder ID for sync state update
     """
+    ensure_kb_write_allowed()
     task_manager = TaskIDManager.get_instance()
     task_stream_manager = get_task_stream_manager()
     task_stream_manager.ensure_task(task_id)
@@ -1107,6 +1124,17 @@ async def health_check():
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 
+@router.get("/policy")
+async def get_knowledge_base_policy():
+    """Expose deployment policy for read-only Knowledge Center UX."""
+    query_only = is_kb_query_only()
+    return {
+        "query_only": query_only,
+        "modification_allowed": not query_only,
+        "message": KB_QUERY_ONLY_MESSAGE if query_only else "",
+    }
+
+
 @router.get("/rag-providers")
 async def get_rag_providers():
     """Get list of available RAG providers (with the active per-engine mode)."""
@@ -1137,7 +1165,7 @@ class ProviderModeUpdate(BaseModel):
     mode: str
 
 
-@router.put("/rag-providers/{provider}/mode")
+@router.put("/rag-providers/{provider}/mode", dependencies=[Depends(require_kb_write_access)])
 async def set_rag_provider_mode(provider: str, payload: ProviderModeUpdate):
     """Persist the default retrieval mode for a mode-aware engine.
 
@@ -1592,7 +1620,7 @@ async def get_kb_config(kb_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{kb_name}/config")
+@router.put("/{kb_name}/config", dependencies=[Depends(require_kb_write_access)])
 async def update_kb_config(kb_name: str, config: dict):
     """Update configuration for a specific knowledge base."""
     try:
@@ -1642,7 +1670,7 @@ async def update_kb_config(kb_name: str, config: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/configs/sync")
+@router.post("/configs/sync", dependencies=[Depends(require_kb_write_access)])
 async def sync_configs_from_metadata():
     """Sync all KB configurations from their metadata.json files to centralized config."""
     try:
@@ -1668,7 +1696,7 @@ async def get_default_kb():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/default/{kb_name}")
+@router.put("/default/{kb_name}", dependencies=[Depends(require_kb_write_access)])
 async def set_default_kb(kb_name: str):
     """Set the default knowledge base."""
     try:
@@ -1692,7 +1720,7 @@ class ConnectObsidianRequest(BaseModel):
     vault_path: str
 
 
-@router.post("/connect-obsidian")
+@router.post("/connect-obsidian", dependencies=[Depends(require_kb_write_access)])
 async def connect_obsidian_vault(payload: ConnectObsidianRequest):
     """Connect an existing Obsidian vault as a knowledge base.
 
@@ -1749,7 +1777,7 @@ async def probe_linked_folder_route(payload: ProbeFolderRequest):
     return result.to_dict()
 
 
-@router.post("/connect-folder")
+@router.post("/connect-folder", dependencies=[Depends(require_kb_write_access)])
 async def connect_linked_folder_route(payload: ConnectFolderRequest):
     """Mount an existing engine index as a read-only ``linked`` knowledge base.
 
@@ -1828,7 +1856,7 @@ async def probe_lightrag_server_route(payload: ProbeLightRagServerRequest):
     return result.to_dict()
 
 
-@router.post("/connect-lightrag-server")
+@router.post("/connect-lightrag-server", dependencies=[Depends(require_kb_write_access)])
 async def connect_lightrag_server_route(payload: ConnectLightRagServerRequest):
     """Connect an external LightRAG server as a retrieval-only knowledge base.
 
@@ -1974,7 +2002,7 @@ async def probe_ima_route(payload: ProbeImaRequest):
     return result.to_dict()
 
 
-@router.post("/connect-ima")
+@router.post("/connect-ima", dependencies=[Depends(require_kb_write_access)])
 async def connect_ima_route(payload: ConnectImaRequest):
     """Connect a Tencent IMA knowledge base as a retrieval-only knowledge base.
 
@@ -2341,7 +2369,7 @@ class RenameFilePayload(BaseModel):
     new_name: str = Field(max_length=255)
 
 
-@router.post("/{kb_name}/folders")
+@router.post("/{kb_name}/folders", dependencies=[Depends(require_kb_write_access)])
 async def create_kb_folder(kb_name: str, payload: CreateFolderPayload):
     """Create an (organizational) folder under <kb>/raw/. No retrieval effect."""
     manager, kb_name, _ = _writable_kb(kb_name)
@@ -2355,7 +2383,7 @@ async def create_kb_folder(kb_name: str, payload: CreateFolderPayload):
     return {"status": "ok", "path": subdir}
 
 
-@router.post("/{kb_name}/files/move")
+@router.post("/{kb_name}/files/move", dependencies=[Depends(require_kb_write_access)])
 async def move_kb_file(kb_name: str, payload: MoveFilePayload):
     """Move a file/folder between organizational folders (display only).
 
@@ -2392,7 +2420,7 @@ async def move_kb_file(kb_name: str, payload: MoveFilePayload):
     return {"status": "ok", "path": dest.relative_to(raw_dir.resolve()).as_posix()}
 
 
-@router.post("/{kb_name}/files/rename")
+@router.post("/{kb_name}/files/rename", dependencies=[Depends(require_kb_write_access)])
 async def rename_kb_file(kb_name: str, payload: RenameFilePayload):
     """Rename a raw document, keeping index references consistent.
 
@@ -2507,7 +2535,7 @@ async def serve_kb_raw_file(kb_name: str, filename: str):
     )
 
 
-@router.delete("/{kb_name}/files/{filename:path}")
+@router.delete("/{kb_name}/files/{filename:path}", dependencies=[Depends(require_kb_write_access)])
 async def delete_kb_file(kb_name: str, filename: str):
     """Remove a single raw document from a knowledge base.
 
@@ -2531,7 +2559,7 @@ async def delete_kb_file(kb_name: str, filename: str):
     }
 
 
-@router.delete("/{kb_name}")
+@router.delete("/{kb_name}", dependencies=[Depends(require_kb_write_access)])
 async def delete_knowledge_base(kb_name: str):
     """Delete a knowledge base."""
     try:
@@ -2559,7 +2587,7 @@ async def stream_task_logs(task_id: str):
     )
 
 
-@router.post("/{kb_name}/upload")
+@router.post("/{kb_name}/upload", dependencies=[Depends(require_kb_write_access)])
 async def upload_files(
     kb_name: str,
     background_tasks: BackgroundTasks,
@@ -2667,7 +2695,7 @@ async def upload_files(
         raise HTTPException(status_code=500, detail=formatted_error) from e
 
 
-@router.post("/create")
+@router.post("/create", dependencies=[Depends(require_kb_write_access)])
 async def create_knowledge_base(
     background_tasks: BackgroundTasks,
     name: str = Form(...),
@@ -2804,6 +2832,7 @@ async def run_reindex_task(kb_name: str, base_dir: str, task_id: str, signature_
     untouched so switching the active embedding model back to a
     previously-indexed one reuses the existing version with no extra work.
     """
+    ensure_kb_write_allowed()
     task_manager = TaskIDManager.get_instance()
     task_stream_manager = get_task_stream_manager()
     task_stream_manager.ensure_task(task_id)
@@ -2937,7 +2966,7 @@ async def run_reindex_task(kb_name: str, base_dir: str, task_id: str, signature_
             task_stream_manager.emit_failed(task_id, error_msg, **failure_metadata)
 
 
-@router.post("/{kb_name}/reindex")
+@router.post("/{kb_name}/reindex", dependencies=[Depends(require_kb_write_access)])
 async def reindex_knowledge_base(
     kb_name: str,
     background_tasks: BackgroundTasks,
@@ -3031,7 +3060,7 @@ async def reindex_knowledge_base(
         raise HTTPException(status_code=500, detail=format_exception_message(e))
 
 
-@router.post("/{kb_name}/retry")
+@router.post("/{kb_name}/retry", dependencies=[Depends(require_kb_write_access)])
 async def retry_knowledge_base(
     kb_name: str,
     background_tasks: BackgroundTasks,
@@ -3077,7 +3106,7 @@ async def get_progress(kb_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{kb_name}/progress/clear")
+@router.post("/{kb_name}/progress/clear", dependencies=[Depends(require_kb_write_access)])
 async def clear_progress(kb_name: str):
     """Clear progress file for a knowledge base (useful for stuck states)"""
     try:
@@ -3237,7 +3266,11 @@ async def websocket_progress(websocket: WebSocket, kb_name: str):
                 pass
 
 
-@router.post("/{kb_name}/link-folder", response_model=LinkedFolderInfo)
+@router.post(
+    "/{kb_name}/link-folder",
+    response_model=LinkedFolderInfo,
+    dependencies=[Depends(require_kb_write_access)],
+)
 async def link_folder(kb_name: str, request: LinkFolderRequest):
     """
     Link a local folder to a knowledge base.
@@ -3283,7 +3316,10 @@ async def get_linked_folders(kb_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{kb_name}/linked-folders/{folder_id}")
+@router.delete(
+    "/{kb_name}/linked-folders/{folder_id}",
+    dependencies=[Depends(require_kb_write_access)],
+)
 async def unlink_folder(kb_name: str, folder_id: str):
     """Unlink a folder from a knowledge base."""
     try:
@@ -3301,7 +3337,10 @@ async def unlink_folder(kb_name: str, folder_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{kb_name}/sync-folder/{folder_id}")
+@router.post(
+    "/{kb_name}/sync-folder/{folder_id}",
+    dependencies=[Depends(require_kb_write_access)],
+)
 async def sync_folder(kb_name: str, folder_id: str, background_tasks: BackgroundTasks):
     """
     Sync files from a linked folder to the knowledge base.

@@ -124,6 +124,18 @@ export interface KnowledgeUploadPolicy {
   max_file_size_bytes: number;
 }
 
+export interface KnowledgeBasePolicy {
+  query_only: boolean;
+  modification_allowed: boolean;
+  message: string;
+}
+
+export const DEFAULT_KNOWLEDGE_BASE_POLICY: KnowledgeBasePolicy = {
+  query_only: false,
+  modification_allowed: true,
+  message: "",
+};
+
 export interface KnowledgeBaseFile {
   /** POSIX path relative to the KB's raw/ root (may include folders). */
   name: string;
@@ -200,6 +212,25 @@ export async function listKnowledgeBases(options?: { force?: boolean }) {
     {
       force: options?.force,
     },
+  );
+}
+
+export async function getKnowledgeBasePolicy(options?: { force?: boolean }) {
+  return withClientCache<KnowledgeBasePolicy>(
+    `${KNOWLEDGE_CACHE_PREFIX}policy`,
+    async () => {
+      const response = await apiFetch(apiUrl("/api/v1/knowledge/policy"), {
+        cache: "no-store",
+      });
+      if (!response.ok) return DEFAULT_KNOWLEDGE_BASE_POLICY;
+      const data = await response.json();
+      return {
+        query_only: data?.query_only === true,
+        modification_allowed: data?.modification_allowed !== false,
+        message: typeof data?.message === "string" ? data.message : "",
+      };
+    },
+    { force: options?.force },
   );
 }
 

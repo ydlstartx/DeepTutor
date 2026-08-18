@@ -902,6 +902,18 @@ def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
     assert captured["lightrag_kwargs"] == {}
 
 
+def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatch) -> None:
+    captured = _stub_raganything(monkeypatch)
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108
+
+    assert captured["lightrag_kwargs"] == {
+        "enable_llm_cache": False,
+        "enable_llm_cache_for_entity_extract": False,
+    }
+
+
 def test_write_meta_records_and_pins_vector_storage(tmp_path) -> None:
     root = tmp_path / "version-1"
     root.mkdir()

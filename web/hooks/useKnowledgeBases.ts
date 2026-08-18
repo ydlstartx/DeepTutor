@@ -8,6 +8,8 @@ import {
   connectObsidianVault as connectObsidianApi,
   createKnowledgeBase as createKbApi,
   deleteKnowledgeBase as deleteKbApi,
+  DEFAULT_KNOWLEDGE_BASE_POLICY,
+  getKnowledgeBasePolicy,
   getKnowledgeUploadPolicy,
   invalidateKnowledgeCaches,
   listKnowledgeBases,
@@ -17,6 +19,7 @@ import {
   setDefaultKnowledgeBase as setDefaultKbApi,
   uploadKnowledgeBaseFiles as uploadKbApi,
   type KnowledgeTaskResponse,
+  type KnowledgeBasePolicy,
   type KnowledgeUploadPolicy,
   type RagProviderSummary,
 } from "@/lib/knowledge-api";
@@ -47,6 +50,9 @@ export function useKnowledgeBases() {
   const [providers, setProviders] = useState<RagProviderSummary[]>([]);
   const [uploadPolicy, setUploadPolicy] = useState<KnowledgeUploadPolicy>(
     DEFAULT_UPLOAD_POLICY,
+  );
+  const [policy, setPolicy] = useState<KnowledgeBasePolicy>(
+    DEFAULT_KNOWLEDGE_BASE_POLICY,
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -84,16 +90,21 @@ export function useKnowledgeBases() {
       if (showSpinner) setLoading(true);
       setError(null);
       try {
-        const [kbList, providerList, policy] = await Promise.all([
+        const [kbList, providerList, uploadPolicyResult, policyResult] =
+          await Promise.all([
           listKnowledgeBases({ force: opts?.force }),
           listRagProviders({ force: opts?.force }),
           getKnowledgeUploadPolicy({ force: opts?.force }).catch(
             () => DEFAULT_UPLOAD_POLICY,
           ),
+          getKnowledgeBasePolicy({ force: opts?.force }).catch(
+            () => DEFAULT_KNOWLEDGE_BASE_POLICY,
+          ),
         ]);
         const typedKbs = kbList as KnowledgeBase[];
         setKbs(typedKbs);
-        setUploadPolicy(policy);
+        setUploadPolicy(uploadPolicyResult);
+        setPolicy(policyResult);
         // Keep the array reference stable across the 4s indexing poll when
         // nothing changed, so consumers keyed on `providers` don't re-fire.
         setProviders((prev) => {
@@ -360,6 +371,7 @@ export function useKnowledgeBases() {
     rawKbs: kbs,
     providers,
     uploadPolicy,
+    policy,
     loading,
     error,
     setError,

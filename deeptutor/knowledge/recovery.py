@@ -63,6 +63,11 @@ def recover_interrupted_kb_tasks(base_dir: str | Path) -> list[str]:
     Indexed data is never touched; re-indexing resumes from the raw files.
     Returns the recovered KB names.
     """
+    from deeptutor.knowledge.policy import is_kb_query_only
+
+    if is_kb_query_only():
+        return []
+
     from deeptutor.knowledge.manager import KnowledgeBaseManager
 
     base = Path(base_dir)

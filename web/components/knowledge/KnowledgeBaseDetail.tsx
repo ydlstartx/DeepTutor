@@ -31,6 +31,7 @@ type DetailSection = "files" | "add" | "versions" | "settings";
 
 interface KnowledgeBaseDetailProps {
   kb: KnowledgeBase | null;
+  queryOnly?: boolean;
   uploadPolicy: KnowledgeUploadPolicy;
   task?: TaskState;
   history: HistoryEntry[];
@@ -60,6 +61,7 @@ const FULL_BLEED_SECTIONS = new Set<DetailSection>(["files"]);
 
 export default function KnowledgeBaseDetail({
   kb,
+  queryOnly = false,
   uploadPolicy,
   task,
   history,
@@ -91,13 +93,13 @@ export default function KnowledgeBaseDetail({
               "Pick a knowledge base from the list, or create a new one to get started.",
             )}
           </p>
-          <button
+          {!queryOnly && <button
             type="button"
             onClick={onCreate}
             className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
           >
             {t("Create your first knowledge base")}
-          </button>
+          </button>}
         </div>
       </main>
     );
@@ -118,7 +120,9 @@ export default function KnowledgeBaseDetail({
     (task?.kind === "reindex" || task?.kind === "retry") &&
     task.executing === true;
   const status = resolveKbStatus(kb);
-  const canRetry = status === "error" && !kb.read_only;
+  const mutationDisabled = queryOnly || Boolean(kb.read_only);
+  const activeSection = queryOnly && section === "add" ? "files" : section;
+  const canRetry = status === "error" && !mutationDisabled;
 
   const handleRetry = async () => {
     if (!canRetry || retrySubmitting || isReindexingLocally) return;
@@ -130,7 +134,7 @@ export default function KnowledgeBaseDetail({
     }
   };
 
-  const fullBleed = FULL_BLEED_SECTIONS.has(section);
+  const fullBleed = FULL_BLEED_SECTIONS.has(activeSection);
 
   return (
     <main className="flex h-full flex-1 flex-col overflow-hidden bg-[var(--background)]">
@@ -197,10 +201,18 @@ export default function KnowledgeBaseDetail({
           )}
         </div>
 
+        {queryOnly && (
+          <div className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11.5px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-200">
+            {t(
+              "This server provides query-only access. Knowledge bases are built offline and published by an administrator.",
+            )}
+          </div>
+        )}
+
         {/* Section nav */}
         <nav className="-mb-3 mt-3 flex gap-1 overflow-x-auto">
-          {SECTIONS.map(({ key, label, Icon }) => {
-            const active = section === key;
+          {SECTIONS.filter(({ key }) => !queryOnly || key !== "add").map(({ key, label, Icon }) => {
+            const active = activeSection === key;
             return (
               <button
                 key={key}
@@ -222,12 +234,12 @@ export default function KnowledgeBaseDetail({
 
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {section === "files" ? (
-          <KbFilesTab key={kb.name} kb={kb} task={task} />
+        {activeSection === "files" ? (
+          <KbFilesTab key={kb.name} kb={kb} task={task} readOnly={mutationDisabled} />
         ) : (
           <div className="h-full overflow-y-auto px-6 py-5">
             <div className={fullBleed ? "" : "mx-auto max-w-3xl"}>
-              {section === "add" && (
+              {activeSection === "add" && (
                 <KbDocumentsSection
                   kb={kb}
                   uploadPolicy={uploadPolicy}
@@ -236,16 +248,17 @@ export default function KnowledgeBaseDetail({
                   onClearHistory={() => onClearHistory(kb.name)}
                   onRetry={handleRetry}
                   onUpload={(files) =>
-                    kb.read_only ? Promise.resolve() : onUpload(kb.name, files)
+                    mutationDisabled ? Promise.resolve() : onUpload(kb.name, files)
                   }
                 />
               )}
-              {section === "versions" && (
+              {activeSection === "versions" && (
                 <KbIndexVersionsSection
                   kb={kb}
                   task={task}
+                  readOnly={mutationDisabled}
                   onReindex={() =>
-                    kb.read_only
+                    mutationDisabled
                       ? Promise.resolve()
                       : status === "error"
                         ? handleRetry()
@@ -253,14 +266,15 @@ export default function KnowledgeBaseDetail({
                   }
                 />
               )}
-              {section === "settings" && (
+              {activeSection === "settings" && (
                 <KbSettingsSection
                   kb={kb}
+                  readOnly={mutationDisabled}
                   onSetDefault={() =>
-                    kb.read_only ? Promise.resolve() : onSetDefault(kb.name)
+                    mutationDisabled ? Promise.resolve() : onSetDefault(kb.name)
                   }
                   onDelete={() =>
-                    kb.read_only ? Promise.resolve() : onDelete(kb.name)
+                    mutationDisabled ? Promise.resolve() : onDelete(kb.name)
                   }
                 />
               )}

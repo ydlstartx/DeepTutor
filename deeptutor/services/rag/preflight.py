@@ -152,7 +152,7 @@ def _lightrag_preflight() -> dict:
         [
             _check(
                 "package",
-                "RAG-Anything package installed",
+                "LightRAG query runtime installed",
                 installed,
                 "Installed." if installed else "pip install 'deeptutor[rag-lightrag]'",
             ),
@@ -230,7 +230,20 @@ _PREFLIGHTS = {
 
 def engine_preflight(provider: str) -> dict[str, Any]:
     """Run the requirement checks for ``provider`` and return the report."""
-    return _PREFLIGHTS[normalize_provider_name(provider)]()
+    report = _PREFLIGHTS[normalize_provider_name(provider)]()
+    from deeptutor.knowledge.policy import is_kb_query_only
+
+    if is_kb_query_only():
+        report["checks"].append(
+            _check(
+                "indexing_policy",
+                "Indexing policy",
+                True,
+                "Indexing is disabled by server policy; query capability remains available.",
+                optional=True,
+            )
+        )
+    return report
 
 
 __all__ = ["engine_preflight"]

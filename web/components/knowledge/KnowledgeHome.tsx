@@ -11,6 +11,7 @@ import {
   Database,
   FolderOpen,
   Network,
+  LockKeyhole,
   Plus,
   Search,
   Server,
@@ -33,6 +34,7 @@ import type { RagProviderSummary } from "@/lib/knowledge-api";
 interface KnowledgeHomeProps {
   kbs: KnowledgeBase[];
   providers: RagProviderSummary[];
+  queryOnly?: boolean;
   onOpenKb: (name: string) => void;
   onOpenEngine: (id: string) => void;
   onCreate: () => void;
@@ -91,6 +93,7 @@ function StatusDot({ kb }: { kb: KnowledgeBase }) {
 export default function KnowledgeHome({
   kbs,
   providers,
+  queryOnly = false,
   onOpenKb,
   onOpenEngine,
   onCreate,
@@ -132,15 +135,31 @@ export default function KnowledgeHome({
               {t("Manage your knowledge bases and retrieval engines.")}
             </p>
           </div>
-          <button
+          {!queryOnly && <button
             type="button"
             onClick={onCreate}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
           >
             <Plus size={14} />
             {t("New knowledge base")}
-          </button>
+          </button>}
         </div>
+
+        {queryOnly && (
+          <div className="mt-4 flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2.5 text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-200">
+            <LockKeyhole className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <div className="text-[12.5px] font-medium">
+                {t("Query-only knowledge server")}
+              </div>
+              <p className="mt-0.5 text-[11.5px] leading-relaxed opacity-80">
+                {t(
+                  "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.",
+                )}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Retrieval engines */}
         <section className="mt-8">
@@ -192,7 +211,7 @@ export default function KnowledgeHome({
                 pointer to a live vault the tutor reads & writes in place. Shown
                 here for discoverability; clicking opens the unified create flow
                 pre-set to link a vault. */}
-            <button
+            {!queryOnly && <button
               type="button"
               onClick={onConnectObsidian}
               className="group flex flex-col gap-2 rounded-2xl border border-[var(--border)] p-3.5 text-left transition-colors hover:border-[var(--ring)]"
@@ -226,7 +245,7 @@ export default function KnowledgeHome({
                 </span>
                 <ChevronRight className="ml-auto h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-60" />
               </div>
-            </button>
+            </button>}
           </div>
         </section>
 
@@ -267,14 +286,14 @@ export default function KnowledgeHome({
                   "Create one to upload documents and retrieve grounded context in chat.",
                 )}
               </p>
-              <button
+              {!queryOnly && <button
                 type="button"
                 onClick={onCreate}
                 className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
               >
                 <Plus size={14} />
                 {t("New knowledge base")}
-              </button>
+              </button>}
             </div>
           ) : filteredKbs.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--border)] px-4 py-8 text-center text-[12px] text-[var(--muted-foreground)]">

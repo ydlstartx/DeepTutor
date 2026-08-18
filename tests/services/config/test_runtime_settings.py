@@ -18,6 +18,7 @@ RUNTIME_ENV_KEYS = (
     "CORS_ORIGINS",
     "DISABLE_SSL_VERIFY",
     "CHAT_ATTACHMENT_DIR",
+    "DEEPTUTOR_KB_QUERY_ONLY",
     "AUTH_ENABLED",
     "NEXT_PUBLIC_AUTH_ENABLED",
     "AUTH_USERNAME",
@@ -76,6 +77,23 @@ def test_runtime_process_env_is_explicit_override(tmp_path: Path) -> None:
     assert _read_json(service.path_for("system"))["backend_port"] == 8001
     assert _read_json(service.path_for("auth"))["enabled"] is False
     assert _read_json(service.path_for("integrations"))["pocketbase_port"] == 8090
+
+
+def test_kb_query_only_deployment_policy_defaults_off_and_survives_ignore_overrides(
+    tmp_path: Path,
+) -> None:
+    default_service = RuntimeSettingsService(tmp_path / "default-settings", process_env={})
+    assert default_service.load_system()["kb_query_only"] is False
+
+    production_service = RuntimeSettingsService(
+        tmp_path / "production-settings",
+        process_env={
+            "DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES": "1",
+            "DEEPTUTOR_KB_QUERY_ONLY": "true",
+        },
+    )
+    assert production_service.load_system()["kb_query_only"] is True
+    assert production_service.render_environment()["DEEPTUTOR_KB_QUERY_ONLY"] == "true"
 
 
 def test_render_environment_uses_json_backed_runtime_names(monkeypatch, tmp_path: Path) -> None:

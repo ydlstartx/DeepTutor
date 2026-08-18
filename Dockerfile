@@ -92,11 +92,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Add Rust to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Copy requirements and install Python dependencies
+# Copy dependency metadata before application source so ordinary code changes
+# keep the (heavy) Python runtime layer cached.  LightRAG versions come only
+# from pyproject.toml's rag-lightrag extra; Docker does not duplicate them.
 COPY requirements/ ./requirements/
 COPY requirements.txt ./
+COPY pyproject.toml ./
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install -r requirements.txt && \
+    python -c "import pathlib,tomllib; p=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); pathlib.Path('/tmp/rag-lightrag.txt').write_text('\\n'.join(p['project']['optional-dependencies']['rag-lightrag'])+'\\n')" && \
+    pip install -r /tmp/rag-lightrag.txt && \
+    python -c "import lightrag, raganything; print('LightRAG query runtime import: OK')"
 
 # ============================================
 # Stage 3: Production Image

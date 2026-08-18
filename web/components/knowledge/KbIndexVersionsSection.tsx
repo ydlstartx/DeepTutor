@@ -28,12 +28,14 @@ interface KbIndexVersionsSectionProps {
   kb: KnowledgeBase;
   task?: TaskState;
   onReindex: () => Promise<void>;
+  readOnly?: boolean;
 }
 
 export default function KbIndexVersionsSection({
   kb,
   task,
   onReindex,
+  readOnly = false,
 }: KbIndexVersionsSectionProps) {
   const { t } = useTranslation();
   const [submitting, setSubmitting] = useState(false);
@@ -79,7 +81,7 @@ export default function KbIndexVersionsSection({
           </div>
         </div>
 
-        {showReindexCta && (
+        {showReindexCta && !readOnly && (
           <button
             type="button"
             onClick={handleReindex}

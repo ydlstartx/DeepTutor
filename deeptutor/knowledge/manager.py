@@ -29,6 +29,7 @@ from deeptutor.knowledge.kb_types import (
     is_connected_kb,
 )
 from deeptutor.knowledge.manifest import iter_kb_documents
+from deeptutor.knowledge.policy import ensure_kb_write_allowed, is_kb_query_only
 from deeptutor.services.file_io import atomic_write_json, exclusive_write_lock
 from deeptutor.services.rag.factory import (
     DEFAULT_PROVIDER,
@@ -304,7 +305,8 @@ class KnowledgeBaseManager:
 
     def __init__(self, base_dir="./data/knowledge_bases"):
         self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        if not is_kb_query_only():
+            self.base_dir.mkdir(parents=True, exist_ok=True)
 
         # Config file to track knowledge bases
         self.config_file = self.base_dir / "kb_config.json"
@@ -334,6 +336,11 @@ class KnowledgeBaseManager:
             return {"knowledge_bases": {}}
 
         if not self._normalize_config(config):
+            return config
+        if is_kb_query_only():
+            # Normalization is useful to readers, but persisting migrations or
+            # reconciled flags would violate the deployment's immutable-KB
+            # invariant.
             return config
         # Persisting the normalization must not resurrect a stale snapshot:
         # another writer may have saved since the unlocked read above, so
@@ -429,6 +436,7 @@ class KnowledgeBaseManager:
         under the cross-process ``.lock`` file (reentrant in-thread), so it
         serializes against ``update_kb_status``'s read-check-write cycle.
         """
+        ensure_kb_write_allowed()
         with exclusive_write_lock(self.config_file):
             atomic_write_json(self.config_file, self.config)
 
@@ -470,6 +478,7 @@ class KnowledgeBaseManager:
         dead-owner zombies may be claimed; the claim stamps this process and
         task as the owner.
         """
+        ensure_kb_write_allowed()
         with exclusive_write_lock(self.config_file):
             self.config = self._load_config()
             current = self.config.get("knowledge_bases", {}).get(name) or {}
@@ -489,6 +498,7 @@ class KnowledgeBaseManager:
         of the config belongs in here. Raising inside the block aborts
         without saving.
         """
+        ensure_kb_write_allowed()
         with exclusive_write_lock(self.config_file):
             self.config = self._load_config()
             yield self.config
@@ -537,6 +547,7 @@ class KnowledgeBaseManager:
         Returns:
             True when the status was written, False when the guard skipped it.
         """
+        ensure_kb_write_allowed()
         with exclusive_write_lock(self.config_file):
             written, kb_config = self._update_kb_status_locked(
                 name, status, progress, only_if_status_in, only_if_task
@@ -802,7 +813,14 @@ class KnowledgeBaseManager:
         # write lock and re-apply the decisions onto fresh state, so a status
         # update that landed during the scans above is never overwritten by
         # this method's stale snapshot.
-        if to_prune or to_register:
+        if (to_prune or to_register) and is_kb_query_only():
+            # Keep discovery useful without writing auto-registration or
+            # orphan cleanup back to the published index tree.
+            for name in to_register:
+                self.config.setdefault("knowledge_bases", {}).setdefault(
+                    name, self._auto_register_entry(name)
+                )
+        elif to_prune or to_register:
             with self.transact() as config:
                 fresh_kbs = config.setdefault("knowledge_bases", {})
                 for kb_name in to_prune:
@@ -1555,6 +1573,7 @@ class KnowledgeBaseManager:
         Returns:
             True if deleted successfully
         """
+        ensure_kb_write_allowed()
         # Look up against the raw config rather than ``list_knowledge_bases``:
         # the latter prunes orphan entries (dir missing) as a side effect, so
         # calling it here would race-delete the entry we are about to clean up
@@ -1638,6 +1657,7 @@ class KnowledgeBaseManager:
         Returns:
             True if cleaned successfully
         """
+        ensure_kb_write_allowed()
         kb_name = name or self.get_default()
         kb_dir = self.get_knowledge_base_path(kb_name)
         from deeptutor.services.rag.index_versioning import (
@@ -1700,6 +1720,7 @@ class KnowledgeBaseManager:
         Raises:
             ValueError: If KB not found or folder doesn't exist
         """
+        ensure_kb_write_allowed()
         if kb_name not in self.list_knowledge_bases():
             raise ValueError(f"Knowledge base not found: {kb_name}")
 
@@ -1793,6 +1814,7 @@ class KnowledgeBaseManager:
         Returns:
             True if unlinked successfully, False if not found
         """
+        ensure_kb_write_allowed()
         if kb_name not in self.list_knowledge_bases():
             raise ValueError(f"Knowledge base not found: {kb_name}")
 
@@ -1919,6 +1941,7 @@ class KnowledgeBaseManager:
             folder_id: Folder ID
             synced_files: List of file paths that were successfully synced
         """
+        ensure_kb_write_allowed()
         if kb_name not in self.list_knowledge_bases():
             raise ValueError(f"Knowledge base not found: {kb_name}")
 

@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional
 
+from deeptutor.knowledge.policy import ensure_kb_write_allowed
 from deeptutor.runtime.home import get_runtime_data_root
 
 from .factory import DEFAULT_PROVIDER, get_pipeline, list_pipelines, normalize_provider_name
@@ -66,12 +67,14 @@ class RAGService:
         return self._pipelines[provider]
 
     async def initialize(self, kb_name: str, file_paths: List[str], **kwargs) -> bool:
+        ensure_kb_write_allowed()
         provider = self._resolve_provider(kb_name)
         self.logger.info(f"Initializing KB '{kb_name}' (provider={provider})")
         pipeline = self._get_pipeline(provider)
         return await pipeline.initialize(kb_name=kb_name, file_paths=file_paths, **kwargs)
 
     async def add_documents(self, kb_name: str, file_paths: List[str], **kwargs) -> bool:
+        ensure_kb_write_allowed()
         provider = self._resolve_provider(kb_name)
         self.logger.info(
             f"Adding {len(file_paths)} document(s) to KB '{kb_name}' (provider={provider})"
@@ -277,6 +280,7 @@ class RAGService:
         return capture_all_raw_logs()
 
     async def delete(self, kb_name: str) -> bool:
+        ensure_kb_write_allowed()
         provider = self._resolve_provider(kb_name)
         self.logger.info(f"Deleting KB '{kb_name}' (provider={provider})")
         pipeline = self._get_pipeline(provider)
