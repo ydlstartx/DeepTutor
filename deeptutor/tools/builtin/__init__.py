@@ -195,15 +195,26 @@ class KbFilesTool(_PromptHintsMixin, BaseTool):
             raise ValueError("kb_files requires an explicit kb_name.")
         pattern = str(kwargs.get("pattern") or "").strip()
         language = str(kwargs.get("language") or "en")
+        limit = _kb_files_limit(kwargs.get("limit"))
 
         manifest = await asyncio.to_thread(
             resolve_kb_manifest,
             kb_name,
-            limit=_kb_files_limit(kwargs.get("limit")),
+            limit=limit,
             pattern=pattern,
         )
         if manifest is None:
             raise ValueError(f"Knowledge base '{kb_name}' is not accessible.")
+        if manifest.kb_type == "ima":
+            from deeptutor.multi_user.knowledge_access import resolve_kb_manifest_async
+
+            manifest = await resolve_kb_manifest_async(
+                kb_name,
+                limit=limit,
+                pattern=pattern,
+            )
+            if manifest is None:
+                raise ValueError(f"Knowledge base '{kb_name}' is not accessible.")
 
         return ToolResult(
             content=render_manifest_report(manifest, language=language),

@@ -10,8 +10,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deeptutor.knowledge.manager import KnowledgeBaseManager
-from deeptutor.multi_user.knowledge_access import resolve_kb_manifest
+from deeptutor.multi_user.knowledge_access import (
+    resolve_kb_manifest,
+    resolve_kb_manifest_async,
+)
 
 
 def _make_kb(manager: KnowledgeBaseManager, name: str, *files: str) -> None:
@@ -68,3 +73,40 @@ def test_empty_reference_yields_no_manifest(mu_isolated_root, as_user) -> None:
     with as_user("u_alice", role="user"):
         assert resolve_kb_manifest("") is None
         assert resolve_kb_manifest(None) is None
+
+
+@pytest.mark.asyncio
+async def test_ima_async_manifest_uses_remote_inventory(
+    mu_isolated_root, as_user, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.multi_user.knowledge_access import current_kb_manager
+
+    class _RemoteClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        async def list_knowledge_tree(self, *, max_items: int) -> dict:
+            assert max_items == 1000
+            return {
+                "items": [
+                    {"type": "folder", "path": "books", "folder_id": "f1"},
+                    {"type": "file", "path": "books/pmpp.pdf", "media_id": "m1"},
+                ],
+                "truncated": False,
+            }
+
+    monkeypatch.setattr(
+        "deeptutor.services.rag.pipelines.ima.client.ImaClient",
+        _RemoteClient,
+    )
+
+    with as_user("u_alice", role="user"):
+        current_kb_manager().register_ima_kb("IMA", "cid", "key", "kb-1")
+
+        manifest = await resolve_kb_manifest_async("IMA")
+
+    assert manifest is not None
+    assert manifest.enumerable
+    assert manifest.total == 1
+    assert [document.name for document in manifest.documents] == ["books/pmpp.pdf"]
+    assert manifest.documents[0].size == -1

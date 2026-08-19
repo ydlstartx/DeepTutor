@@ -174,3 +174,47 @@ async def test_unreadable_kb_costs_the_manifest_not_the_turn(
     await pipeline._prepare_kb_manifests(context)
 
     assert [manifest.name for manifest in pipeline._kb_manifests] == ["course"]
+
+
+@pytest.mark.asyncio
+async def test_ima_manifest_is_refreshed_from_remote_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = _pipeline(monkeypatch)
+    ima_placeholder = KbManifest(
+        name="IMA-course",
+        provider="ima",
+        status="ready",
+        kb_type="ima",
+        unavailable="remote",
+    )
+    _stub_resolver(monkeypatch, {"admin:kb:IMA-course": ima_placeholder})
+
+    async def _remote(kb_ref: str, **_kwargs: Any) -> KbManifest:
+        assert kb_ref == "admin:kb:IMA-course"
+        return KbManifest(
+            name="IMA-course",
+            provider="ima",
+            status="ready",
+            kb_type="ima",
+            total=1,
+            matched=1,
+            documents=(KbDocument(name="books/pmpp.pdf", size=0),),
+        )
+
+    monkeypatch.setattr(
+        "deeptutor.multi_user.knowledge_access.resolve_kb_manifest_async",
+        _remote,
+        raising=False,
+    )
+    context = UnifiedContext(
+        session_id="s1",
+        user_message="what is in this library?",
+        knowledge_bases=["admin:kb:IMA-course"],
+    )
+
+    await pipeline._prepare_kb_manifests(context)
+
+    note = pipeline._kb_system_note(context)
+    assert "books/pmpp.pdf" in note
+    assert "cannot be read" not in note

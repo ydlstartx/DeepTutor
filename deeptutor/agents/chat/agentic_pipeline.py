@@ -1469,10 +1469,10 @@ class AgenticChatPipeline:
 
         Retrieval cannot answer "how many files are in here" — the passages it
         returns say nothing about the size of the collection they came from. The
-        inventory is a filesystem fact, so it is read here (off the event loop,
-        one directory walk per KB) and rendered into the system prompt, which
-        keeps the prompt byte-stable for the whole turn and makes counts
-        answerable without a tool round-trip.
+        inventory is a storage-provider fact, so it is read here (off the event
+        loop for local files, or through the read-only IMA API) and rendered
+        into the system prompt. This keeps the prompt byte-stable for the whole
+        turn and makes counts answerable without a tool round-trip.
 
         PageIndex KBs are excluded: ``_pageindex_system_note`` already lists
         their documents, with the doc_ids its MCP tools need. Fails soft — a KB
@@ -1483,15 +1483,27 @@ class AgenticChatPipeline:
         if not kbs:
             return
         try:
-            self._kb_manifests = await asyncio.to_thread(self._collect_kb_manifests, kbs)
+            pairs = await asyncio.to_thread(self._collect_kb_manifest_pairs, kbs)
+            if any(manifest.kb_type == "ima" for _, manifest in pairs):
+                from deeptutor.multi_user.knowledge_access import resolve_kb_manifest_async
+
+                refreshed: list[tuple[str, KbManifest]] = []
+                for kb_ref, manifest in pairs:
+                    if manifest.kb_type != "ima":
+                        refreshed.append((kb_ref, manifest))
+                        continue
+                    remote = await resolve_kb_manifest_async(kb_ref)
+                    refreshed.append((kb_ref, remote or manifest))
+                pairs = refreshed
+            self._kb_manifests = [manifest for _, manifest in pairs]
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("Failed to build knowledge base manifests: %s", exc)
 
     @staticmethod
-    def _collect_kb_manifests(kbs: list[str]) -> list[KbManifest]:
+    def _collect_kb_manifest_pairs(kbs: list[str]) -> list[tuple[str, KbManifest]]:
         from deeptutor.multi_user.knowledge_access import resolve_kb_manifest
 
-        manifests: list[KbManifest] = []
+        manifests: list[tuple[str, KbManifest]] = []
         for kb in kbs:
             try:
                 manifest = resolve_kb_manifest(kb)
@@ -1499,8 +1511,13 @@ class AgenticChatPipeline:
                 logger.warning("Failed to read documents of knowledge base '%s': %s", kb, exc)
                 continue
             if manifest is not None:
-                manifests.append(manifest)
+                manifests.append((kb, manifest))
         return manifests
+
+    @staticmethod
+    def _collect_kb_manifests(kbs: list[str]) -> list[KbManifest]:
+        """Compatibility wrapper for callers that only need the manifests."""
+        return [manifest for _, manifest in AgenticChatPipeline._collect_kb_manifest_pairs(kbs)]
 
     def _kb_manifest_system_note(self) -> str:
         """What the attached KBs contain, from :meth:`_prepare_kb_manifests`."""

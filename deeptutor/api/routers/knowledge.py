@@ -11,7 +11,7 @@ import json
 import logging
 import mimetypes
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import traceback
@@ -28,8 +28,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from deeptutor.api.utils.progress_broadcaster import ProgressBroadcaster
 from deeptutor.api.utils.task_id_manager import TaskIDManager
@@ -40,7 +41,7 @@ from deeptutor.knowledge.add_documents import (
     rename_raw_document,
 )
 from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
-from deeptutor.knowledge.kb_types import is_connected_kb, supports_local_raw_files
+from deeptutor.knowledge.kb_types import IMA_KB_TYPE, is_connected_kb, supports_local_raw_files
 from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
 from deeptutor.knowledge.naming import validate_knowledge_base_name
 from deeptutor.knowledge.policy import (
@@ -83,11 +84,14 @@ from deeptutor.services.rag.pipelines.ima.client import (
     ImaAPIError,
     ImaAuthError,
     ImaClient,
+    ImaMediaContent,
     ImaRateLimitError,
 )
 from deeptutor.services.rag.pipelines.ima.config import (
     ImaConfig,
     ImaCredentials,
+    ImaNotConfiguredError,
+    config_from_entry,
     get_account_credentials,
 )
 from deeptutor.utils.document_extractor import (
@@ -174,6 +178,16 @@ def _writable_kb(kb_name: str) -> tuple[KnowledgeBaseManager, str, Path]:
         resolved_name = _resolve_registered_kb_name(manager, kb_name)
         return manager, resolved_name, Path(manager.base_dir)
     resource = assert_writable(kb_name)
+    return manager_for_resource(resource), resource.name, resource.base_dir
+
+
+def _readable_kb(kb_name: str) -> tuple[KnowledgeBaseManager, str, Path]:
+    """Resolve a visible KB while preserving the legacy test override seam."""
+    manager = _overridden_kb_manager()
+    if manager is not None:
+        resolved_name = _resolve_registered_kb_name(manager, kb_name)
+        return manager, resolved_name, Path(manager.base_dir)
+    resource = resolve_kb(kb_name)
     return manager_for_resource(resource), resource.name, resource.base_dir
 
 
@@ -2277,13 +2291,7 @@ def _resolve_kb_raw_dir(kb_name: str, *, allow_unsupported: bool = False) -> Pat
     collection for backwards compatibility; endpoints that require a local
     file receive an explicit conflict response.
     """
-    manager = _overridden_kb_manager()
-    if manager is not None:
-        resolved_name = _resolve_registered_kb_name(manager, kb_name)
-    else:
-        resource = resolve_kb(kb_name)
-        manager = manager_for_resource(resource)
-        resolved_name = resource.name
+    manager, resolved_name, _ = _readable_kb(kb_name)
 
     kb_entry = _load_kb_entry_or_404(manager, resolved_name)
     if not supports_local_raw_files(kb_entry):
@@ -2299,6 +2307,62 @@ def _resolve_kb_raw_dir(kb_name: str, *, allow_unsupported: bool = False) -> Pat
 
     kb_path = manager.get_knowledge_base_path(resolved_name)
     return kb_path / "raw"
+
+
+def _ima_client_from_entry(kb_entry: dict) -> ImaClient:
+    config = config_from_entry(kb_entry, fallback=get_account_credentials())
+    return ImaClient(config)
+
+
+def _normalize_remote_file_path(filename: str) -> str:
+    raw = str(filename or "").replace("\\", "/").strip("/")
+    path = PurePosixPath(raw)
+    if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return path.as_posix()
+
+
+async def _list_ima_tree(kb_entry: dict, *, max_items: int = 500) -> tuple[ImaClient, dict]:
+    try:
+        client = _ima_client_from_entry(kb_entry)
+        return client, await client.list_knowledge_tree(max_items=max_items)
+    except ImaNotConfiguredError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ImaAuthError, ImaRateLimitError, ImaAPIError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+async def _resolve_ima_media(kb_name: str, filename: str) -> tuple[ImaClient, dict]:
+    manager, resolved_name, _ = _readable_kb(kb_name)
+    kb_entry = _load_kb_entry_or_404(manager, resolved_name)
+    if kb_entry.get("type") != IMA_KB_TYPE:
+        raise HTTPException(status_code=409, detail="Knowledge base is not hosted by IMA")
+
+    requested = _normalize_remote_file_path(filename)
+    client, tree = await _list_ima_tree(kb_entry)
+    for item in tree.get("items", []):
+        if item.get("type") == "file" and item.get("path") == requested:
+            return client, item
+    if tree.get("truncated"):
+        raise HTTPException(
+            status_code=409,
+            detail="IMA file inventory exceeded the server listing limit; narrow the folder first.",
+        )
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+async def _load_ima_media(client: ImaClient, media_id: str) -> ImaMediaContent | None:
+    """Load remote media while keeping signed download URLs out of errors."""
+    try:
+        return await client.get_media_content(media_id)
+    except (ImaAuthError, ImaRateLimitError, ImaAPIError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning("IMA media download failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail="IMA media could not be downloaded from its temporary URL.",
+        ) from exc
 
 
 def _resolve_kb_raw_file_or_404(kb_name: str, filename: str) -> Path:
@@ -2331,6 +2395,29 @@ async def list_kb_raw_files(kb_name: str):
     before it holds any files. Folders are purely organizational and have no
     effect on indexing or retrieval.
     """
+    manager, resolved_name, _ = _readable_kb(kb_name)
+    kb_entry = _load_kb_entry_or_404(manager, resolved_name)
+    if kb_entry.get("type") == IMA_KB_TYPE:
+        _, tree = await _list_ima_tree(kb_entry)
+        files = []
+        for item in tree.get("items", []):
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            if item.get("type") == "folder":
+                files.append({"name": path, "type": "folder", "remote": True})
+                continue
+            media_type, _ = mimetypes.guess_type(path)
+            files.append(
+                {
+                    "name": path,
+                    "type": "file",
+                    "mime_type": media_type,
+                    "remote": True,
+                }
+            )
+        return {"files": files, "remote": True, "truncated": bool(tree.get("truncated"))}
+
     raw_dir = _resolve_kb_raw_dir(kb_name, allow_unsupported=True)
     if raw_dir is None:
         return {"files": []}
@@ -2510,6 +2597,25 @@ async def rename_kb_file(kb_name: str, payload: RenameFilePayload):
 @router.get("/{kb_name}/file-preview-text/{filename:path}")
 async def serve_kb_raw_file_text_preview(kb_name: str, filename: str):
     """Serve extracted plain text for a raw KB document preview."""
+    manager, resolved_name, _ = _readable_kb(kb_name)
+    kb_entry = _load_kb_entry_or_404(manager, resolved_name)
+    if kb_entry.get("type") == IMA_KB_TYPE:
+        client, item = await _resolve_ima_media(kb_name, filename)
+        media = None
+        try:
+            media = await _load_ima_media(client, str(item.get("media_id") or ""))
+            if media is None:
+                raise HTTPException(status_code=404, detail="IMA media content is unavailable")
+            from deeptutor.services.rag.pipelines.ima.pipeline import _extract_media_text
+
+            text = await _extract_media_text(media, str(item.get("path") or filename))
+            if not text:
+                raise HTTPException(status_code=422, detail="IMA media has no extractable text")
+            return PlainTextResponse(text, media_type="text/plain; charset=utf-8")
+        finally:
+            if media is not None:
+                media.cleanup()
+
     target = _resolve_kb_raw_file_or_404(kb_name, filename)
     try:
         text = extract_text_from_path(
@@ -2532,6 +2638,30 @@ async def serve_kb_raw_file(kb_name: str, filename: str):
     Resolution is sandboxed to the KB's raw/ directory; any path that
     escapes via traversal yields 403.
     """
+    manager, resolved_name, _ = _readable_kb(kb_name)
+    kb_entry = _load_kb_entry_or_404(manager, resolved_name)
+    if kb_entry.get("type") == IMA_KB_TYPE:
+        client, item = await _resolve_ima_media(kb_name, filename)
+        media = await _load_ima_media(client, str(item.get("media_id") or ""))
+        if media is None:
+            raise HTTPException(status_code=404, detail="IMA media content is unavailable")
+        display_name = PurePosixPath(str(item.get("path") or filename)).name
+        media_type, _ = mimetypes.guess_type(display_name)
+        if media.local_path:
+            return FileResponse(
+                media.local_path,
+                media_type=media_type or "application/octet-stream",
+                filename=display_name,
+                content_disposition_type="inline",
+                background=BackgroundTask(media.cleanup),
+            )
+        if media.text:
+            media.cleanup()
+            return PlainTextResponse(media.text, media_type="text/plain; charset=utf-8")
+        body = media.data
+        media.cleanup()
+        return Response(content=body, media_type=media_type or "application/octet-stream")
+
     target = _resolve_kb_raw_file_or_404(kb_name, filename)
     media_type, _ = mimetypes.guess_type(target.name)
     return FileResponse(

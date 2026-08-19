@@ -146,6 +146,8 @@ export interface KnowledgeBaseFile {
   size?: number;
   modified?: number;
   mime_type?: string | null;
+  /** True when metadata/content is served from a connected provider such as IMA. */
+  remote?: boolean;
 }
 
 const IMAGE_UPLOAD_EXTENSIONS = [

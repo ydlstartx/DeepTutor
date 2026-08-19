@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+import tempfile
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
@@ -45,6 +46,7 @@ _NOTE_API_PREFIX = "/openapi/note/v1"
 # retrieval into an SSRF primitive. IMA's own credentials are never attached to
 # this separate client.
 _COS_ROOT_DOMAIN = "myqcloud.com"
+_IMA_MEDIA_HOSTS = frozenset({"res-skb.ima.qq.com"})
 _FORBIDDEN_MEDIA_HEADERS = frozenset(
     {
         "connection",
@@ -56,6 +58,7 @@ _FORBIDDEN_MEDIA_HEADERS = frozenset(
     }
 )
 MAX_MEDIA_BYTES = 20 * 1024 * 1024
+MAX_PDF_MEDIA_BYTES = 200 * 1024 * 1024
 
 # Envelope codes worth naming. IMA returns hundreds of business codes; these are
 # the two classes a caller reacts to differently from a generic failure.
@@ -86,6 +89,16 @@ class ImaMediaContent:
     text: str = ""
     data: bytes = b""
     filename: str = ""
+    local_path: str = ""
+
+    def cleanup(self) -> None:
+        """Remove a streamed temporary download, if this content owns one."""
+        if not self.local_path:
+            return
+        try:
+            Path(self.local_path).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove temporary IMA media file")
 
 
 class ImaClient:
@@ -174,6 +187,107 @@ class ImaClient:
                 break
         return items[:limit]
 
+    async def get_knowledge_list(
+        self,
+        *,
+        cursor: str = "",
+        limit: int = 50,
+        folder_id: str = "",
+    ) -> dict[str, Any]:
+        """Return one page of files and folders from the bound knowledge base."""
+        if not 1 <= limit <= 50:
+            raise ValueError("IMA knowledge list limit must be between 1 and 50.")
+        body: dict[str, Any] = {
+            "knowledge_base_id": self._config.knowledge_base_id,
+            "cursor": str(cursor or "").strip(),
+            "limit": limit,
+        }
+        normalized_folder = str(folder_id or "").strip()
+        if normalized_folder:
+            body["folder_id"] = normalized_folder
+        return await self._post("get_knowledge_list", body)
+
+    async def list_knowledge_tree(
+        self,
+        *,
+        max_items: int = 500,
+        max_folders: int = 100,
+    ) -> dict[str, Any]:
+        """Enumerate a bounded remote file tree without local ingestion."""
+        if max_items <= 0 or max_folders <= 0:
+            raise ValueError("IMA tree limits must be positive.")
+
+        items: list[dict[str, Any]] = []
+        pending_folders: list[tuple[str, str]] = [("", "")]
+        seen_folder_ids: set[str] = set()
+        visited_folders = 0
+        truncated = False
+
+        while pending_folders and len(items) < max_items:
+            folder_id, prefix = pending_folders.pop(0)
+            visited_folders += 1
+            if visited_folders > max_folders:
+                truncated = True
+                break
+
+            cursor = ""
+            seen_cursors: set[str] = set()
+            while len(items) < max_items:
+                page = await self.get_knowledge_list(
+                    cursor=cursor,
+                    limit=min(50, max_items - len(items)),
+                    folder_id=folder_id,
+                )
+                raw_items = page.get("knowledge_list")
+                if not isinstance(raw_items, list):
+                    raw_items = []
+                for raw in raw_items:
+                    if not isinstance(raw, dict):
+                        continue
+                    media_id = str(raw.get("media_id") or "").strip()
+                    remote_folder_id = str(raw.get("folder_id") or "").strip()
+                    name = str(raw.get("title") or raw.get("name") or "").strip()
+                    if not name:
+                        continue
+                    path = f"{prefix}/{name}" if prefix else name
+                    if media_id:
+                        items.append(
+                            {
+                                "type": "file",
+                                "path": path,
+                                "name": name,
+                                "media_id": media_id,
+                                "media_type": raw.get("media_type"),
+                            }
+                        )
+                    elif remote_folder_id:
+                        items.append(
+                            {
+                                "type": "folder",
+                                "path": path,
+                                "name": name,
+                                "folder_id": remote_folder_id,
+                                "file_number": raw.get("file_number"),
+                                "folder_number": raw.get("folder_number"),
+                            }
+                        )
+                        if remote_folder_id not in seen_folder_ids:
+                            seen_folder_ids.add(remote_folder_id)
+                            pending_folders.append((remote_folder_id, path))
+                    if len(items) >= max_items:
+                        truncated = True
+                        break
+
+                next_cursor = str(page.get("next_cursor") or "")
+                if page.get("is_end") or not next_cursor or next_cursor in seen_cursors:
+                    break
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
+
+        if pending_folders:
+            truncated = True
+        return {"items": items, "truncated": truncated}
+
     async def get_media_content(self, media_id: str) -> ImaMediaContent | None:
         """Fetch full content for one search result when IMA omitted a snippet.
 
@@ -222,16 +336,41 @@ class ImaClient:
         ) as client:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
+                content_type = response.headers.get("content-type")
+                filename = _media_filename(url, content_type)
+                max_bytes = _media_download_limit(filename, content_type)
                 length = response.headers.get("content-length")
-                if length and length.isdigit() and int(length) > MAX_MEDIA_BYTES:
-                    raise ImaAPIError("IMA media exceeds the 20 MB retrieval limit.")
+                if length and length.isdigit() and int(length) > max_bytes:
+                    raise ImaAPIError(_media_limit_message(max_bytes))
+
+                if max_bytes == MAX_PDF_MEDIA_BYTES:
+                    suffix = PurePosixPath(filename).suffix or ".pdf"
+                    temp_path = ""
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            prefix="deeptutor-ima-",
+                            suffix=suffix,
+                            delete=False,
+                        ) as handle:
+                            temp_path = handle.name
+                            size = 0
+                            async for chunk in response.aiter_bytes():
+                                size += len(chunk)
+                                if size > max_bytes:
+                                    raise ImaAPIError(_media_limit_message(max_bytes))
+                                handle.write(chunk)
+                        return ImaMediaContent(filename=filename, local_path=temp_path)
+                    except Exception:
+                        if temp_path:
+                            Path(temp_path).unlink(missing_ok=True)
+                        raise
+
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
-                    if len(body) > MAX_MEDIA_BYTES:
-                        raise ImaAPIError("IMA media exceeds the 20 MB retrieval limit.")
+                    if len(body) > max_bytes:
+                        raise ImaAPIError(_media_limit_message(max_bytes))
 
-                filename = _media_filename(url, response.headers.get("content-type"))
                 return ImaMediaContent(data=bytes(body), filename=filename)
 
     # ----- probing --------------------------------------------------------
@@ -336,8 +475,20 @@ def _validate_media_url(url: str) -> None:
     hostname = (parsed.hostname or "").rstrip(".").lower()
     if parsed.scheme != "https" or not hostname:
         raise ImaAPIError("IMA media URL must use HTTPS.")
-    if hostname != _COS_ROOT_DOMAIN and not hostname.endswith(f".{_COS_ROOT_DOMAIN}"):
+    is_cos = hostname == _COS_ROOT_DOMAIN or hostname.endswith(f".{_COS_ROOT_DOMAIN}")
+    if not is_cos and hostname not in _IMA_MEDIA_HOSTS:
         raise ImaAPIError("IMA media URL is outside Tencent COS.")
+
+
+def _media_download_limit(filename: str, content_type: str | None) -> int:
+    media_type = str(content_type or "").partition(";")[0].strip().lower()
+    if PurePosixPath(filename).suffix.lower() == ".pdf" or media_type == "application/pdf":
+        return MAX_PDF_MEDIA_BYTES
+    return MAX_MEDIA_BYTES
+
+
+def _media_limit_message(max_bytes: int) -> str:
+    return f"IMA media exceeds the {max_bytes // (1024 * 1024)} MB retrieval limit."
 
 
 def _media_headers(raw: Any) -> dict[str, str]:
@@ -377,4 +528,5 @@ __all__ = [
     "ImaMediaContent",
     "ImaRateLimitError",
     "MAX_MEDIA_BYTES",
+    "MAX_PDF_MEDIA_BYTES",
 ]

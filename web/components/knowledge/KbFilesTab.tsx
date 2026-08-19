@@ -62,6 +62,7 @@ export default function KbFilesTab({ kb, task, readOnly = false }: KbFilesTabPro
       <KbDocumentList
         kbName={kb.name}
         readOnly={readOnly}
+        remote={kb.metadata?.type === "ima"}
         refreshKey={refreshKey}
         selectedFile={selectedFile?.name ?? null}
         onSelect={setSelectedFile}

@@ -1150,6 +1150,123 @@ def test_remote_kb_file_listing_is_empty_without_creating_local_storage(
     assert not (manager.base_dir / "remote").exists()
 
 
+class _ImaContentStub:
+    def __init__(self, *, media=None, error: Exception | None = None) -> None:
+        self.media = media
+        self.error = error
+        self.media_calls: list[str] = []
+
+    async def list_knowledge_tree(self, *, max_items: int = 500) -> dict:
+        return {
+            "items": [
+                {"type": "folder", "path": "Guides", "name": "Guides", "folder_id": "f1"},
+                {
+                    "type": "file",
+                    "path": "Guides/pmpp.pdf",
+                    "name": "pmpp.pdf",
+                    "media_id": "m1",
+                },
+            ],
+            "truncated": False,
+        }
+
+    async def get_media_content(self, media_id: str):
+        self.media_calls.append(media_id)
+        if self.error is not None:
+            raise self.error
+        return self.media
+
+
+def _register_ima_for_api(manager) -> None:
+    manager.config.setdefault("knowledge_bases", {})["IMA"] = {
+        "path": "IMA",
+        "type": "ima",
+        "rag_provider": "ima",
+        "client_id": "cid",
+        "api_key": "key",
+        "knowledge_base_id": "kb-1",
+    }
+    manager._save_config()
+
+
+def test_ima_file_listing_reads_remote_tree_without_local_storage(
+    monkeypatch, tmp_path: Path
+) -> None:
+    manager = _real_manager(monkeypatch, tmp_path)
+    _register_ima_for_api(manager)
+    stub = _ImaContentStub()
+    monkeypatch.setattr(knowledge_router_module, "ImaClient", lambda _config: stub)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/v1/knowledge/IMA/files")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "files": [
+            {"name": "Guides", "type": "folder", "remote": True},
+            {
+                "name": "Guides/pmpp.pdf",
+                "type": "file",
+                "mime_type": "application/pdf",
+                "remote": True,
+            },
+        ],
+        "remote": True,
+        "truncated": False,
+    }
+    assert not (manager.base_dir / "IMA").exists()
+
+
+def test_ima_text_preview_reads_remote_media(monkeypatch, tmp_path: Path) -> None:
+    from deeptutor.services.rag.pipelines.ima.client import ImaMediaContent
+
+    manager = _real_manager(monkeypatch, tmp_path)
+    _register_ima_for_api(manager)
+    stub = _ImaContentStub(media=ImaMediaContent(text="remote full text"))
+    monkeypatch.setattr(knowledge_router_module, "ImaClient", lambda _config: stub)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/v1/knowledge/IMA/file-preview-text/Guides/pmpp.pdf")
+
+    assert response.status_code == 200
+    assert response.text == "remote full text"
+    assert stub.media_calls == ["m1"]
+
+
+def test_ima_file_response_cleans_streamed_temporary_media(monkeypatch, tmp_path: Path) -> None:
+    from deeptutor.services.rag.pipelines.ima.client import ImaMediaContent
+
+    manager = _real_manager(monkeypatch, tmp_path)
+    _register_ima_for_api(manager)
+    download = tmp_path / "remote.pdf"
+    download.write_bytes(b"%PDF-1.4\nremote")
+    stub = _ImaContentStub(media=ImaMediaContent(filename="remote.pdf", local_path=str(download)))
+    monkeypatch.setattr(knowledge_router_module, "ImaClient", lambda _config: stub)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/v1/knowledge/IMA/files/Guides/pmpp.pdf")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4\nremote"
+    assert not download.exists()
+
+
+def test_ima_file_download_error_does_not_expose_signed_url(monkeypatch, tmp_path: Path) -> None:
+    manager = _real_manager(monkeypatch, tmp_path)
+    _register_ima_for_api(manager)
+    stub = _ImaContentStub(
+        error=RuntimeError("https://res-skb.ima.qq.com/private?signature=secret")
+    )
+    monkeypatch.setattr(knowledge_router_module, "ImaClient", lambda _config: stub)
+
+    with TestClient(_build_app()) as client:
+        response = client.get("/api/v1/knowledge/IMA/files/Guides/pmpp.pdf")
+
+    assert response.status_code == 502
+    assert "temporary URL" in response.json()["detail"]
+    assert "signature" not in response.text
+
+
 @pytest.mark.parametrize(
     ("method", "url", "kwargs"),
     [

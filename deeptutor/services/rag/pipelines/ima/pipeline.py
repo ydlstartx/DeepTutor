@@ -14,8 +14,10 @@ the user's IMA library.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 import logging
 from pathlib import PurePath
+import re
 from typing import Any, Dict, List, Optional
 
 from deeptutor.runtime.home import get_runtime_data_root
@@ -23,9 +25,10 @@ from deeptutor.services.rag.provider_binding import load_kb_config_entry
 from deeptutor.utils.document_extractor import (
     SUPPORTED_DOC_EXTENSIONS,
     extract_text_from_bytes,
+    extract_text_from_path,
 )
 
-from .client import MAX_MEDIA_BYTES, ImaMediaContent
+from .client import MAX_MEDIA_BYTES, MAX_PDF_MEDIA_BYTES, ImaMediaContent
 from .config import ImaNotConfiguredError, resolve_kb_config
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,7 @@ _DEFAULT_TOP_K = 10
 # its network and prompt footprint predictable even when ``top_k`` is large.
 _MAX_FULLTEXT_ITEMS = 3
 _MAX_FULLTEXT_CHARS = 12_000
+_ZERO_HIT_INVENTORY_LIMIT = 200
 
 
 class ImaPipeline:
@@ -85,18 +89,82 @@ class ImaPipeline:
             self.logger.error("IMA search failed for '%s': %s", kb_name, exc)
             return self._error_result(query, exc, error_type="retrieval_error")
 
+        diagnostic = ""
+        if not items:
+            items, diagnostic = await self._zero_hit_fallback(client, query)
+
         sources = _sources_from_items(items)
-        await self._hydrate_title_only_sources(client, sources)
+        await self._hydrate_title_only_sources(client, sources, query=query)
         content = _render_context(sources)
+        if diagnostic and not any(source["content"] for source in sources):
+            content = f"{diagnostic}\n\n{content}".strip()
+        elif not content and diagnostic:
+            content = diagnostic
         return {
             "query": query,
             "answer": content,
             "content": content,
             "sources": sources,
             "provider": PROVIDER,
+            **({"retrieval_diagnostic": diagnostic} if diagnostic else {}),
         }
 
-    async def _hydrate_title_only_sources(self, client, sources: list[dict[str, Any]]) -> None:
+    async def _zero_hit_fallback(self, client, query: str) -> tuple[list[dict], str]:
+        """Read a small, unambiguous remote file set when IMA search is empty."""
+        try:
+            tree = await client.list_knowledge_tree(max_items=_ZERO_HIT_INVENTORY_LIMIT)
+        except Exception as exc:
+            self.logger.warning(
+                "Could not list IMA contents after a zero-hit search (%s)", type(exc).__name__
+            )
+            return [], (
+                "IMA returned no content matches, and DeepTutor could not read the remote "
+                "file inventory to diagnose the empty result."
+            )
+
+        files = [item for item in tree.get("items", []) if item.get("type") == "file"]
+        if not files:
+            return [], "IMA returned no content matches and the remote library exposes no files."
+
+        ranked = sorted(
+            ((_title_match_score(query, str(item.get("name") or "")), item) for item in files),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        candidates = [item for score, item in ranked if score > 0][:_MAX_FULLTEXT_ITEMS]
+        if not candidates and len(files) == 1:
+            candidates = files
+
+        total = len(files)
+        truncated = bool(tree.get("truncated"))
+        total_label = f"at least {total}" if truncated else str(total)
+        if not candidates:
+            return [], (
+                f"IMA returned no content matches even though the remote library exposes "
+                f"{total_label} files. No file name matched the query, so DeepTutor did not "
+                "download unrelated documents."
+            )
+
+        fallback_items = [
+            {
+                "media_id": str(item.get("media_id") or ""),
+                "title": str(item.get("path") or item.get("name") or ""),
+                "highlight_content": "",
+            }
+            for item in candidates
+        ]
+        return fallback_items, (
+            f"IMA returned no content matches. DeepTutor fell back to reading "
+            f"{len(fallback_items)} remote file(s) from a library exposing {total_label} file(s)."
+        )
+
+    async def _hydrate_title_only_sources(
+        self,
+        client,
+        sources: list[dict[str, Any]],
+        *,
+        query: str = "",
+    ) -> None:
         remaining = _MAX_FULLTEXT_ITEMS
         for source in sources:
             if remaining == 0:
@@ -104,9 +172,14 @@ class ImaPipeline:
             if source["content"] or not source["chunk_id"]:
                 continue
             remaining -= 1
+            media = None
             try:
                 media = await client.get_media_content(source["chunk_id"])
-                source["content"] = await _extract_media_text(media, source["title"])
+                source["content"] = await _extract_media_text(
+                    media,
+                    source["title"],
+                    query=query,
+                )
             except Exception as exc:
                 # Search results remain useful as title-only references. One
                 # unavailable document must not discard the other matches.
@@ -117,6 +190,9 @@ class ImaPipeline:
                     source["chunk_id"],
                     type(exc).__name__,
                 )
+            finally:
+                if media is not None:
+                    media.cleanup()
 
     def _error_result(self, query: str, exc: Exception, *, error_type: str) -> Dict[str, Any]:
         return {
@@ -171,11 +247,26 @@ def _sources_from_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sources
 
 
-async def _extract_media_text(media: ImaMediaContent | None, title: str) -> str:
+async def _extract_media_text(
+    media: ImaMediaContent | None,
+    title: str,
+    *,
+    query: str = "",
+) -> str:
     if media is None:
         return ""
     if media.text:
         return media.text[:_MAX_FULLTEXT_CHARS].strip()
+    if media.local_path:
+        filename = _extractable_filename(title, media.filename, media.local_path)
+        if not filename:
+            return ""
+        return await asyncio.to_thread(
+            _extract_downloaded_path,
+            media.local_path,
+            filename,
+            query,
+        )
     if not media.data:
         return ""
 
@@ -189,6 +280,104 @@ async def _extract_media_text(media: ImaMediaContent | None, title: str) -> str:
         max_bytes=MAX_MEDIA_BYTES,
         max_chars=_MAX_FULLTEXT_CHARS,
     )
+
+
+def _extract_downloaded_path(path: str, filename: str, query: str) -> str:
+    if PurePath(filename).suffix.lower() == ".pdf":
+        return _extract_relevant_pdf_pages(path, query)
+    return extract_text_from_path(
+        path,
+        max_bytes=MAX_PDF_MEDIA_BYTES,
+        max_chars=_MAX_FULLTEXT_CHARS,
+    )
+
+
+def _extract_relevant_pdf_pages(path: str, query: str) -> str:
+    try:
+        import fitz
+    except ImportError:
+        return _extract_relevant_pdf_pages_pypdf(path, query)
+
+    with fitz.open(path) as document:
+        pages = (
+            (page_number, (page.get_text() or "").strip())
+            for page_number, page in enumerate(document, start=1)
+        )
+        return _select_relevant_pages(pages, query)
+
+
+def _extract_relevant_pdf_pages_pypdf(path: str, query: str) -> str:
+    from pypdf import PdfReader
+
+    document = PdfReader(path)
+    pages = (
+        (page_number, (page.extract_text() or "").strip())
+        for page_number, page in enumerate(document.pages, start=1)
+    )
+    return _select_relevant_pages(pages, query)
+
+
+def _select_relevant_pages(pages: Iterable[tuple[int, str]], query: str) -> str:
+    """Select a bounded set from a streaming ``(page number, text)`` iterator."""
+
+    terms = _query_terms(query)
+    leading: list[str] = []
+    leading_chars = 0
+    # A common query term can occur on every page of a large book. Retain only
+    # a small candidate set while scanning so memory stays bounded too.
+    max_candidates = 32
+    matches: list[tuple[int, int, str]] = []
+    for page_number, text in pages:
+        if not text:
+            continue
+        block = f"--- Page {page_number} ---\n{text}"
+        if leading_chars < _MAX_FULLTEXT_CHARS:
+            retained = block[: _MAX_FULLTEXT_CHARS - leading_chars]
+            leading.append(retained)
+            leading_chars += len(retained)
+        lowered = text.lower()
+        score = sum(term in lowered for term in terms)
+        if score:
+            candidate = (score, page_number, block[:_MAX_FULLTEXT_CHARS])
+            if len(matches) < max_candidates:
+                matches.append(candidate)
+            else:
+                weakest = min(
+                    range(len(matches)),
+                    key=lambda index: (matches[index][0], -matches[index][1]),
+                )
+                if (score, -page_number) > (
+                    matches[weakest][0],
+                    -matches[weakest][1],
+                ):
+                    matches[weakest] = candidate
+
+    if matches:
+        selected = sorted(matches, key=lambda item: (-item[0], item[1]))
+        return _join_bounded([block for _, _, block in selected])
+    return _join_bounded(leading)
+
+
+def _join_bounded(blocks: list[str]) -> str:
+    output: list[str] = []
+    size = 0
+    for block in blocks:
+        separator_size = 2 if output else 0
+        remaining = _MAX_FULLTEXT_CHARS - size - separator_size
+        if remaining <= 0:
+            break
+        output.append(block[:remaining])
+        size += separator_size + min(len(block), remaining)
+    return "\n\n".join(output).strip()
+
+
+def _query_terms(query: str) -> list[str]:
+    return [token.lower() for token in re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", query)]
+
+
+def _title_match_score(query: str, title: str) -> int:
+    lowered = title.lower()
+    return sum(term in lowered for term in _query_terms(query))
 
 
 def _extractable_filename(*candidates: str) -> str:

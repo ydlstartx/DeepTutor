@@ -21,6 +21,8 @@ from deeptutor.agents._shared.tool_composition import (
 from deeptutor.knowledge.manifest import (
     KB_FILES_DEFAULT_LIMIT,
     KB_FILES_MAX_LIMIT,
+    KbDocument,
+    KbManifest,
     build_manifest,
 )
 from deeptutor.tools.builtin import BUILTIN_TOOL_NAMES, KbFilesTool
@@ -184,3 +186,42 @@ class TestExecute:
 
         with pytest.raises(ValueError, match="not accessible"):
             await KbFilesTool().execute(kb_name="secret")
+
+    @pytest.mark.asyncio
+    async def test_ima_uses_remote_inventory(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        placeholder = KbManifest(
+            name="IMA-course",
+            provider="ima",
+            status="ready",
+            kb_type="ima",
+            unavailable="remote",
+        )
+        monkeypatch.setattr(
+            "deeptutor.multi_user.knowledge_access.resolve_kb_manifest",
+            lambda *_args, **_kwargs: placeholder,
+            raising=False,
+        )
+
+        async def _remote(*_args: Any, **_kwargs: Any) -> KbManifest:
+            return KbManifest(
+                name="IMA-course",
+                provider="ima",
+                status="ready",
+                kb_type="ima",
+                total=1,
+                matched=1,
+                documents=(KbDocument(name="books/pmpp.pdf", size=-1),),
+            )
+
+        monkeypatch.setattr(
+            "deeptutor.multi_user.knowledge_access.resolve_kb_manifest_async",
+            _remote,
+            raising=False,
+        )
+
+        result = await KbFilesTool().execute(kb_name="IMA-course", language="en")
+
+        assert "books/pmpp.pdf" in result.content
+        assert "0 B" not in result.content
+        assert result.metadata["total"] == 1
+        assert result.metadata["unavailable"] == ""

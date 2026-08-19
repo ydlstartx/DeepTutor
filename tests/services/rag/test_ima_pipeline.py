@@ -24,6 +24,7 @@ from deeptutor.services.rag.factory import get_pipeline, normalize_provider_name
 from deeptutor.services.rag.pipelines.ima.client import (
     API_BASE_URL,
     MAX_MEDIA_BYTES,
+    MAX_PDF_MEDIA_BYTES,
     ImaAPIError,
     ImaAuthError,
     ImaClient,
@@ -36,7 +37,7 @@ from deeptutor.services.rag.pipelines.ima.config import (
     ImaNotConfiguredError,
     config_from_entry,
 )
-from deeptutor.services.rag.pipelines.ima.pipeline import ImaPipeline
+from deeptutor.services.rag.pipelines.ima.pipeline import ImaPipeline, _select_relevant_pages
 from deeptutor.services.rag.pipelines.ima.probe import probe_knowledge_base
 
 CONFIG = ImaConfig(client_id="cid", api_key="key", knowledge_base_id="kb-1")
@@ -316,7 +317,7 @@ class TestClientWire:
             asyncio.run(_client(handler).get_media_content("m-file"))
 
     def test_file_media_rejects_content_length_over_budget(self) -> None:
-        media_url = "https://bucket.cos.ap-guangzhou.myqcloud.com/file.pdf"
+        media_url = "https://bucket.cos.ap-guangzhou.myqcloud.com/file.txt"
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.method == "POST":
@@ -324,11 +325,132 @@ class TestClientWire:
             return httpx.Response(
                 200,
                 content=b"x",
-                headers={"content-length": str(MAX_MEDIA_BYTES + 1)},
+                headers={
+                    "content-length": str(MAX_MEDIA_BYTES + 1),
+                    "content-type": "text/plain",
+                },
             )
 
         with pytest.raises(ImaAPIError, match="20 MB"):
             asyncio.run(_client(handler).get_media_content("m-file"))
+
+    def test_official_ima_pdf_host_streams_to_a_temporary_file(self) -> None:
+        media_url = "https://res-skb.ima.qq.com/download"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return _ok({"media_type": 1, "url_info": {"url": media_url}})
+            return httpx.Response(
+                200,
+                content=b"%PDF-1.4\nstreamed",
+                headers={"content-type": "application/pdf"},
+            )
+
+        media = asyncio.run(_client(handler).get_media_content("m-file"))
+
+        assert media is not None
+        assert media.data == b""
+        assert media.filename == "download.pdf"
+        assert Path(media.local_path).read_bytes() == b"%PDF-1.4\nstreamed"
+        media.cleanup()
+        assert not Path(media.local_path).exists()
+
+    def test_pdf_media_rejects_content_length_over_200_mb(self) -> None:
+        media_url = "https://res-skb.ima.qq.com/download"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return _ok({"media_type": 1, "url_info": {"url": media_url}})
+            return httpx.Response(
+                200,
+                content=b"x",
+                headers={
+                    "content-length": str(MAX_PDF_MEDIA_BYTES + 1),
+                    "content-type": "application/pdf",
+                },
+            )
+
+        with pytest.raises(ImaAPIError, match="200 MB"):
+            asyncio.run(_client(handler).get_media_content("m-file"))
+
+
+class TestClientKnowledgeList:
+    def test_page_posts_bound_kb_and_optional_folder(self) -> None:
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return _ok({"knowledge_list": [], "is_end": True, "next_cursor": ""})
+
+        client = _client(handler)
+        asyncio.run(client.get_knowledge_list(cursor="next", limit=7, folder_id="folder-1"))
+
+        assert bodies == [
+            {
+                "knowledge_base_id": "kb-1",
+                "cursor": "next",
+                "limit": 7,
+                "folder_id": "folder-1",
+            }
+        ]
+
+    def test_tree_paginates_and_recurses_into_folders(self) -> None:
+        bodies: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            bodies.append(body)
+            if body.get("folder_id") == "folder-1":
+                return _ok(
+                    {
+                        "knowledge_list": [
+                            {"media_id": "m-2", "title": "Nested.pdf", "media_type": 1}
+                        ],
+                        "is_end": True,
+                        "next_cursor": "",
+                    }
+                )
+            if body["cursor"] == "":
+                return _ok(
+                    {
+                        "knowledge_list": [
+                            {"folder_id": "folder-1", "name": "Guides"},
+                            {"media_id": "m-1", "title": "Root.txt", "media_type": 2},
+                        ],
+                        "is_end": False,
+                        "next_cursor": "page-2",
+                    }
+                )
+            return _ok({"knowledge_list": [], "is_end": True, "next_cursor": ""})
+
+        tree = asyncio.run(_client(handler).list_knowledge_tree())
+
+        assert [(item["type"], item["path"]) for item in tree["items"]] == [
+            ("folder", "Guides"),
+            ("file", "Root.txt"),
+            ("file", "Guides/Nested.pdf"),
+        ]
+        assert tree["truncated"] is False
+        assert bodies == [
+            {"knowledge_base_id": "kb-1", "cursor": "", "limit": 50},
+            {"knowledge_base_id": "kb-1", "cursor": "page-2", "limit": 50},
+            {
+                "knowledge_base_id": "kb-1",
+                "cursor": "",
+                "limit": 50,
+                "folder_id": "folder-1",
+            },
+        ]
+
+
+def test_pdf_page_selection_stays_bounded_for_a_common_term() -> None:
+    pages = ((number, f"CUDA page {number} " + "x" * 1000) for number in range(1, 101))
+
+    selected = _select_relevant_pages(pages, "CUDA")
+
+    assert len(selected) <= 12_000
+    assert "--- Page 1 ---" in selected
+    assert "--- Page 100 ---" not in selected
 
 
 class TestClientKnowledgeBaseList:
@@ -582,10 +704,12 @@ class _SearchStub:
         items: list[dict] | None = None,
         error: Exception | None = None,
         media: dict[str, ImaMediaContent | None] | None = None,
+        tree: dict | None = None,
     ) -> None:
         self._items = items or []
         self._error = error
         self._media = media or {}
+        self._tree = tree or {"items": [], "truncated": False}
         self.limit: int | None = None
         self.media_calls: list[str] = []
 
@@ -598,6 +722,9 @@ class _SearchStub:
     async def get_media_content(self, media_id: str) -> ImaMediaContent | None:
         self.media_calls.append(media_id)
         return self._media.get(media_id)
+
+    async def list_knowledge_tree(self, *, max_items: int = 500) -> dict:
+        return self._tree
 
 
 class TestPipelineSearch:
@@ -659,6 +786,55 @@ class TestPipelineSearch:
         assert result["sources"][0]["content"] == "quotable full text"
         assert stub.media_calls == ["m1"]
 
+    def test_zero_hit_single_file_falls_back_to_full_content(self, tmp_path) -> None:
+        base = _kb_config(
+            tmp_path,
+            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
+        )
+        stub = _SearchStub(
+            media={"m1": ImaMediaContent(text="kernel content")},
+            tree={
+                "items": [
+                    {
+                        "type": "file",
+                        "path": "pmpp.pdf",
+                        "name": "pmpp.pdf",
+                        "media_id": "m1",
+                    }
+                ],
+                "truncated": False,
+            },
+        )
+        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
+
+        result = asyncio.run(pipeline.search("kernel", "IMA"))
+
+        assert result["sources"][0]["title"] == "pmpp.pdf"
+        assert result["sources"][0]["content"] == "kernel content"
+        assert "fell back" in result["retrieval_diagnostic"]
+
+    def test_zero_hit_multi_file_inventory_returns_precise_diagnostic(self, tmp_path) -> None:
+        base = _kb_config(
+            tmp_path,
+            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
+        )
+        stub = _SearchStub(
+            tree={
+                "items": [
+                    {"type": "file", "path": "Alpha.pdf", "name": "Alpha.pdf", "media_id": "m1"},
+                    {"type": "file", "path": "Beta.pdf", "name": "Beta.pdf", "media_id": "m2"},
+                ],
+                "truncated": False,
+            }
+        )
+        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
+
+        result = asyncio.run(pipeline.search("kernel", "IMA"))
+
+        assert result["sources"] == []
+        assert "remote library exposes 2 files" in result["content"]
+        assert "did not download unrelated documents" in result["content"]
+
     def test_existing_snippet_skips_full_content_fetch(self, tmp_path) -> None:
         base = _kb_config(
             tmp_path,
@@ -711,6 +887,24 @@ class TestPipelineSearch:
         result = asyncio.run(pipeline.search("q", "IMA"))
 
         assert result["sources"][0]["content"] == "full file text"
+
+    def test_streamed_temporary_file_is_extracted_and_cleaned(self, tmp_path) -> None:
+        base = _kb_config(
+            tmp_path,
+            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
+        )
+        download = tmp_path / "download.txt"
+        download.write_text("full streamed text", encoding="utf-8")
+        stub = _SearchStub(
+            [{"media_id": "m1", "title": "Alpha.txt"}],
+            media={"m1": ImaMediaContent(filename="download.txt", local_path=str(download))},
+        )
+        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
+
+        result = asyncio.run(pipeline.search("q", "IMA"))
+
+        assert result["sources"][0]["content"] == "full streamed text"
+        assert not download.exists()
 
     def test_unidentifiable_item_is_dropped(self, tmp_path) -> None:
         base = _kb_config(

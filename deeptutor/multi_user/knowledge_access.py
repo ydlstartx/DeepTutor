@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 
+from deeptutor.knowledge.kb_types import IMA_KB_TYPE
 from deeptutor.knowledge.manager import KnowledgeBaseManager
-from deeptutor.knowledge.manifest import MANIFEST_NOTE_LIMIT, KbManifest, build_manifest
+from deeptutor.knowledge.manifest import (
+    KB_FILES_MAX_LIMIT,
+    MANIFEST_NOTE_LIMIT,
+    KbManifest,
+    build_manifest,
+    build_remote_manifest,
+)
 
 from .context import get_current_user
 from .grants import load_grant
@@ -279,3 +287,63 @@ def resolve_kb_manifest(
         limit=limit,
         pattern=pattern,
     )
+
+
+async def resolve_kb_manifest_async(
+    kb_ref: str | None,
+    *,
+    limit: int = MANIFEST_NOTE_LIMIT,
+    pattern: str = "",
+) -> KbManifest | None:
+    """Resolve local inventories off-thread and enumerate IMA over its API."""
+    if not kb_ref:
+        return None
+    try:
+        resource = resolve_kb(str(kb_ref), require_write=False)
+    except HTTPException:
+        return None
+    manager = _manager_for(str(resource.base_dir.resolve()))
+    entry = manager.get_kb_entry(resource.name)
+    if entry is None:
+        return None
+    if entry.get("type") != IMA_KB_TYPE:
+        return await asyncio.to_thread(
+            build_manifest,
+            name=resource.name,
+            kb_dir=resource.base_dir / resource.name,
+            entry=entry,
+            limit=limit,
+            pattern=pattern,
+        )
+
+    try:
+        from deeptutor.services.rag.pipelines.ima.client import ImaClient
+        from deeptutor.services.rag.pipelines.ima.config import (
+            config_from_entry,
+            get_account_credentials,
+        )
+
+        config = config_from_entry(entry, fallback=get_account_credentials())
+        tree = await ImaClient(config).list_knowledge_tree(max_items=KB_FILES_MAX_LIMIT)
+        names = [
+            str(item.get("path") or "")
+            for item in tree.get("items", [])
+            if item.get("type") == "file"
+        ]
+        return build_remote_manifest(
+            name=resource.name,
+            entry=entry,
+            document_names=names,
+            limit=limit,
+            pattern=pattern,
+        )
+    except Exception:
+        # Keep the established "remote unavailable" manifest when IMA is
+        # temporarily unreachable; inventory failure must not abort the turn.
+        return build_manifest(
+            name=resource.name,
+            kb_dir=resource.base_dir / resource.name,
+            entry=entry,
+            limit=limit,
+            pattern=pattern,
+        )

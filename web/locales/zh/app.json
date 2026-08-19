@@ -1509,6 +1509,7 @@
   "Show file list": "显示文件列表",
   "Hide file list": "隐藏文件列表",
   "No files yet. Add one using the Add Documents tab.": "暂无文件。请使用「添加文档」标签页添加。",
+  "No files are visible in this remote knowledge base.": "此远程知识库中暂无可见文件。",
   "Long-form memory the assistant carries across sessions — your running summary and learner profile.": "助手在多次会话之间保留的长时记忆——包含你的学习摘要与学习者画像。",
   "Long-form memory the assistant carries across sessions.": "助手在多次会话之间保留的长时记忆。",
   "Your personal library of notebooks, questions, playbooks, and memory.": "你的个人空间：笔记本、题库、技能与长时记忆。",

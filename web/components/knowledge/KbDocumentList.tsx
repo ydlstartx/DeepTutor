@@ -31,6 +31,7 @@ import { docIconFor, formatBytes } from "@/lib/doc-attachments";
 interface KbDocumentListProps {
   kbName: string;
   readOnly?: boolean;
+  remote?: boolean;
   /** Refresh trigger: bumping this prop forces a re-fetch (e.g. after upload). */
   refreshKey?: number;
   selectedFile: string | null;
@@ -115,6 +116,7 @@ function buildTree(entries: KnowledgeBaseFile[]): {
 export default function KbDocumentList({
   kbName,
   readOnly = false,
+  remote = false,
   refreshKey = 0,
   selectedFile,
   onSelect,
@@ -735,7 +737,9 @@ export default function KbDocumentList({
         ) : fileEntries.length === 0 && folderPaths.length === 0 ? (
           <div className="px-2 py-6 text-center text-[11px] text-[var(--muted-foreground)]">
             <Folder className="mx-auto mb-1.5 h-3.5 w-3.5 opacity-50" />
-            {t("No files yet. Add one using the Add Documents tab.")}
+            {remote
+              ? t("No files are visible in this remote knowledge base.")
+              : t("No files yet. Add one using the Add Documents tab.")}
           </div>
         ) : (
           <ul className="space-y-px">{root.map((n) => renderNode(n, 0))}</ul>

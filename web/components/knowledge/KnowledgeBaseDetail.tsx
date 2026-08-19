@@ -123,9 +123,15 @@ export default function KnowledgeBaseDetail({
     task.executing === true;
   const status = resolveKbStatus(kb);
   const mutationDisabled = queryOnly || Boolean(kb.read_only);
+  const remoteContent = meta.type === "ima";
+  const contentMutationDisabled = mutationDisabled || remoteContent;
   const deleteDisabled = !deletionAllowed || Boolean(kb.read_only);
-  const activeSection = queryOnly && section === "add" ? "files" : section;
-  const canRetry = status === "error" && !mutationDisabled;
+  const activeSection =
+    (queryOnly && section === "add") ||
+    (remoteContent && (section === "add" || section === "versions"))
+      ? "files"
+      : section;
+  const canRetry = status === "error" && !contentMutationDisabled;
 
   const handleRetry = async () => {
     if (!canRetry || retrySubmitting || isReindexingLocally) return;
@@ -214,7 +220,13 @@ export default function KnowledgeBaseDetail({
 
         {/* Section nav */}
         <nav className="-mb-3 mt-3 flex gap-1 overflow-x-auto">
-          {SECTIONS.filter(({ key }) => !queryOnly || key !== "add").map(({ key, label, Icon }) => {
+          {SECTIONS.filter(
+            ({ key }) =>
+              !(
+                (queryOnly && key === "add") ||
+                (remoteContent && (key === "add" || key === "versions"))
+              ),
+          ).map(({ key, label, Icon }) => {
             const active = activeSection === key;
             return (
               <button
@@ -238,7 +250,12 @@ export default function KnowledgeBaseDetail({
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {activeSection === "files" ? (
-          <KbFilesTab key={kb.name} kb={kb} task={task} readOnly={mutationDisabled} />
+          <KbFilesTab
+            key={kb.name}
+            kb={kb}
+            task={task}
+            readOnly={contentMutationDisabled}
+          />
         ) : (
           <div className="h-full overflow-y-auto px-6 py-5">
             <div className={fullBleed ? "" : "mx-auto max-w-3xl"}>
@@ -259,9 +276,9 @@ export default function KnowledgeBaseDetail({
                 <KbIndexVersionsSection
                   kb={kb}
                   task={task}
-                  readOnly={mutationDisabled}
+                  readOnly={contentMutationDisabled}
                   onReindex={() =>
-                    mutationDisabled
+                    contentMutationDisabled
                       ? Promise.resolve()
                       : status === "error"
                         ? handleRetry()

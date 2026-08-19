@@ -6,8 +6,9 @@ those are questions about the KB's *inventory*, and no amount of passage
 similarity produces them. Asked one anyway, a model with only ``rag`` in hand
 either guesses from the passages it happened to retrieve or declines.
 
-This module owns the inventory as plain facts read off disk, so the two
-consumers can never disagree:
+This module owns the inventory as plain facts read from the backing provider
+(the local filesystem or a supported remote API), so the two consumers can
+never disagree:
 
 * the chat system prompt embeds a manifest (:func:`render_manifest_note`), so
   counts are answerable with no tool round-trip — the failure mode where a
@@ -56,9 +57,9 @@ UNAVAILABLE_REMOTE = "remote"
 UNAVAILABLE_AGENT = "agent"
 UNAVAILABLE_MISSING = "missing"
 
-# KB types that hold no local document set at all: their content lives behind
-# an API. Reporting them as "0 documents" would be a lie, so they are reported
-# as non-enumerable instead.
+# KB types that hold no local document set. The synchronous filesystem resolver
+# reports them as non-enumerable; the async resolver can replace supported
+# providers such as IMA with an API-enumerated manifest.
 _NON_DOCUMENT_KB_TYPES: dict[str, str] = {
     LIGHTRAG_SERVER_KB_TYPE: UNAVAILABLE_REMOTE,
     IMA_KB_TYPE: UNAVAILABLE_REMOTE,
@@ -74,7 +75,7 @@ class KbDocument:
     """POSIX path relative to the KB's document root (folders included)."""
 
     size: int
-    """Size in bytes, or ``0`` when the file could not be stat'ed."""
+    """Size in bytes, or ``-1`` when the backing provider does not expose it."""
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,30 @@ def build_manifest(
     )
 
 
+def build_remote_manifest(
+    *,
+    name: str,
+    entry: Mapping[str, Any],
+    document_names: Sequence[str],
+    limit: int = MANIFEST_NOTE_LIMIT,
+    pattern: str = "",
+) -> KbManifest:
+    """Build the same inventory contract from provider-enumerated names."""
+    all_names = [str(item).strip() for item in document_names if str(item).strip()]
+    normalized_pattern = pattern.strip()
+    matched_names = _filter_names(all_names, normalized_pattern)
+    return KbManifest(
+        name=name,
+        provider=str(entry.get("rag_provider") or "").strip(),
+        status=str(entry.get("status") or "").strip(),
+        kb_type=str(entry.get("type") or "").strip(),
+        total=len(all_names),
+        matched=len(matched_names),
+        documents=tuple(KbDocument(name=rel, size=-1) for rel in matched_names[: max(0, limit)]),
+        pattern=normalized_pattern,
+    )
+
+
 def _filter_names(names: Sequence[str], pattern: str) -> list[str]:
     if not pattern:
         return list(names)
@@ -218,7 +243,7 @@ def _size_of(path: Path) -> int:
     try:
         return path.stat().st_size
     except OSError:
-        return 0
+        return -1
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +290,7 @@ _NOTE_TEXT: dict[str, dict[str, str]] = {
     "en": {
         "header": (
             "[Knowledge Base Inventory]\n"
-            "What the attached knowledge bases actually contain, read from disk."
+            "What the attached knowledge bases actually contain, read from their storage provider."
         ),
         "empty": "no documents yet",
         "total": "{count} document{plural}",
@@ -280,7 +305,7 @@ _NOTE_TEXT: dict[str, dict[str, str]] = {
         ),
     },
     "zh": {
-        "header": "[知识库清单]\n以下是已挂载知识库的真实文档构成，直接读取自磁盘。",
+        "header": "[知识库清单]\n以下是已挂载知识库的真实文档构成，直接读取自其存储端。",
         "empty": "暂无文档",
         "total": "共 {count} 个文档",
         "omitted": "另有 {count} 个未列出，可用 kb_files 查看完整清单",
@@ -395,7 +420,8 @@ def render_manifest_report(manifest: KbManifest, *, language: str) -> str:
             text["omitted"].format(shown=len(manifest.documents), omitted=manifest.omitted)
         )
     lines.extend(
-        f"{index}. {document.name} ({_human_size(document.size)})"
+        f"{index}. {document.name}"
+        + (f" ({_human_size(document.size)})" if document.size >= 0 else "")
         for index, document in enumerate(manifest.documents, start=1)
     )
     return "\n".join(lines)
@@ -422,6 +448,7 @@ __all__ = [
     "KbDocument",
     "KbManifest",
     "build_manifest",
+    "build_remote_manifest",
     "document_root",
     "iter_kb_documents",
     "render_manifest_note",

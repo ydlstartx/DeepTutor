@@ -336,7 +336,10 @@ Deleting a connected Tencent IMA entry removes only DeepTutor's pointer and
 does not modify the remote IMA library. IMA is otherwise the narrow exception:
 its account credentials and retrieval-only remote KB pointers remain
 configurable because DeepTutor performs no local ingestion or indexing for
-them. The production image includes the LightRAG query runtime
+them. DeepTutor can list IMA's remote files and, when IMA returns no usable
+snippet, securely stream an on-demand PDF of up to 200 MB for bounded text
+extraction; the download is temporary and is never ingested into a local index.
+The production image includes the LightRAG query runtime
 even though indexing is disabled.
 Keep the DeepTutor commit/image tag, LightRAG version, embedding provider/model
 and dimension, and the index storage backend compatible between the builder and
@@ -608,6 +611,8 @@ Each chapter compiles into typed blocks — text, callouts, quizzes, flash cards
 </div>
 
 Knowledge bases are the document collections behind RAG — they ground Chat turns, Co-Writer edits, Book generation, and Partner conversations. What's distinctive is a **choice of retrieval engines**: **LlamaIndex** (the default, local vector + BM25), **PageIndex** (hosted, reasoning retrieval with page-level citations), **GraphRAG** and **LightRAG** (knowledge-graph retrieval), **LightRAG Server** (retrieval offloaded to an external LightRAG instance you connect over HTTP), **Tencent IMA** (a library you curate in IMA, searched over its OpenAPI), or a linked **Obsidian** vault the tutor reads and writes in place. Each KB is bound to one engine.
+
+Connected Tencent IMA libraries remain read-only in DeepTutor: their remote folder/file tree is visible in the Files tab, chat receives that inventory, and title-only or zero-hit retrieval can temporarily read relevant PDFs up to 200 MB. IMA remains the source of truth; DeepTutor neither uploads to it nor builds a local index.
 
 <div align="center">
 <img src="assets/figs/web-1.4.6+/knowledge/01-create%20knowledge%20base.png" alt="Create a knowledge base" width="900">
