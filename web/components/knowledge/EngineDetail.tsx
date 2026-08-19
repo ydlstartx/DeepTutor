@@ -395,6 +395,8 @@ function LlamaIndexForm({
         bm25_top_k_multiplier: form.bm25_top_k_multiplier,
         chunk_size: form.chunk_size,
         chunk_overlap: form.chunk_overlap,
+        parse_concurrency: form.parse_concurrency,
+        image_description_concurrency: form.image_description_concurrency,
       });
       setLoaded(next);
       setForm(next);
@@ -456,6 +458,34 @@ function LlamaIndexForm({
               </button>
             );
           })}
+        </div>
+      </div>
+
+      {/* Indexing throughput */}
+      <div>
+        <div className="mb-2 flex items-baseline justify-between gap-2">
+          <span className="text-[12px] font-medium text-[var(--foreground)]">
+            {t("Indexing throughput")}
+          </span>
+          <span className="text-[11px] text-[var(--muted-foreground)]">
+            {t("Higher values may trigger provider rate limits")}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <NumberField
+            label={t("Parallel document parsing")}
+            value={form.parse_concurrency}
+            min={1}
+            max={8}
+            onChange={(v) => set({ parse_concurrency: v })}
+          />
+          <NumberField
+            label={t("Parallel image descriptions")}
+            value={form.image_description_concurrency}
+            min={1}
+            max={16}
+            onChange={(v) => set({ image_description_concurrency: v })}
+          />
         </div>
       </div>
 
@@ -1023,6 +1053,14 @@ function LightRagForm({
         top_k: form.top_k,
         response_type: form.response_type,
         vector_storage: form.vector_storage,
+        llm_concurrency: form.llm_concurrency,
+        embedding_concurrency: form.embedding_concurrency,
+        multimodal_concurrency: form.multimodal_concurrency,
+        entity_extract_max_gleaning: form.entity_extract_max_gleaning,
+        chunk_token_size: form.chunk_token_size,
+        chunk_overlap_token_size: form.chunk_overlap_token_size,
+        embedding_batch_num: form.embedding_batch_num,
+        force_llm_summary_on_merge: form.force_llm_summary_on_merge,
       });
       setLoaded(next);
       setForm(next);
@@ -1052,6 +1090,92 @@ function LightRagForm({
           value={form.vector_storage || "nano"}
           onChange={(v) => patch({ vector_storage: v })}
         />
+      </div>
+      <div>
+        <div className="mb-2 flex items-baseline justify-between gap-2">
+          <span className="text-[12px] font-medium text-[var(--foreground)]">
+            {t("Indexing throughput")}
+          </span>
+          <span className="text-[11px] text-[var(--muted-foreground)]">
+            {t("Applies on the next re-index")}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <NumberField
+            label={t("Parallel LLM calls")}
+            hint={t("Lower this if the provider returns 429 errors")}
+            value={form.llm_concurrency}
+            min={1}
+            max={32}
+            onChange={(v) => patch({ llm_concurrency: v })}
+          />
+          <NumberField
+            label={t("Parallel embedding calls")}
+            hint={t("Keep low for quota-limited embedding services")}
+            value={form.embedding_concurrency}
+            min={1}
+            max={16}
+            onChange={(v) => patch({ embedding_concurrency: v })}
+          />
+          <NumberField
+            label={t("Parallel multimodal descriptions")}
+            hint={t("Images, tables, and equations; lower this on 429 errors")}
+            value={form.multimodal_concurrency}
+            min={1}
+            max={16}
+            onChange={(v) => patch({ multimodal_concurrency: v })}
+          />
+          <NumberField
+            label={t("Extra entity extraction passes")}
+            hint={t("0 is fastest; higher values may improve graph recall")}
+            value={form.entity_extract_max_gleaning}
+            min={0}
+            max={3}
+            onChange={(v) => patch({ entity_extract_max_gleaning: v })}
+          />
+        </div>
+      </div>
+      <div>
+        <div className="mb-2 flex items-baseline justify-between gap-2">
+          <span className="text-[12px] font-medium text-[var(--foreground)]">
+            {t("Indexing batch geometry")}
+          </span>
+          <span className="text-[11px] text-[var(--muted-foreground)]">
+            {t("Larger chunks reduce calls but may reduce extraction precision")}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <NumberField
+            label={t("Chunk tokens")}
+            value={form.chunk_token_size}
+            min={256}
+            max={4096}
+            onChange={(v) => patch({ chunk_token_size: v })}
+          />
+          <NumberField
+            label={t("Chunk overlap tokens")}
+            value={form.chunk_overlap_token_size}
+            min={0}
+            max={Math.max(0, form.chunk_token_size - 1)}
+            onChange={(v) => patch({ chunk_overlap_token_size: v })}
+          />
+          <NumberField
+            label={t("Embedding batch items")}
+            hint={t("Requests are still clamped to the provider limit")}
+            value={form.embedding_batch_num}
+            min={1}
+            max={256}
+            onChange={(v) => patch({ embedding_batch_num: v })}
+          />
+          <NumberField
+            label={t("Summary merge threshold")}
+            hint={t("Higher values reduce merge-summary calls")}
+            value={form.force_llm_summary_on_merge}
+            min={3}
+            max={64}
+            onChange={(v) => patch({ force_llm_summary_on_merge: v })}
+          />
+        </div>
       </div>
       <SaveButton dirty={dirty} saving={saving} onSave={() => void save()} />
     </div>

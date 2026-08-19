@@ -554,7 +554,7 @@ class ResolvedEmbeddingConfig:
     dimension: int = 0
     send_dimensions: bool | None = None
     request_timeout: int = 60
-    batch_size: int = 10
+    batch_size: int = 32
     batch_delay: float = 0.0
 
 
@@ -965,7 +965,10 @@ def resolve_embedding_runtime_config(
         dimension=dimension,
         send_dimensions=send_dimensions,
         request_timeout=60,
-        batch_size=10,
+        # Resolve the provider-aware size here as well as clamping in the
+        # client: LlamaIndex has an outer batching layer and must see the
+        # effective value (DashScope 20, SiliconFlow 32) to avoid re-splitting.
+        batch_size=min(32, spec.max_batch_items),
         batch_delay=0.0,
     )
 

@@ -95,6 +95,18 @@ def chunk_geometry() -> tuple[int, int]:
         return 512, 50
 
 
+def indexing_concurrency() -> tuple[int, int]:
+    """Return bounded ``(parse, image-description)`` concurrency settings."""
+    try:
+        settings = _load_runtime_settings()
+        return (
+            int(settings.get("parse_concurrency", 2) or 2),
+            int(settings.get("image_description_concurrency", 8) or 8),
+        )
+    except Exception:
+        return 2, 8
+
+
 __all__ = [
     "HYBRID_PROFILE",
     "RetrievalConfig",
@@ -102,6 +114,7 @@ __all__ = [
     "VECTOR_PROFILE",
     "chunk_geometry",
     "default_top_k",
+    "indexing_concurrency",
     "normalize_retrieval_profile",
     "retrieval_config_from_env",
     "retrieval_config_from_settings",

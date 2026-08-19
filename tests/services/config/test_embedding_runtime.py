@@ -74,6 +74,31 @@ def test_embedding_explicit_binding_and_headers() -> None:
     assert resolved.effective_url == "https://api.jina.ai/v1/embeddings"
     assert resolved.extra_headers == {"X-App": "demo"}
     assert resolved.dimension == 1024
+    assert resolved.batch_size == 32
+
+
+def test_embedding_batch_size_respects_provider_request_cap() -> None:
+    catalog = _build_catalog(
+        embedding_profile={
+            "id": "embedding-p",
+            "name": "Embedding",
+            "binding": "aliyun",
+            "base_url": "",
+            "api_key": "dashscope-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [
+                {
+                    "id": "embedding-m",
+                    "name": "qwen3-vl-embedding",
+                    "model": "qwen3-vl-embedding",
+                    "dimension": "2560",
+                }
+            ],
+        }
+    )
+
+    assert resolve_embedding_runtime_config(catalog=catalog).batch_size == 20
 
 
 def test_embedding_orcarouter_binding_uses_default_endpoint() -> None:

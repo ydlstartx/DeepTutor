@@ -109,6 +109,47 @@ def test_loader_keeps_event_loop_responsive_while_parser_blocks(
     assert [document.text for document in documents] == ["Parsed without blocking the loop"]
 
 
+def test_loader_parses_documents_with_bounded_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("llama_index.core")
+    import time
+
+    import deeptutor.services.parsing as parsing
+    from deeptutor.services.parsing.types import ParsedDocument
+    from deeptutor.services.rag.pipelines.llamaindex.document_loader import (
+        LlamaIndexDocumentLoader,
+    )
+
+    paths = [tmp_path / f"doc-{index}.pdf" for index in range(4)]
+    for path in paths:
+        path.write_bytes(b"stub")
+
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    class _ConcurrentService:
+        def parse(self, source_path, **_kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return ParsedDocument(markdown=Path(source_path).stem)
+
+    monkeypatch.setattr(parsing, "get_parse_service", lambda: _ConcurrentService())
+
+    documents = asyncio.run(
+        LlamaIndexDocumentLoader(parse_concurrency=2).load([str(path) for path in paths])
+    )
+
+    assert peak == 2
+    assert [document.text for document in documents] == [path.stem for path in paths]
+
+
 def test_loader_skips_document_when_active_engine_cannot_parse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -192,6 +233,55 @@ def test_loader_indexes_images_extracted_from_parsed_document(
     assert node.metadata["file_name"] == "paper.pdf"
     assert node.image_path == str(asset_dir / "figure-1.png")
     assert "Figure showing a bar chart." in node.text
+
+
+def test_loader_describes_images_with_bounded_concurrency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("llama_index.core")
+    from deeptutor.services.rag.pipelines.llamaindex import document_loader as loader_module
+
+    paths = [tmp_path / f"image-{index}.png" for index in range(5)]
+    for path in paths:
+        path.write_bytes(b"\x89PNG\r\n")
+
+    class _MultimodalEmbeddingClient:
+        config = type("Config", (), {"binding": "siliconflow", "model": "qwen3-vl"})()
+
+        def supports_multimodal_contents(self) -> bool:
+            return True
+
+        async def embed_contents(self, contents):
+            return [[0.1, 0.2] for _ in contents]
+
+    active = 0
+    peak = 0
+
+    class _VisionClient:
+        config = type("Config", (), {"binding": "openai", "model": "gpt-4o"})()
+
+        def supports_multimodal_images(self) -> bool:
+            return True
+
+        async def complete(self, _prompt, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return f"Description of {kwargs['image_filename']}"
+
+    monkeypatch.setattr(loader_module, "get_embedding_client", lambda: _MultimodalEmbeddingClient())
+    monkeypatch.setattr(loader_module, "get_llm_client", lambda: _VisionClient())
+
+    documents = asyncio.run(
+        loader_module.LlamaIndexDocumentLoader(image_description_concurrency=2).load(
+            [str(path) for path in paths]
+        )
+    )
+
+    assert peak == 2
+    assert [doc.metadata["file_name"] for doc in documents] == [path.name for path in paths]
 
 
 def test_loader_skips_images_when_embedding_provider_is_text_only(

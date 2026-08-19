@@ -55,6 +55,33 @@ def test_list_pipelines_includes_lightrag(monkeypatch) -> None:
     assert entry["configured"] is False
 
 
+def test_indexing_kwargs_bridge_runtime_throughput_settings(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "deeptutor.services.config.load_lightrag_settings",
+        lambda: {
+            "llm_concurrency": 12,
+            "embedding_concurrency": 3,
+            "multimodal_concurrency": 7,
+            "entity_extract_max_gleaning": 1,
+            "chunk_token_size": 1600,
+            "chunk_overlap_token_size": 64,
+            "embedding_batch_num": 24,
+            "force_llm_summary_on_merge": 20,
+        },
+    )
+
+    assert lr_config.indexing_kwargs_from_settings() == {
+        "llm_model_max_async": 12,
+        "embedding_func_max_async": 3,
+        "max_parallel_insert": 7,
+        "entity_extract_max_gleaning": 1,
+        "chunk_token_size": 1600,
+        "chunk_overlap_token_size": 64,
+        "embedding_batch_num": 24,
+        "force_llm_summary_on_merge": 20,
+    }
+
+
 def test_normalize_provider_keeps_lightrag() -> None:
     assert normalize_provider_name("lightrag") == "lightrag"
     assert normalize_provider_name("LightRAG") == "lightrag"
@@ -287,6 +314,104 @@ def test_lightrag_llm_adapter_preserves_messages_and_drops_extra_kwargs(
     assert "hashing_kv" not in captured
     assert "keyword_extraction" not in captured
     assert bridge.calls == 1
+
+
+def test_lightrag_llm_adapter_retries_only_malformed_entity_extraction(monkeypatch) -> None:
+    responses = [
+        "entity<|#|>Broken<|#|>person",
+        "entity<|#|>Fixed<|#|>person<|#|>A complete description.\n<|COMPLETE|>",
+    ]
+    calls: list[dict[str, object]] = []
+
+    class _Client:
+        def get_model_func(self):
+            async def model_func(prompt, **kwargs):
+                calls.append({"prompt": prompt, **kwargs})
+                return responses[len(calls) - 1]
+
+            return model_func
+
+    monkeypatch.setattr("deeptutor.services.llm.get_llm_client", lambda: _Client())
+
+    bridge = _RecordingBridge()
+    func = lr_config.build_llm_model_func(io_bridge=bridge)
+    result = asyncio.run(
+        func(
+            "extract this source",
+            system_prompt=(
+                "You are a Knowledge Graph Specialist responsible for extracting "
+                "entities and relationships."
+            ),
+        )
+    )
+
+    assert result == responses[1]
+    assert bridge.calls == 2
+    assert calls[0]["prompt"] == "extract this source"
+    assert "previous extraction output" in str(calls[1]["prompt"])
+    assert calls[1]["history_messages"] == [
+        {"role": "user", "content": "extract this source"},
+        {"role": "assistant", "content": responses[0]},
+    ]
+
+
+def test_lightrag_llm_adapter_does_not_retry_parseable_empty_extraction(monkeypatch) -> None:
+    calls = 0
+
+    class _Client:
+        def get_model_func(self):
+            async def model_func(prompt, **kwargs):
+                nonlocal calls
+                calls += 1
+                return "<|COMPLETE|>"
+
+            return model_func
+
+    monkeypatch.setattr("deeptutor.services.llm.get_llm_client", lambda: _Client())
+
+    func = lr_config.build_llm_model_func()
+    result = asyncio.run(
+        func(
+            "no entities here",
+            system_prompt=(
+                "You are a Knowledge Graph Specialist responsible for extracting "
+                "entities and relationships from the input text."
+            ),
+        )
+    )
+
+    assert result == "<|COMPLETE|>"
+    assert calls == 1
+
+
+def test_lightrag_llm_adapter_does_not_treat_description_summary_as_extraction(
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    class _Client:
+        def get_model_func(self):
+            async def model_func(prompt, **kwargs):
+                nonlocal calls
+                calls += 1
+                return "A concise entity description without extraction delimiters."
+
+            return model_func
+
+    monkeypatch.setattr("deeptutor.services.llm.get_llm_client", lambda: _Client())
+
+    func = lr_config.build_llm_model_func()
+    result = asyncio.run(
+        func(
+            "summarize these descriptions",
+            system_prompt=(
+                "You are a Knowledge Graph Specialist, proficient in data curation and synthesis."
+            ),
+        )
+    )
+
+    assert result == "A concise entity description without extraction delimiters."
+    assert calls == 1
 
 
 def test_lightrag_vision_adapter_preserves_messages(monkeypatch) -> None:
@@ -877,6 +1002,20 @@ def _stub_raganything(monkeypatch) -> dict:
     monkeypatch.setattr(engine, "build_llm_model_func", lambda: "llm")
     monkeypatch.setattr(engine, "build_vision_model_func", lambda: "vision")
     monkeypatch.setattr(engine, "build_embedding_func", lambda: "embed")
+    monkeypatch.setattr(
+        engine,
+        "indexing_kwargs_from_settings",
+        lambda: {
+            "llm_model_max_async": 8,
+            "embedding_func_max_async": 2,
+            "max_parallel_insert": 8,
+            "entity_extract_max_gleaning": 0,
+            "chunk_token_size": 1400,
+            "chunk_overlap_token_size": 80,
+            "embedding_batch_num": 20,
+            "force_llm_summary_on_merge": 16,
+        },
+    )
     return captured
 
 
@@ -885,12 +1024,20 @@ def test_build_rag_forwards_faiss_vector_storage(monkeypatch) -> None:
     # The lean-storage install is a separate concern (covered by
     # test_lean_faiss_*) and requires the real lightrag/faiss packages.
     monkeypatch.setattr(engine, "_install_lean_faiss_storage", lambda: None)
+    monkeypatch.setattr(engine.importlib.util, "find_spec", lambda name: object())
     engine.build_rag(Path("/tmp/kb-wd"), "faiss")  # noqa: S108
     assert captured["lightrag_kwargs"] == {
         "vector_storage": "FaissVectorDBStorage",
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
-        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
+        "llm_model_max_async": 8,
+        "embedding_func_max_async": 2,
+        "max_parallel_insert": 8,
+        "entity_extract_max_gleaning": 0,
+        "chunk_token_size": 1400,
+        "chunk_overlap_token_size": 80,
+        "embedding_batch_num": 20,
+        "force_llm_summary_on_merge": 16,
     }
 
 
@@ -899,7 +1046,14 @@ def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
     expected = {
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
-        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
+        "llm_model_max_async": 8,
+        "embedding_func_max_async": 2,
+        "max_parallel_insert": 8,
+        "entity_extract_max_gleaning": 0,
+        "chunk_token_size": 1400,
+        "chunk_overlap_token_size": 80,
+        "embedding_batch_num": 20,
+        "force_llm_summary_on_merge": 16,
     }
 
     engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108  # default == nano
@@ -924,7 +1078,14 @@ def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatc
         "enable_llm_cache_for_entity_extract": False,
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
-        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
+        "llm_model_max_async": 8,
+        "embedding_func_max_async": 2,
+        "max_parallel_insert": 8,
+        "entity_extract_max_gleaning": 0,
+        "chunk_token_size": 1400,
+        "chunk_overlap_token_size": 80,
+        "embedding_batch_num": 20,
+        "force_llm_summary_on_merge": 16,
     }
 
 

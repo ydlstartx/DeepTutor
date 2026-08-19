@@ -266,6 +266,11 @@ DEFAULT_LLAMAINDEX_SETTINGS: dict[str, Any] = {
     "bm25_top_k_multiplier": 2,
     "chunk_size": 512,
     "chunk_overlap": 50,
+    # Indexing throughput knobs. Parsing is usually CPU/subprocess-bound while
+    # image descriptions are remote multimodal LLM calls, so keep independent
+    # limits instead of one broad semaphore.
+    "parse_concurrency": 2,
+    "image_description_concurrency": 8,
 }
 
 # GraphRAG retrieval knobs (microsoft/graphrag). Only query-time params that the
@@ -292,6 +297,26 @@ DEFAULT_LIGHTRAG_SETTINGS: dict[str, Any] = {
     "top_k": 60,
     "response_type": "Multiple Paragraphs",
     "vector_storage": "nano",
+    # LightRAG's upstream defaults are deliberately conservative. Eight LLM
+    # calls keeps local builds moving without the burstiness of an unbounded
+    # gather; embeddings stay lower because provider quotas are often tighter.
+    "llm_concurrency": 8,
+    "embedding_concurrency": 2,
+    # RAG-Anything separately limits image/table/equation description tasks
+    # through LightRAG.max_parallel_insert; it is not governed by the two
+    # limits above.
+    "multimodal_concurrency": 8,
+    # Zero skips the optional second entity-extraction pass. It substantially
+    # reduces indexing calls; users can raise it for maximum graph recall.
+    "entity_extract_max_gleaning": 0,
+    # Larger chunks and a smaller overlap reduce extraction calls for long
+    # documents without making each prompt so dense that graph-format
+    # adherence becomes fragile.  The remaining knobs cut vector round trips
+    # and postpone description-merge summaries until they are worthwhile.
+    "chunk_token_size": 1400,
+    "chunk_overlap_token_size": 80,
+    "embedding_batch_num": 20,
+    "force_llm_summary_on_merge": 16,
 }
 
 IGNORE_PROCESS_OVERRIDES_ENV = "DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES"
@@ -822,6 +847,10 @@ class RuntimeSettingsService:
             ),
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
+            "parse_concurrency": _coerce_clamped_int(settings.get("parse_concurrency"), 2, 1, 8),
+            "image_description_concurrency": _coerce_clamped_int(
+                settings.get("image_description_concurrency"), 8, 1, 16
+            ),
         }
 
     def _normalize_response_type(self, value: Any) -> str:
@@ -847,11 +876,36 @@ class RuntimeSettingsService:
         vector_storage = str(settings.get("vector_storage") or "").strip().lower()
         if vector_storage not in ("nano", "faiss"):
             vector_storage = "nano"
+        chunk_token_size = _coerce_clamped_int(settings.get("chunk_token_size"), 1400, 256, 4096)
+        chunk_overlap_token_size = _coerce_clamped_int(
+            settings.get("chunk_overlap_token_size"),
+            80,
+            0,
+            max(0, chunk_token_size - 1),
+        )
         return {
             "version": 1,
             "top_k": _coerce_clamped_int(settings.get("top_k"), 60, 1, 200),
             "response_type": self._normalize_response_type(settings.get("response_type")),
             "vector_storage": vector_storage,
+            "llm_concurrency": _coerce_clamped_int(settings.get("llm_concurrency"), 8, 1, 32),
+            "embedding_concurrency": _coerce_clamped_int(
+                settings.get("embedding_concurrency"), 2, 1, 16
+            ),
+            "multimodal_concurrency": _coerce_clamped_int(
+                settings.get("multimodal_concurrency"), 8, 1, 16
+            ),
+            "entity_extract_max_gleaning": _coerce_clamped_int(
+                settings.get("entity_extract_max_gleaning"), 0, 0, 3
+            ),
+            "chunk_token_size": chunk_token_size,
+            "chunk_overlap_token_size": chunk_overlap_token_size,
+            "embedding_batch_num": _coerce_clamped_int(
+                settings.get("embedding_batch_num"), 20, 1, 256
+            ),
+            "force_llm_summary_on_merge": _coerce_clamped_int(
+                settings.get("force_llm_summary_on_merge"), 16, 3, 64
+            ),
         }
 
     def _normalize_document_parsing(self, settings: dict[str, Any]) -> dict[str, Any]:

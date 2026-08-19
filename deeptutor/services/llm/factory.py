@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
 import contextlib
+import random
 from types import SimpleNamespace
 from typing import Any, TypedDict
 
@@ -29,6 +30,7 @@ DEFAULT_RETRY_DELAY = settings.retry.base_delay
 DEFAULT_EXPONENTIAL_BACKOFF = settings.retry.exponential_backoff
 DEFAULT_STREAM_COALESCE_CHARS = 64
 DEFAULT_STREAM_COALESCE_SECONDS = 0.04
+RETRY_JITTER_MAX_MULTIPLIER = 1.25
 STREAM_CONTROL_TOKENS = {"<think>", "</think>"}
 
 CallKwargs = dict[str, Any]
@@ -70,7 +72,11 @@ def _build_retry_delays(
     base = max(float(retry_delay), 0.0)
     for attempt in range(max_retries):
         delay = base * (2**attempt) if exponential_backoff else base
-        delays.append(min(delay, 120.0))
+        # Concurrent indexing requests commonly receive 429 responses as a
+        # group. Positive jitter prevents every worker from waking and
+        # retrying in lockstep while preserving the configured minimum wait.
+        jittered = delay * random.uniform(1.0, RETRY_JITTER_MAX_MULTIPLIER)
+        delays.append(min(jittered, 120.0))
     return tuple(delays)
 
 

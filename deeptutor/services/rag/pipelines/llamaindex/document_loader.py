@@ -28,6 +28,8 @@ from deeptutor.services.llm.exceptions import LLMConfigError
 from deeptutor.services.rag.file_routing import FileTypeRouter
 from deeptutor.utils.document_validator import DocumentValidator
 
+from .config import indexing_concurrency
+
 IMAGE_DESCRIPTION_SYSTEM_PROMPT = (
     "You describe images for a retrieval-augmented knowledge base. "
     "Be factual, concise, and include any visible text, labels, diagrams, "
@@ -58,22 +60,48 @@ class _ImageSource:
 class LlamaIndexDocumentLoader:
     """Convert source files into LlamaIndex ``Document`` / ``ImageNode`` objects."""
 
-    def __init__(self, logger=None) -> None:
+    def __init__(
+        self,
+        logger=None,
+        *,
+        parse_concurrency: int | None = None,
+        image_description_concurrency: int | None = None,
+    ) -> None:
         self.logger = logger or logging.getLogger(__name__)
+        self._parse_concurrency_override = parse_concurrency
+        self._image_description_concurrency_override = image_description_concurrency
 
     async def load(self, file_paths: Iterable[str]) -> list[Any]:
         documents: list[Any] = []
         image_sources: list[_ImageSource] = []
         classification = FileTypeRouter.classify_files(list(file_paths))
+        configured_parse, configured_images = indexing_concurrency()
+        parse_concurrency = max(1, self._parse_concurrency_override or configured_parse)
+        image_description_concurrency = max(
+            1, self._image_description_concurrency_override or configured_images
+        )
+        self.logger.info(
+            "LlamaIndex loader concurrency: parsers=%d, image_descriptions=%d",
+            parse_concurrency,
+            image_description_concurrency,
+        )
 
-        for file_path_str in classification.parser_files:
+        parser_semaphore = asyncio.Semaphore(parse_concurrency)
+
+        async def parse_one(file_path_str: str) -> tuple[Path, str, list[_ImageSource]]:
             file_path = Path(file_path_str)
             self.logger.info(f"Parsing document: {file_path.name}")
             # MinerU cloud parsing blocks end to end (upload + 300s polling +
             # archive download) on a synchronous httpx.Client — running it on
             # the event loop stalls every other request for the whole PDF
             # (same class of bug as upstream #761/#777). Hand it to a thread.
-            text, extracted_images = await asyncio.to_thread(self._parse_document, file_path)
+            async with parser_semaphore:
+                text, extracted_images = await asyncio.to_thread(self._parse_document, file_path)
+            return file_path, text, extracted_images
+
+        parser_files = classification.parser_files
+        parsed = await asyncio.gather(*(parse_one(path) for path in parser_files))
+        for file_path, text, extracted_images in parsed:
             self._append_if_nonempty(documents, file_path, text)
             image_sources.extend(extracted_images)
 
@@ -88,7 +116,12 @@ class LlamaIndexDocumentLoader:
             image_sources.append(_ImageSource(path=path, origin=path))
 
         if image_sources:
-            documents.extend(await self._load_image_nodes(image_sources))
+            documents.extend(
+                await self._load_image_nodes(
+                    image_sources,
+                    concurrency=image_description_concurrency,
+                )
+            )
 
         for file_path_str in classification.unsupported:
             self.logger.warning(f"Skipped unsupported file: {Path(file_path_str).name}")
@@ -150,7 +183,9 @@ class LlamaIndexDocumentLoader:
             )
         return images
 
-    async def _load_image_nodes(self, sources: list[_ImageSource]) -> list[ImageNode]:
+    async def _load_image_nodes(
+        self, sources: list[_ImageSource], *, concurrency: int
+    ) -> list[ImageNode]:
         embedding_client = get_embedding_client()
 
         unsupported_reasons = []
@@ -182,26 +217,24 @@ class LlamaIndexDocumentLoader:
                 )
             return []
 
-        embedded: list[_ImageSource] = []
-        descriptions: list[str] = []
-        contents = []
-        for source in sources:
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def prepare_image(source: _ImageSource):
             try:
                 image_payload = self._load_image_payload(source.path)
-                description = await self._describe_image(
-                    source.path,
-                    image_payload["base64"],
-                    image_payload["mimetype"],
-                )
+                async with semaphore:
+                    description = await self._describe_image(
+                        source.path,
+                        image_payload["base64"],
+                        image_payload["mimetype"],
+                    )
                 if not description:
                     self.logger.warning(
                         "Skipped image because the configured multimodal LLM "
                         f"returned no description: {source.path.name}"
                     )
-                    continue
-                contents.append({"image": image_payload["data_uri"]})
-                embedded.append(source)
-                descriptions.append(description)
+                    return None
+                return source, description, {"image": image_payload["data_uri"]}
             except OSError as exc:
                 self.logger.error(f"Failed to read image {source.path.name}: {exc}")
             except Exception as exc:
@@ -213,6 +246,14 @@ class LlamaIndexDocumentLoader:
                     llm_client.config.model,
                     exc,
                 )
+
+            return None
+
+        prepared = await asyncio.gather(*(prepare_image(source) for source in sources))
+        successful = [item for item in prepared if item is not None]
+        embedded = [item[0] for item in successful]
+        descriptions = [item[1] for item in successful]
+        contents = [item[2] for item in successful]
 
         if not contents:
             return []

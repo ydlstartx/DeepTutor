@@ -271,7 +271,7 @@ async def test_complete_strips_unsupported_response_format(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_complete_passes_retry_delays(monkeypatch) -> None:
+async def test_complete_passes_jittered_retry_delays(monkeypatch) -> None:
     cfg = _make_cfg()
     provider = _FakeProvider()
 
@@ -280,7 +280,8 @@ async def test_complete_passes_retry_delays(monkeypatch) -> None:
         "deeptutor.services.llm.factory.get_runtime_provider",
         lambda _config: provider,
     )
+    monkeypatch.setattr("deeptutor.services.llm.factory.random.uniform", lambda _a, _b: 1.2)
 
     await complete("hello", max_retries=3, retry_delay=0.5, exponential_backoff=True)
 
-    assert provider.complete_kwargs["retry_delays"] == (0.5, 1.0, 2.0)
+    assert provider.complete_kwargs["retry_delays"] == pytest.approx((0.6, 1.2, 2.4))

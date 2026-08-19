@@ -23,7 +23,7 @@ class EmbeddingConfig:
     dim: int = 0
     send_dimensions: bool | None = None
     request_timeout: int = 60
-    batch_size: int = 10
+    batch_size: int = 32
     batch_delay: float = 0.0
 
 

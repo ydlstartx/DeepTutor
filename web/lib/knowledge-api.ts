@@ -60,6 +60,9 @@ export interface LlamaIndexConfig {
   /** Chunk geometry — applies to documents indexed after the change. */
   chunk_size: number;
   chunk_overlap: number;
+  /** Parallel document parsers and multimodal image-description requests. */
+  parse_concurrency: number;
+  image_description_concurrency: number;
 }
 
 export interface GraphRagConfig {
@@ -75,6 +78,14 @@ export interface LightRagConfig {
   response_type: string;
   /** Vector-storage engine for NEW index versions ("nano" | "faiss"). */
   vector_storage: string;
+  llm_concurrency: number;
+  embedding_concurrency: number;
+  multimodal_concurrency: number;
+  entity_extract_max_gleaning: number;
+  chunk_token_size: number;
+  chunk_overlap_token_size: number;
+  embedding_batch_num: number;
+  force_llm_summary_on_merge: number;
 }
 
 export interface PreflightCheck {

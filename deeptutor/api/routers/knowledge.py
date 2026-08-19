@@ -1341,6 +1341,8 @@ class LlamaIndexConfigUpdate(BaseModel):
     bm25_top_k_multiplier: int | None = None
     chunk_size: int | None = None
     chunk_overlap: int | None = None
+    parse_concurrency: int | None = None
+    image_description_concurrency: int | None = None
 
 
 @router.get("/rag-pipelines/llamaindex/config")
@@ -1411,16 +1413,24 @@ async def update_graphrag_pipeline_config(payload: GraphRagConfigUpdate):
 
 
 class LightRagConfigUpdate(BaseModel):
-    """Partial update for LightRAG query knobs (omitted fields kept)."""
+    """Partial update for LightRAG retrieval and indexing knobs."""
 
     top_k: int | None = None
     response_type: str | None = None
     vector_storage: str | None = None
+    llm_concurrency: int | None = None
+    embedding_concurrency: int | None = None
+    multimodal_concurrency: int | None = None
+    entity_extract_max_gleaning: int | None = None
+    chunk_token_size: int | None = None
+    chunk_overlap_token_size: int | None = None
+    embedding_batch_num: int | None = None
+    force_llm_summary_on_merge: int | None = None
 
 
 @router.get("/rag-pipelines/lightrag/config")
 async def get_lightrag_pipeline_config():
-    """Read LightRAG's query knobs (top_k, response style)."""
+    """Read LightRAG's retrieval and indexing settings."""
     try:
         from deeptutor.services.config import get_runtime_settings_service
 

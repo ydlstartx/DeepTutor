@@ -24,6 +24,7 @@ from .config import (
     build_embedding_func,
     build_llm_model_func,
     build_vision_model_func,
+    indexing_kwargs_from_settings,
     normalize_mode,
     query_kwargs_from_settings,
 )
@@ -52,13 +53,6 @@ DEFAULT_VECTOR_STORAGE = "nano"
 # embedding client's entire retry budget (6 attempts × 60s + backoff ≈ 390s).
 _LIGHTRAG_LLM_TIMEOUT_S = 900
 _LIGHTRAG_EMBEDDING_TIMEOUT_S = 240
-
-# Cap on LightRAG's concurrent embedding workers (stock default: 8). Bursts
-# from a full rebuild sail past per-account provider rate quotas (observed:
-# DashScope Throttling.RateQuota on qwen3-vl-embedding killing the insert).
-# Indexing is background work — a small cap plus the adapter's 429 retry is
-# the polite-and-robust combination.
-_LIGHTRAG_EMBEDDING_MAX_ASYNC = 2
 
 
 def _install_lean_faiss_storage() -> None:
@@ -202,7 +196,7 @@ def build_rag(
     # attempt cap + retries (see the constants above).
     lightrag_kwargs["default_llm_timeout"] = _LIGHTRAG_LLM_TIMEOUT_S
     lightrag_kwargs["default_embedding_timeout"] = _LIGHTRAG_EMBEDDING_TIMEOUT_S
-    lightrag_kwargs["embedding_func_max_async"] = _LIGHTRAG_EMBEDDING_MAX_ASYNC
+    lightrag_kwargs.update(indexing_kwargs_from_settings())
     from deeptutor.knowledge.policy import is_kb_query_only
 
     if is_kb_query_only():

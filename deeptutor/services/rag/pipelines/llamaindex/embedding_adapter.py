@@ -25,6 +25,7 @@ def _config_fingerprint(config: EmbeddingConfig) -> tuple[Any, ...]:
         getattr(config, "effective_url", None) or getattr(config, "base_url", None),
         getattr(config, "api_version", None),
         getattr(config, "send_dimensions", None),
+        getattr(config, "batch_size", None),
     )
 
 
@@ -143,7 +144,13 @@ def configure_llamaindex_settings(logger=None) -> None:
     if isinstance(current, CustomEmbedding) and current.matches_config(embedding_cfg):
         current.refresh_client(embedding_cfg)
     else:
-        Settings.embed_model = CustomEmbedding(embedding_config=embedding_cfg)
+        # BaseEmbedding has its own outer batching layer. Match it to the
+        # provider-aware DeepTutor batch size; otherwise LlamaIndex's default
+        # batch of 10 prevents the client from ever using its 20/32 item cap.
+        Settings.embed_model = CustomEmbedding(
+            embedding_config=embedding_cfg,
+            embed_batch_size=embedding_cfg.batch_size,
+        )
         configured = True
     chunk_size, chunk_overlap = chunk_geometry()
     Settings.chunk_size = chunk_size
