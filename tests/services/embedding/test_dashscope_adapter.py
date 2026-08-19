@@ -267,12 +267,12 @@ async def test_throttled_call_is_retried_until_success(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_throttling_exhaustion_raises_with_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_throttling_exhaustion_raises_with_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls = _install_scripted_sdk(monkeypatch, [_429])
     with pytest.raises(RuntimeError) as ei:
-        await _retrying_adapter().embed(
-            EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
-        )
+        await _retrying_adapter().embed(EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding"))
     assert "Throttling.RateQuota" in str(ei.value)
     assert calls["count"] == 1 + DashScopeMultiModalEmbeddingAdapter._MAX_RETRIES
 
@@ -297,9 +297,7 @@ async def test_permanent_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> 
         [_FakeResponse(status_code=400, code="InvalidParameter", message="bad input")],
     )
     with pytest.raises(RuntimeError):
-        await _retrying_adapter().embed(
-            EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
-        )
+        await _retrying_adapter().embed(EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding"))
     assert calls["count"] == 1
 
 
