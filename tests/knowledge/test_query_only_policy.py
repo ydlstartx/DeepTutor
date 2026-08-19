@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,12 +45,72 @@ def test_query_only_delete_is_rejected_before_files_are_touched(monkeypatch, tmp
         encoding="utf-8",
     )
     monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    monkeypatch.setattr(
+        "deeptutor.multi_user.context.get_current_user",
+        lambda: SimpleNamespace(is_admin=False),
+    )
 
     manager = KnowledgeBaseManager(base_dir=str(base))
     with pytest.raises(KnowledgeBaseWriteDisabledError):
         manager.delete_knowledge_base("published", confirm=True)
 
     assert marker.read_bytes() == b"published index"
+
+
+def test_query_only_admin_can_delete_published_kb(monkeypatch, tmp_path) -> None:
+    base = tmp_path / "knowledge_bases"
+    kb_dir = base / "published"
+    kb_dir.mkdir(parents=True)
+    (kb_dir / "index.dat").write_bytes(b"published index")
+    (base / "kb_config.json").write_text(
+        json.dumps(
+            {
+                "default": "published",
+                "knowledge_bases": {"published": {"path": "published"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    manager = KnowledgeBaseManager(base_dir=str(base))
+    assert manager.delete_knowledge_base("published", confirm=True) is True
+
+    assert not kb_dir.exists()
+    persisted = json.loads((base / "kb_config.json").read_text(encoding="utf-8"))
+    assert "published" not in persisted["knowledge_bases"]
+    assert persisted["default"] is None
+
+
+def test_query_only_admin_delete_ima_only_drops_pointer(monkeypatch, tmp_path) -> None:
+    base = tmp_path / "knowledge_bases"
+    stale_local_dir = base / "IMA"
+    stale_local_dir.mkdir(parents=True)
+    marker = stale_local_dir / "must-not-be-deleted"
+    marker.write_text("remote content is not managed here", encoding="utf-8")
+    (base / "kb_config.json").write_text(
+        json.dumps(
+            {
+                "knowledge_bases": {
+                    "IMA": {
+                        "path": "IMA",
+                        "type": "ima",
+                        "rag_provider": "ima",
+                        "knowledge_base_id": "remote-kb",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    manager = KnowledgeBaseManager(base_dir=str(base))
+    assert manager.delete_knowledge_base("IMA", confirm=True) is True
+
+    assert marker.read_text(encoding="utf-8") == "remote content is not managed here"
+    persisted = json.loads((base / "kb_config.json").read_text(encoding="utf-8"))
+    assert "IMA" not in persisted["knowledge_bases"]
 
 
 def test_query_only_allows_only_ima_pointer_registration(monkeypatch, tmp_path) -> None:

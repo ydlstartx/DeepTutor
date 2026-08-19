@@ -12,6 +12,7 @@ interface KbSettingsSectionProps {
   onSetDefault: () => Promise<void>;
   onDelete: () => Promise<void>;
   readOnly?: boolean;
+  deleteAllowed?: boolean;
 }
 
 export default function KbSettingsSection({
@@ -19,6 +20,7 @@ export default function KbSettingsSection({
   onSetDefault,
   onDelete,
   readOnly = false,
+  deleteAllowed = true,
 }: KbSettingsSectionProps) {
   const { t } = useTranslation();
   const meta = kb.metadata || {};
@@ -31,6 +33,7 @@ export default function KbSettingsSection({
   const created = formatKnowledgeTimestamp(meta.created_at);
   const updated = formatKnowledgeTimestamp(meta.last_updated);
   const lastIndexed = formatKnowledgeTimestamp(meta.last_indexed_at);
+  const pointerOnly = meta.type === "ima";
 
   return (
     <div className="space-y-6">
@@ -86,26 +89,32 @@ export default function KbSettingsSection({
         )}
       </section>}
 
-      {!readOnly && <section className="space-y-3 rounded-lg border border-red-200 bg-red-50/40 p-3 dark:border-red-900/60 dark:bg-red-950/15">
-        <div>
-          <div className="text-[12.5px] font-medium text-red-700 dark:text-red-300">
-            {t("Danger zone")}
+      {deleteAllowed && (
+        <section className="space-y-3 rounded-lg border border-red-200 bg-red-50/40 p-3 dark:border-red-900/60 dark:bg-red-950/15">
+          <div>
+            <div className="text-[12.5px] font-medium text-red-700 dark:text-red-300">
+              {t("Danger zone")}
+            </div>
+            <p className="mt-0.5 text-[11.5px] text-red-700/80 dark:text-red-300/80">
+              {pointerOnly
+                ? t(
+                    "Removing this connection only deletes the DeepTutor pointer. The remote IMA knowledge base is not changed.",
+                  )
+                : t(
+                    "Deleting a knowledge base permanently removes its raw documents and index versions.",
+                  )}
+            </p>
           </div>
-          <p className="mt-0.5 text-[11.5px] text-red-700/80 dark:text-red-300/80">
-            {t(
-              "Deleting a knowledge base permanently removes its raw documents and index versions.",
-            )}
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => void onDelete()}
-          className="inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-red-50 px-2.5 py-1 text-[12px] font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/50"
-        >
-          <Trash2 className="h-3 w-3" />
-          {t("Delete knowledge base")}
-        </button>
-      </section>}
+          <button
+            type="button"
+            onClick={() => void onDelete()}
+            className="inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-red-50 px-2.5 py-1 text-[12px] font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/50"
+          >
+            <Trash2 className="h-3 w-3" />
+            {t("Delete knowledge base")}
+          </button>
+        </section>
+      )}
     </div>
   );
 }

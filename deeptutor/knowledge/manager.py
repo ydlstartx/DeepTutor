@@ -29,7 +29,11 @@ from deeptutor.knowledge.kb_types import (
     is_connected_kb,
 )
 from deeptutor.knowledge.manifest import iter_kb_documents
-from deeptutor.knowledge.policy import ensure_kb_write_allowed, is_kb_query_only
+from deeptutor.knowledge.policy import (
+    ensure_kb_delete_allowed,
+    ensure_kb_write_allowed,
+    is_kb_query_only,
+)
 from deeptutor.services.file_io import atomic_write_json, exclusive_write_lock
 from deeptutor.services.rag.factory import (
     DEFAULT_PROVIDER,
@@ -505,14 +509,13 @@ class KnowledgeBaseManager:
             self._save_config()
 
     @contextmanager
-    def _transact_ima_connection(self):
-        """Persist only an IMA retrieval pointer, even on query-only servers.
+    def _transact_policy_exception(self):
+        """Persist a separately authorized query-only policy exception.
 
-        Query-only forbids local knowledge-base construction and index
-        mutation. An IMA entry is different: it creates no local KB directory,
-        performs no ingestion, and only records the remote library id used at
-        query time. Keep this bypass private so every other config mutation
-        continues to flow through :meth:`transact` and its deployment guard.
+        Callers must perform their dedicated authorization before entering
+        this private transaction. It is used only for retrieval-only IMA
+        pointer registration and administrator deletion; every other config
+        mutation continues through :meth:`transact` and its deployment guard.
         """
         with exclusive_write_lock(self.config_file):
             if self.config_file.exists():
@@ -961,7 +964,7 @@ class KnowledgeBaseManager:
         process's update.
         """
         transaction = (
-            self._transact_ima_connection
+            self._transact_policy_exception
             if entry.get("type") == IMA_KB_TYPE and is_kb_query_only()
             else self.transact
         )
@@ -1605,7 +1608,12 @@ class KnowledgeBaseManager:
         Returns:
             True if deleted successfully
         """
-        ensure_kb_write_allowed()
+        # Query-only deployments still need an administrator cleanup path.
+        # Resolve the role in the manager as well as the API so non-HTTP
+        # callers cannot bypass the policy accidentally.
+        from deeptutor.multi_user.context import get_current_user
+
+        ensure_kb_delete_allowed(is_admin=get_current_user().is_admin)
         # Look up against the raw config rather than ``list_knowledge_bases``:
         # the latter prunes orphan entries (dir missing) as a side effect, so
         # calling it here would race-delete the entry we are about to clean up
@@ -1668,7 +1676,8 @@ class KnowledgeBaseManager:
 
         # Remove from config — one transaction so the deletion applies to the
         # freshest on-disk state (the rmtree above can take seconds).
-        with self.transact() as config:
+        transaction = self._transact_policy_exception if is_kb_query_only() else self.transact
+        with transaction() as config:
             config.get("knowledge_bases", {}).pop(name, None)
 
             # Update default if this was the default

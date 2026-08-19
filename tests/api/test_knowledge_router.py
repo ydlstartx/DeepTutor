@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,6 +118,12 @@ class _FakeKBManager:
         self.config.setdefault("knowledge_bases", {})[name] = entry
         return entry
 
+    def delete_knowledge_base(self, name: str, confirm: bool = False) -> bool:
+        if name not in self.config.get("knowledge_bases", {}):
+            raise ValueError(f"Knowledge base not found: {name}")
+        self.config["knowledge_bases"].pop(name)
+        return True
+
 
 class _FakeInitializer:
     def __init__(self, kb_name: str, base_dir: str, **_kwargs) -> None:
@@ -201,7 +208,6 @@ def test_rag_providers_lists_llamaindex_and_pageindex(monkeypatch) -> None:
         ("post", "/api/v1/knowledge/demo/upload", {}),
         ("post", "/api/v1/knowledge/demo/reindex", {}),
         ("post", "/api/v1/knowledge/demo/retry", {}),
-        ("delete", "/api/v1/knowledge/demo", {}),
         ("put", "/api/v1/knowledge/demo/config", {"json": {}}),
         ("post", "/api/v1/knowledge/connect-folder", {"json": {}}),
     ],
@@ -245,8 +251,42 @@ def test_query_only_policy_and_read_endpoints_remain_available(monkeypatch, tmp_
     assert policy.status_code == 200
     assert policy.json()["query_only"] is True
     assert policy.json()["modification_allowed"] is False
+    assert policy.json()["deletion_allowed"] is True
     assert listing.status_code == 200
     assert [item["name"] for item in listing.json()] == ["existing"]
+
+
+def test_query_only_admin_can_delete_existing_kb(monkeypatch, tmp_path: Path) -> None:
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    manager.config["knowledge_bases"]["existing"] = {"path": "existing"}
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    with TestClient(_build_app()) as client:
+        response = client.delete("/api/v1/knowledge/existing")
+
+    assert response.status_code == 200
+    assert "existing" not in manager.config["knowledge_bases"]
+
+
+def test_query_only_non_admin_cannot_delete_existing_kb(monkeypatch, tmp_path: Path) -> None:
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    manager.config["knowledge_bases"]["existing"] = {"path": "existing"}
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setattr(
+        knowledge_router_module,
+        "get_current_user",
+        lambda: SimpleNamespace(is_admin=False),
+    )
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    with TestClient(_build_app()) as client:
+        policy = client.get("/api/v1/knowledge/policy")
+        response = client.delete("/api/v1/knowledge/existing")
+
+    assert policy.json()["deletion_allowed"] is False
+    assert response.status_code == 403
+    assert "existing" in manager.config["knowledge_bases"]
 
 
 class _ImaListStub:

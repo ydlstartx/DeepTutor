@@ -1415,6 +1415,7 @@
   "Set as default": "设为默认",
   "Danger zone": "危险操作",
   "Deleting a knowledge base permanently removes its raw documents and index versions.": "删除知识库会永久移除其原始文档与所有索引版本。",
+  "Removing this connection only deletes the DeepTutor pointer. The remote IMA knowledge base is not changed.": "移除此连接只会删除 DeepTutor 中的指针，不会更改远端 IMA 知识库。",
   "Delete knowledge base": "删除知识库",
   "Index versions": "索引版本",
   "Each embedding configuration gets its own stored vector index.": "每个 embedding 配置都对应一个独立存储的向量索引。",

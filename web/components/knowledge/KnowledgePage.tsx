@@ -292,6 +292,7 @@ export default function KnowledgePage() {
             <KnowledgeBaseDetail
               kb={selectedKb}
               queryOnly={policy.query_only}
+              deletionAllowed={policy.deletion_allowed}
               uploadPolicy={uploadPolicy}
               task={selectedKb ? tasksByKb[selectedKb.name] : undefined}
               history={selectedKb ? (historyByKb[selectedKb.name] ?? []) : []}

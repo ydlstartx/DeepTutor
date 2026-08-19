@@ -32,6 +32,7 @@ type DetailSection = "files" | "add" | "versions" | "settings";
 interface KnowledgeBaseDetailProps {
   kb: KnowledgeBase | null;
   queryOnly?: boolean;
+  deletionAllowed?: boolean;
   uploadPolicy: KnowledgeUploadPolicy;
   task?: TaskState;
   history: HistoryEntry[];
@@ -62,6 +63,7 @@ const FULL_BLEED_SECTIONS = new Set<DetailSection>(["files"]);
 export default function KnowledgeBaseDetail({
   kb,
   queryOnly = false,
+  deletionAllowed = true,
   uploadPolicy,
   task,
   history,
@@ -121,6 +123,7 @@ export default function KnowledgeBaseDetail({
     task.executing === true;
   const status = resolveKbStatus(kb);
   const mutationDisabled = queryOnly || Boolean(kb.read_only);
+  const deleteDisabled = !deletionAllowed || Boolean(kb.read_only);
   const activeSection = queryOnly && section === "add" ? "files" : section;
   const canRetry = status === "error" && !mutationDisabled;
 
@@ -270,11 +273,12 @@ export default function KnowledgeBaseDetail({
                 <KbSettingsSection
                   kb={kb}
                   readOnly={mutationDisabled}
+                  deleteAllowed={!deleteDisabled}
                   onSetDefault={() =>
                     mutationDisabled ? Promise.resolve() : onSetDefault(kb.name)
                   }
                   onDelete={() =>
-                    mutationDisabled ? Promise.resolve() : onDelete(kb.name)
+                    deleteDisabled ? Promise.resolve() : onDelete(kb.name)
                   }
                 />
               )}

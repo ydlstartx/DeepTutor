@@ -46,6 +46,7 @@ from deeptutor.knowledge.naming import validate_knowledge_base_name
 from deeptutor.knowledge.policy import (
     KB_QUERY_ONLY_MESSAGE,
     KnowledgeBaseWriteDisabledError,
+    ensure_kb_delete_allowed,
     ensure_kb_write_allowed,
     is_kb_query_only,
 )
@@ -110,6 +111,14 @@ def require_kb_write_access() -> None:
     """Map the shared deployment guard to a stable HTTP 403 response."""
     try:
         ensure_kb_write_allowed()
+    except KnowledgeBaseWriteDisabledError as exc:
+        raise HTTPException(status_code=403, detail=KB_QUERY_ONLY_MESSAGE) from exc
+
+
+def require_kb_delete_access() -> None:
+    """Allow query-only KB deletion only for an administrator request."""
+    try:
+        ensure_kb_delete_allowed(is_admin=get_current_user().is_admin)
     except KnowledgeBaseWriteDisabledError as exc:
         raise HTTPException(status_code=403, detail=KB_QUERY_ONLY_MESSAGE) from exc
 
@@ -1128,6 +1137,7 @@ async def get_knowledge_base_policy():
     return {
         "query_only": query_only,
         "modification_allowed": not query_only,
+        "deletion_allowed": not query_only or get_current_user().is_admin,
         "message": KB_QUERY_ONLY_MESSAGE if query_only else "",
     }
 
@@ -2556,7 +2566,7 @@ async def delete_kb_file(kb_name: str, filename: str):
     }
 
 
-@router.delete("/{kb_name}", dependencies=[Depends(require_kb_write_access)])
+@router.delete("/{kb_name}", dependencies=[Depends(require_kb_delete_access)])
 async def delete_knowledge_base(kb_name: str):
     """Delete a knowledge base."""
     try:
@@ -2568,6 +2578,8 @@ async def delete_knowledge_base(kb_name: str):
         return {"message": f"Knowledge base '{kb_name}' deleted successfully"}
     except ValueError:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{kb_name}' not found")
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

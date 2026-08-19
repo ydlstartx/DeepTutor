@@ -26,10 +26,22 @@ def ensure_kb_write_allowed() -> None:
         raise KnowledgeBaseWriteDisabledError(KB_QUERY_ONLY_MESSAGE)
 
 
+def ensure_kb_delete_allowed(*, is_admin: bool) -> None:
+    """Allow query-only deletion only for the current administrator.
+
+    Deletion is an operational cleanup action rather than knowledge-base
+    construction.  Administrators may remove published local KBs or connected
+    pointers; ordinary users remain subject to the query-only write guard.
+    """
+    if is_kb_query_only() and not is_admin:
+        raise KnowledgeBaseWriteDisabledError(KB_QUERY_ONLY_MESSAGE)
+
+
 __all__ = [
     "KB_QUERY_ONLY_ENV",
     "KB_QUERY_ONLY_MESSAGE",
     "KnowledgeBaseWriteDisabledError",
+    "ensure_kb_delete_allowed",
     "ensure_kb_write_allowed",
     "is_kb_query_only",
 ]

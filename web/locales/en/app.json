@@ -1295,6 +1295,7 @@
   "Set as default": "Set as default",
   "Danger zone": "Danger zone",
   "Deleting a knowledge base permanently removes its raw documents and index versions.": "Deleting a knowledge base permanently removes its raw documents and index versions.",
+  "Removing this connection only deletes the DeepTutor pointer. The remote IMA knowledge base is not changed.": "Removing this connection only deletes the DeepTutor pointer. The remote IMA knowledge base is not changed.",
   "Delete knowledge base": "Delete knowledge base",
   "Index versions": "Index versions",
   "Each embedding configuration gets its own stored vector index.": "Each embedding configuration gets its own stored vector index.",

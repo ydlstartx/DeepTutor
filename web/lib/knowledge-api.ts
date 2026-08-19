@@ -127,12 +127,14 @@ export interface KnowledgeUploadPolicy {
 export interface KnowledgeBasePolicy {
   query_only: boolean;
   modification_allowed: boolean;
+  deletion_allowed: boolean;
   message: string;
 }
 
 export const DEFAULT_KNOWLEDGE_BASE_POLICY: KnowledgeBasePolicy = {
   query_only: false,
   modification_allowed: true,
+  deletion_allowed: true,
   message: "",
 };
 
@@ -227,6 +229,8 @@ export async function getKnowledgeBasePolicy(options?: { force?: boolean }) {
       return {
         query_only: data?.query_only === true,
         modification_allowed: data?.modification_allowed !== false,
+        deletion_allowed:
+          data?.deletion_allowed === true || data?.query_only !== true,
         message: typeof data?.message === "string" ? data.message : "",
       };
     },
