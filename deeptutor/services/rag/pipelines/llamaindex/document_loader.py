@@ -24,6 +24,7 @@ from llama_index.core.schema import ImageNode
 
 from deeptutor.services.embedding import get_embedding_client
 from deeptutor.services.llm.client import get_llm_client
+from deeptutor.services.llm.exceptions import LLMConfigError
 from deeptutor.services.rag.file_routing import FileTypeRouter
 from deeptutor.utils.document_validator import DocumentValidator
 
@@ -151,7 +152,6 @@ class LlamaIndexDocumentLoader:
 
     async def _load_image_nodes(self, sources: list[_ImageSource]) -> list[ImageNode]:
         embedding_client = get_embedding_client()
-        llm_client = get_llm_client()
 
         unsupported_reasons = []
         if not embedding_client.supports_multimodal_contents():
@@ -160,7 +160,14 @@ class LlamaIndexDocumentLoader:
                 f"(binding={embedding_client.config.binding}, "
                 f"model={embedding_client.config.model})"
             )
-        if not llm_client.supports_multimodal_images():
+        # An unconfigured LLM must not fail the document load: images are an
+        # optional enrichment, so treat it as another skip reason.
+        try:
+            llm_client = get_llm_client()
+        except LLMConfigError as exc:
+            llm_client = None
+            unsupported_reasons.append(f"LLM is not configured: {exc}")
+        if llm_client is not None and not llm_client.supports_multimodal_images():
             unsupported_reasons.append(
                 "LLM provider/model does not support multimodal image input "
                 f"(binding={llm_client.config.binding}, model={llm_client.config.model})"
