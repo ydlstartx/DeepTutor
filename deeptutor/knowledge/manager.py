@@ -514,8 +514,9 @@ class KnowledgeBaseManager:
 
         Callers must perform their dedicated authorization before entering
         this private transaction. It is used only for retrieval-only IMA
-        pointer registration and administrator deletion; every other config
-        mutation continues through :meth:`transact` and its deployment guard.
+        pointer registration, administrator deletion, and administrator
+        publication of a pre-built local index; every other config mutation
+        continues through :meth:`transact` and its deployment guard.
         """
         with exclusive_write_lock(self.config_file):
             if self.config_file.exists():

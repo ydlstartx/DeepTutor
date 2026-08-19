@@ -11,6 +11,7 @@ import KnowledgeBaseDetail from "./KnowledgeBaseDetail";
 import KnowledgeHome from "./KnowledgeHome";
 import EngineDetail from "./EngineDetail";
 import CreateKbModal from "./CreateKbModal";
+import ImportKbModal from "./ImportKbModal";
 import PageIndexSettingsModal from "./PageIndexSettingsModal";
 
 export default function KnowledgePage() {
@@ -42,6 +43,7 @@ export default function KnowledgePage() {
     connectLinkedFolder,
     connectLightRagServer,
     connectIma,
+    importExistingKb,
   } = useKnowledgeBases();
 
   // Connected subagents are stored as ``type: subagent`` KBs so the chat
@@ -59,6 +61,7 @@ export default function KnowledgePage() {
     initialEngine,
   );
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [createPreset, setCreatePreset] = useState<{
     mode: "new" | "link";
     source?: string;
@@ -260,9 +263,11 @@ export default function KnowledgePage() {
               kbs={kbs}
               providers={providers}
               queryOnly={policy.query_only}
+              importAllowed={policy.import_allowed}
               onOpenKb={openKb}
               onOpenEngine={openEngine}
               onCreate={openCreate}
+              onImport={() => setImportOpen(true)}
               onConnectObsidian={openObsidian}
             />
           ) : view === "engine" && selectedProvider ? (
@@ -283,9 +288,11 @@ export default function KnowledgePage() {
               kbs={kbs}
               providers={providers}
               queryOnly={policy.query_only}
+              importAllowed={policy.import_allowed}
               onOpenKb={openKb}
               onOpenEngine={openEngine}
               onCreate={openCreate}
+              onImport={() => setImportOpen(true)}
               onConnectObsidian={openObsidian}
             />
           ) : (
@@ -327,6 +334,19 @@ export default function KnowledgePage() {
           setPipelineOpen(true);
         }}
       />}
+
+      {policy.import_allowed && (
+        <ImportKbModal
+          isOpen={importOpen}
+          uploadDirectory={policy.import_directory}
+          onClose={() => setImportOpen(false)}
+          onImport={async (params) => {
+            const result = await importExistingKb(params);
+            openKb(result.name);
+            return result;
+          }}
+        />
+      )}
 
       <PageIndexSettingsModal
         isOpen={pipelineOpen}

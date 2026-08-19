@@ -252,8 +252,56 @@ def test_query_only_policy_and_read_endpoints_remain_available(monkeypatch, tmp_
     assert policy.json()["query_only"] is True
     assert policy.json()["modification_allowed"] is False
     assert policy.json()["deletion_allowed"] is True
+    assert policy.json()["import_allowed"] is True
+    assert policy.json()["import_directory"] == "data/upload"
     assert listing.status_code == 200
     assert [item["name"] for item in listing.json()] == ["existing"]
+
+
+def test_query_only_admin_can_browse_probe_and_import_uploaded_kb(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from deeptutor.knowledge.manager import KnowledgeBaseManager
+
+    data_root = tmp_path / "data"
+    base_dir = data_root / "knowledge_bases"
+    upload = data_root / "upload" / "published"
+    (upload / "raw").mkdir(parents=True)
+    (upload / "raw" / "lesson.pdf").write_bytes(b"%PDF-1.4\nlesson")
+    _write_ready_llamaindex_version(upload)
+    (upload / "metadata.json").write_text(
+        json.dumps(
+            {
+                "name": "published",
+                "description": "Published offline",
+                "rag_provider": "llamaindex",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (upload / ".progress.json").write_text(
+        json.dumps({"kb_name": "published", "stage": "completed"}),
+        encoding="utf-8",
+    )
+    manager = KnowledgeBaseManager(base_dir=str(base_dir))
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    with TestClient(_build_app()) as client:
+        browse = client.get("/api/v1/knowledge/import/folders")
+        probe = client.post("/api/v1/knowledge/import/probe", json={"path": "published"})
+        publish = client.post(
+            "/api/v1/knowledge/import",
+            json={"path": "published", "name": "published"},
+        )
+
+    assert browse.status_code == 200
+    assert browse.json()["folders"][0]["path"] == "published"
+    assert probe.status_code == 200
+    assert probe.json()["ok"] is True
+    assert publish.status_code == 200
+    assert publish.json()["status"] == "imported"
+    assert (base_dir / "published" / "raw" / "lesson.pdf").is_file()
 
 
 def test_query_only_admin_can_delete_existing_kb(monkeypatch, tmp_path: Path) -> None:
@@ -287,6 +335,30 @@ def test_query_only_non_admin_cannot_delete_existing_kb(monkeypatch, tmp_path: P
     assert policy.json()["deletion_allowed"] is False
     assert response.status_code == 403
     assert "existing" in manager.config["knowledge_bases"]
+
+
+def test_non_admin_cannot_browse_or_import_uploaded_kbs(monkeypatch, tmp_path: Path) -> None:
+    manager = _FakeKBManager(tmp_path / "knowledge_bases")
+    monkeypatch.setattr(knowledge_router_module, "get_kb_manager", lambda: manager)
+    monkeypatch.setattr(
+        knowledge_router_module,
+        "get_current_user",
+        lambda: SimpleNamespace(is_admin=False),
+    )
+
+    with TestClient(_build_app()) as client:
+        policy = client.get("/api/v1/knowledge/policy")
+        browse = client.get("/api/v1/knowledge/import/folders")
+        probe = client.post("/api/v1/knowledge/import/probe", json={"path": "demo"})
+        publish = client.post(
+            "/api/v1/knowledge/import",
+            json={"path": "demo", "name": "demo"},
+        )
+
+    assert policy.json()["import_allowed"] is False
+    assert browse.status_code == 403
+    assert probe.status_code == 403
+    assert publish.status_code == 403
 
 
 class _ImaListStub:

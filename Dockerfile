@@ -192,7 +192,8 @@ RUN mkdir -p \
     data/user/workspace/chat/math_animator \
     data/user/workspace/chat/_detached_code_execution \
     data/user/logs \
-    data/knowledge_bases
+    data/knowledge_bases \
+    data/upload
 
 # Bake a non-root user (UID 1000) for the supervisord programs. supervisord
 # itself runs as PID 1's UID — root under rootful Docker/Podman, or UID 1000

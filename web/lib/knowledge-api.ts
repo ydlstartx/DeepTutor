@@ -139,6 +139,8 @@ export interface KnowledgeBasePolicy {
   query_only: boolean;
   modification_allowed: boolean;
   deletion_allowed: boolean;
+  import_allowed: boolean;
+  import_directory: string;
   message: string;
 }
 
@@ -146,6 +148,8 @@ export const DEFAULT_KNOWLEDGE_BASE_POLICY: KnowledgeBasePolicy = {
   query_only: false,
   modification_allowed: true,
   deletion_allowed: true,
+  import_allowed: false,
+  import_directory: "data/upload",
   message: "",
 };
 
@@ -244,6 +248,11 @@ export async function getKnowledgeBasePolicy(options?: { force?: boolean }) {
         modification_allowed: data?.modification_allowed !== false,
         deletion_allowed:
           data?.deletion_allowed === true || data?.query_only !== true,
+        import_allowed: data?.import_allowed === true,
+        import_directory:
+          typeof data?.import_directory === "string"
+            ? data.import_directory
+            : "data/upload",
         message: typeof data?.message === "string" ? data.message : "",
       };
     },
@@ -773,6 +782,89 @@ export async function connectLinkedFolder(payload: {
     rag_provider: string;
     warnings: string[];
   };
+}
+
+export interface KnowledgeImportFolder {
+  name: string;
+  /** POSIX path relative to the fixed server-side data/upload root. */
+  path: string;
+  candidate: boolean;
+}
+
+export interface KnowledgeImportFolderListing {
+  path: string;
+  parent: string | null;
+  candidate: boolean;
+  folders: KnowledgeImportFolder[];
+}
+
+export interface KnowledgeImportProbe {
+  ok: boolean;
+  path: string;
+  suggested_name: string;
+  provider: string;
+  version_count: number;
+  ready_version_count: number;
+  document_count: number | null;
+  file_count: number;
+  size_bytes: number;
+  warnings: string[];
+  error: string | null;
+}
+
+export interface KnowledgeImportResult {
+  status: "imported";
+  name: string;
+  source_path: string;
+  rag_provider: string;
+  file_count: number;
+  size_bytes: number;
+}
+
+export async function listKnowledgeImportFolders(
+  path = "",
+): Promise<KnowledgeImportFolderListing> {
+  const query = new URLSearchParams();
+  if (path) query.set("path", path);
+  const suffix = query.toString();
+  const res = await apiFetch(
+    apiUrl(`/api/v1/knowledge/import/folders${suffix ? `?${suffix}` : ""}`),
+    { cache: "no-store" },
+  );
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to browse upload folder"));
+  }
+  return (await res.json()) as KnowledgeImportFolderListing;
+}
+
+export async function probeKnowledgeImportFolder(
+  path: string,
+): Promise<KnowledgeImportProbe> {
+  const res = await apiFetch(apiUrl("/api/v1/knowledge/import/probe"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to inspect uploaded knowledge base"));
+  }
+  return (await res.json()) as KnowledgeImportProbe;
+}
+
+export async function importExistingKnowledgeBase(payload: {
+  path: string;
+  name: string;
+}): Promise<KnowledgeImportResult> {
+  const res = await apiFetch(apiUrl("/api/v1/knowledge/import"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw new Error(await readErrorDetail(res, "Failed to import knowledge base"));
+  }
+  invalidateKnowledgeCaches();
+  return (await res.json()) as KnowledgeImportResult;
 }
 
 export interface LightRagServerProbe {

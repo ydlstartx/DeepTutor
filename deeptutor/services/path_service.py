@@ -116,6 +116,15 @@ class PathService:
     def get_knowledge_bases_root(self) -> Path:
         return self._workspace_root / "knowledge_bases"
 
+    def get_knowledge_base_upload_root(self) -> Path:
+        """Administrator staging area for pre-built knowledge bases.
+
+        The import API exposes only this directory tree.  Keeping it beside
+        ``knowledge_bases`` makes the whole runtime data volume portable while
+        avoiding a general-purpose server filesystem browser.
+        """
+        return self._workspace_root / "upload"
+
     def get_parse_cache_root(self) -> Path:
         """Shared, content-addressed document-parse cache.
 

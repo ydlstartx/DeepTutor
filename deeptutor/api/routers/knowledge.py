@@ -40,6 +40,11 @@ from deeptutor.knowledge.add_documents import (
     remove_raw_document,
     rename_raw_document,
 )
+from deeptutor.knowledge.import_existing import (
+    import_existing_knowledge_base,
+    list_upload_folders,
+    probe_import_folder,
+)
 from deeptutor.knowledge.initializer import KnowledgeBaseInitializer
 from deeptutor.knowledge.kb_types import IMA_KB_TYPE, is_connected_kb, supports_local_raw_files
 from deeptutor.knowledge.manager import KnowledgeBaseManager, get_process_identity
@@ -125,6 +130,15 @@ def require_kb_delete_access() -> None:
         ensure_kb_delete_allowed(is_admin=get_current_user().is_admin)
     except KnowledgeBaseWriteDisabledError as exc:
         raise HTTPException(status_code=403, detail=KB_QUERY_ONLY_MESSAGE) from exc
+
+
+def require_kb_import_access() -> None:
+    """Restrict pre-built KB publication to the administrator workspace."""
+    if not get_current_user().is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only an administrator can import a pre-built knowledge base.",
+        )
 
 
 def format_bytes_human_readable(size_bytes: int) -> str:
@@ -1152,6 +1166,8 @@ async def get_knowledge_base_policy():
         "query_only": query_only,
         "modification_allowed": not query_only,
         "deletion_allowed": not query_only or get_current_user().is_admin,
+        "import_allowed": get_current_user().is_admin,
+        "import_directory": "data/upload",
         "message": KB_QUERY_ONLY_MESSAGE if query_only else "",
     }
 
@@ -1787,6 +1803,63 @@ class ConnectFolderRequest(BaseModel):
     name: str
     folder_path: str
     rag_provider: str = DEFAULT_PROVIDER
+
+
+class ProbeImportFolderRequest(BaseModel):
+    path: str
+
+
+class ImportExistingKnowledgeBaseRequest(BaseModel):
+    path: str
+    name: str = ""
+
+
+@router.get("/import/folders", dependencies=[Depends(require_kb_import_access)])
+async def list_import_folders(path: str = ""):
+    """Browse directories beneath the fixed ``data/upload`` staging root."""
+    try:
+        return await asyncio.to_thread(list_upload_folders, get_kb_manager(), path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Could not browse knowledge-base upload directory: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not read the upload directory.") from exc
+
+
+@router.post("/import/probe", dependencies=[Depends(require_kb_import_access)])
+async def probe_import_folder_route(payload: ProbeImportFolderRequest):
+    """Validate a selected uploaded KB without changing server state."""
+    try:
+        result = await asyncio.to_thread(
+            probe_import_folder,
+            get_kb_manager(),
+            payload.path,
+        )
+        return result.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.error("Could not inspect uploaded knowledge base: %s", exc)
+        raise HTTPException(
+            status_code=500, detail="Could not inspect the uploaded folder."
+        ) from exc
+
+
+@router.post("/import", dependencies=[Depends(require_kb_import_access)])
+async def import_existing_knowledge_base_route(payload: ImportExistingKnowledgeBaseRequest):
+    """Copy and publish a complete pre-built KB without rebuilding its index."""
+    try:
+        return await asyncio.to_thread(
+            import_existing_knowledge_base,
+            get_kb_manager(),
+            payload.path,
+            payload.name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.exception("Could not import uploaded knowledge base")
+        raise HTTPException(status_code=500, detail="Could not import the knowledge base.") from exc
 
 
 @router.post("/probe-folder")

@@ -11,6 +11,7 @@ import {
   DEFAULT_KNOWLEDGE_BASE_POLICY,
   getKnowledgeBasePolicy,
   getKnowledgeUploadPolicy,
+  importExistingKnowledgeBase as importExistingKbApi,
   invalidateKnowledgeCaches,
   listKnowledgeBases,
   listRagProviders,
@@ -366,6 +367,15 @@ export function useKnowledgeBases() {
     [load],
   );
 
+  const importExistingKb = useCallback(
+    async (params: { path: string; name: string }) => {
+      const result = await importExistingKbApi(params);
+      await load({ force: true, showSpinner: false });
+      return result;
+    },
+    [load],
+  );
+
   return {
     kbs: combinedKbs,
     rawKbs: kbs,
@@ -391,6 +401,7 @@ export function useKnowledgeBases() {
     connectLinkedFolder,
     connectLightRagServer,
     connectIma,
+    importExistingKb,
   };
 }
 

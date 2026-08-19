@@ -35,9 +35,11 @@ interface KnowledgeHomeProps {
   kbs: KnowledgeBase[];
   providers: RagProviderSummary[];
   queryOnly?: boolean;
+  importAllowed?: boolean;
   onOpenKb: (name: string) => void;
   onOpenEngine: (id: string) => void;
   onCreate: () => void;
+  onImport: () => void;
   /** Open the create flow pre-set to link an Obsidian vault. */
   onConnectObsidian: () => void;
 }
@@ -94,9 +96,11 @@ export default function KnowledgeHome({
   kbs,
   providers,
   queryOnly = false,
+  importAllowed = false,
   onOpenKb,
   onOpenEngine,
   onCreate,
+  onImport,
   onConnectObsidian,
 }: KnowledgeHomeProps) {
   const { t } = useTranslation();
@@ -135,14 +139,28 @@ export default function KnowledgeHome({
               {t("Manage your knowledge bases and retrieval engines.")}
             </p>
           </div>
-          {!queryOnly && <button
-            type="button"
-            onClick={onCreate}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
-          >
-            <Plus size={14} />
-            {t("New knowledge base")}
-          </button>}
+          <div className="flex shrink-0 items-center gap-2">
+            {importAllowed && (
+              <button
+                type="button"
+                onClick={onImport}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--ring)]"
+              >
+                <FolderOpen size={14} />
+                {t("Import existing knowledge base")}
+              </button>
+            )}
+            {!queryOnly && (
+              <button
+                type="button"
+                onClick={onCreate}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
+              >
+                <Plus size={14} />
+                {t("New knowledge base")}
+              </button>
+            )}
+          </div>
         </div>
 
         {queryOnly && (
@@ -286,14 +304,28 @@ export default function KnowledgeHome({
                   "Create one to upload documents and retrieve grounded context in chat.",
                 )}
               </p>
-              {!queryOnly && <button
-                type="button"
-                onClick={onCreate}
-                className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
-              >
-                <Plus size={14} />
-                {t("New knowledge base")}
-              </button>}
+              <div className="mt-4 flex items-center justify-center gap-2">
+                {importAllowed && (
+                  <button
+                    type="button"
+                    onClick={onImport}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--ring)]"
+                  >
+                    <FolderOpen size={14} />
+                    {t("Import existing knowledge base")}
+                  </button>
+                )}
+                {!queryOnly && (
+                  <button
+                    type="button"
+                    onClick={onCreate}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
+                  >
+                    <Plus size={14} />
+                    {t("New knowledge base")}
+                  </button>
+                )}
+              </div>
             </div>
           ) : filteredKbs.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--border)] px-4 py-8 text-center text-[12px] text-[var(--muted-foreground)]">

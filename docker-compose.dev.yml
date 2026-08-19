@@ -38,6 +38,7 @@ services:
       - ./data/user:/app/data/user
       - ./data/memory:/app/data/memory
       - ./data/knowledge_bases:/app/data/knowledge_bases
+      - ./data/upload:/app/data/upload
 
     # In development, we might want to see logs directly
     # Uncomment the following to disable log files and see everything in console
