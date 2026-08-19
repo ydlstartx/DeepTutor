@@ -40,6 +40,19 @@ VECTOR_STORAGE_CLASSES = {
 }
 DEFAULT_VECTOR_STORAGE = "nano"
 
+# LightRAG wraps the injected LLM/embedding funcs in its own watchdog
+# (priority_limit_async_func_call): a worker hard-cancels any call still
+# running past 2× default_*_timeout, and a health check force-fails it 15s
+# after that. The stock defaults (180s LLM / 30s embedding → 360s/60s kills)
+# fire long before DeepTutor's own per-attempt wall-clock cap (900s,
+# provider_core) and transient-retry policy can do their job — turning a
+# recoverable slow or hung request into a hard document failure with no
+# retry. Push the watchdog out so it stays a last-resort backstop:
+# 2×900s ≈ two full DeepTutor attempts for the LLM, and 2×240s covers the
+# embedding client's entire retry budget (6 attempts × 60s + backoff ≈ 390s).
+_LIGHTRAG_LLM_TIMEOUT_S = 900
+_LIGHTRAG_EMBEDDING_TIMEOUT_S = 240
+
 
 def _install_lean_faiss_storage() -> None:
     """Swap LightRAG's FaissVectorDBStorage for a RAM-lean subclass.
@@ -178,6 +191,10 @@ def build_rag(
     storage_cls = VECTOR_STORAGE_CLASSES[engine_id]
 
     lightrag_kwargs: dict[str, Any] = {}
+    # Keep LightRAG's call watchdog strictly a backstop behind DeepTutor's own
+    # attempt cap + retries (see the constants above).
+    lightrag_kwargs["default_llm_timeout"] = _LIGHTRAG_LLM_TIMEOUT_S
+    lightrag_kwargs["default_embedding_timeout"] = _LIGHTRAG_EMBEDDING_TIMEOUT_S
     from deeptutor.knowledge.policy import is_kb_query_only
 
     if is_kb_query_only():

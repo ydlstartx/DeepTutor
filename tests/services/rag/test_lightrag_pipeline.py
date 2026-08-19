@@ -886,20 +886,29 @@ def test_build_rag_forwards_faiss_vector_storage(monkeypatch) -> None:
     # test_lean_faiss_*) and requires the real lightrag/faiss packages.
     monkeypatch.setattr(engine, "_install_lean_faiss_storage", lambda: None)
     engine.build_rag(Path("/tmp/kb-wd"), "faiss")  # noqa: S108
-    assert captured["lightrag_kwargs"] == {"vector_storage": "FaissVectorDBStorage"}
+    assert captured["lightrag_kwargs"] == {
+        "vector_storage": "FaissVectorDBStorage",
+        "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
+        "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
+    }
 
 
 def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
     captured = _stub_raganything(monkeypatch)
+    expected = {
+        "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
+        "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
+    }
+
     engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108  # default == nano
-    assert captured["lightrag_kwargs"] == {}
+    assert captured["lightrag_kwargs"] == expected
 
     engine.build_rag(Path("/tmp/kb-wd"), "nano")  # noqa: S108
-    assert captured["lightrag_kwargs"] == {}
+    assert captured["lightrag_kwargs"] == expected
 
     # Unknown ids fall back to nano instead of breaking indexing.
     engine.build_rag(Path("/tmp/kb-wd"), "qdrant-whatever")  # noqa: S108
-    assert captured["lightrag_kwargs"] == {}
+    assert captured["lightrag_kwargs"] == expected
 
 
 def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatch) -> None:
@@ -911,7 +920,24 @@ def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatc
     assert captured["lightrag_kwargs"] == {
         "enable_llm_cache": False,
         "enable_llm_cache_for_entity_extract": False,
+        "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
+        "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
     }
+
+
+def test_build_rag_lightrag_watchdog_stays_a_backstop(monkeypatch) -> None:
+    """LightRAG hard-cancels injected calls running past 2× default_*_timeout.
+
+    Those outer caps must stay looser than DeepTutor's own per-attempt
+    wall-clock cap (900s, DEEPTUTOR_LLM_ATTEMPT_TIMEOUT_S default) and the
+    embedding client's full retry budget (~390s), or a slow/hung-but-
+    recoverable call becomes a hard document failure with no retry.
+    """
+    captured = _stub_raganything(monkeypatch)
+    engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108
+    kwargs = captured["lightrag_kwargs"]
+    assert kwargs["default_llm_timeout"] * 2 > 900
+    assert kwargs["default_embedding_timeout"] * 2 > 390
 
 
 def test_write_meta_records_and_pins_vector_storage(tmp_path) -> None:
