@@ -207,3 +207,107 @@ def test_dashscope_endpoint_routing(model: str, multimodal: bool, endpoint_tail:
 
     assert is_dashscope_multimodal_embedding_model(model) is multimodal
     assert dashscope_embedding_endpoint(model).endswith(endpoint_tail)
+
+
+# --------------------------------------------------------------------------- #
+# Throttling / transient retry
+# --------------------------------------------------------------------------- #
+
+
+def _install_scripted_sdk(monkeypatch: pytest.MonkeyPatch, script: list[Any]) -> dict[str, int]:
+    """Stub both DashScope surfaces to play back a scripted sequence.
+
+    Each entry is either a ``_FakeResponse`` to return or an Exception to raise;
+    the last entry repeats once the script is exhausted.
+    """
+    calls = {"count": 0}
+
+    def fake_call(*, api_key: str, model: str, input: Any, **kwargs: Any) -> _FakeResponse:  # noqa: A002
+        calls["count"] += 1
+        outcome = script[min(calls["count"] - 1, len(script) - 1)]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    fake_module = types.SimpleNamespace(
+        MultiModalEmbedding=types.SimpleNamespace(call=fake_call),
+        TextEmbedding=types.SimpleNamespace(call=fake_call),
+    )
+    monkeypatch.setitem(sys.modules, "dashscope", fake_module)
+    return calls
+
+
+def _retrying_adapter() -> DashScopeMultiModalEmbeddingAdapter:
+    adapter = DashScopeMultiModalEmbeddingAdapter(
+        {
+            "api_key": "sk",
+            "base_url": "https://dashscope.aliyuncs.com/...",
+            "model": "qwen3-vl-embedding",
+            "request_timeout": 5,
+        }
+    )
+    # Keep the retry tests instant.
+    adapter._RATE_LIMIT_BACKOFF = 0.0
+    adapter._RETRY_BACKOFF = 0.0
+    return adapter
+
+
+_OK = _FakeResponse(output={"embeddings": [{"index": 0, "embedding": [0.1], "type": "vl"}]})
+_429 = _FakeResponse(status_code=429, code="Throttling.RateQuota", message="rate limit")
+
+
+@pytest.mark.asyncio
+async def test_throttled_call_is_retried_until_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_scripted_sdk(monkeypatch, [_429, _429, _OK])
+    resp = await _retrying_adapter().embed(
+        EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
+    )
+    assert resp.embeddings == [[0.1]]
+    assert calls["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_throttling_exhaustion_raises_with_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_scripted_sdk(monkeypatch, [_429])
+    with pytest.raises(RuntimeError) as ei:
+        await _retrying_adapter().embed(
+            EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
+        )
+    assert "Throttling.RateQuota" in str(ei.value)
+    assert calls["count"] == 1 + DashScopeMultiModalEmbeddingAdapter._MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_server_error_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_scripted_sdk(
+        monkeypatch,
+        [_FakeResponse(status_code=503, code="ServiceUnavailable", message="busy"), _OK],
+    )
+    resp = await _retrying_adapter().embed(
+        EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
+    )
+    assert resp.embeddings == [[0.1]]
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_permanent_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_scripted_sdk(
+        monkeypatch,
+        [_FakeResponse(status_code=400, code="InvalidParameter", message="bad input")],
+    )
+    with pytest.raises(RuntimeError):
+        await _retrying_adapter().embed(
+            EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
+        )
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sdk_exception_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _install_scripted_sdk(monkeypatch, [ConnectionError("reset by peer"), _OK])
+    resp = await _retrying_adapter().embed(
+        EmbeddingRequest(texts=["x"], model="qwen3-vl-embedding")
+    )
+    assert resp.embeddings == [[0.1]]
+    assert calls["count"] == 2

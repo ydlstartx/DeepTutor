@@ -59,6 +59,68 @@ class DashScopeMultiModalEmbeddingAdapter(BaseEmbeddingAdapter):
         },
     }
 
+    _MAX_RETRIES = 5
+    _RETRY_BACKOFF = 1.0
+    _RATE_LIMIT_BACKOFF = 5.0
+
+    @staticmethod
+    def _is_retryable(status_code: Any, code: str) -> bool:
+        """429 / ``Throttling.*`` and 5xx deserve another attempt; other 4xx are permanent."""
+        if status_code == 429 or code.startswith("Throttling"):
+            return True
+        try:
+            return int(status_code) >= 500
+        except (TypeError, ValueError):
+            return False
+
+    async def _call_sdk_with_retry(self, sdk_call: Any, model_name: str, **kwargs: Any) -> Any:
+        """Run one synchronous DashScope SDK call with throttling/transient retry.
+
+        Mirrors the openai_compatible adapter's policy: 429/Throttling and 5xx
+        responses plus SDK/network-level exceptions are retried with exponential
+        backoff; permanent 4xx fails immediately. DashScope responses carry no
+        ``Retry-After`` header, so backoff is purely exponential. Account rate
+        quotas (``Throttling.RateQuota``) are routine while indexing with
+        several concurrent embedding workers, and without this a single 429
+        fails the whole document.
+        """
+        resp: Any = None
+        for attempt in range(1 + self._MAX_RETRIES):
+            try:
+                resp = await asyncio.to_thread(sdk_call, **kwargs)
+            except Exception as exc:
+                # Network/SDK-level failure (connection reset, read timeout, …).
+                if attempt >= self._MAX_RETRIES:
+                    logger.error(
+                        f"DashScope embedding call failed after {1 + self._MAX_RETRIES} attempts "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+                    raise
+                wait = self._RETRY_BACKOFF * (2**attempt)
+                logger.warning(
+                    f"DashScope embedding call error ({type(exc).__name__}: {exc}) "
+                    f"on attempt {attempt + 1}/{1 + self._MAX_RETRIES}, retrying in {wait:.1f}s..."
+                )
+                await asyncio.sleep(wait)
+                continue
+
+            status_code = getattr(resp, "status_code", None)
+            code = str(getattr(resp, "code", "") or "")
+            if status_code in (None, HTTPStatus.OK) or not self._is_retryable(status_code, code):
+                return resp
+            if attempt >= self._MAX_RETRIES:
+                return resp  # retries exhausted — _raise_on_error surfaces the diagnostics
+            rate_limited = status_code == 429 or code.startswith("Throttling")
+            base = self._RATE_LIMIT_BACKOFF if rate_limited else self._RETRY_BACKOFF
+            wait = base * (2**attempt)
+            logger.warning(
+                f"DashScope embedding call retryable failure (status={status_code}, "
+                f"code={code}, model={model_name}) on attempt {attempt + 1}/"
+                f"{1 + self._MAX_RETRIES}, retrying in {wait:.1f}s..."
+            )
+            await asyncio.sleep(wait)
+        return resp
+
     def _build_contents(self, request: EmbeddingRequest) -> List[Dict[str, Any]]:
         if request.contents:
             return [item for item in request.contents if isinstance(item, dict)]
@@ -123,8 +185,9 @@ class DashScopeMultiModalEmbeddingAdapter(BaseEmbeddingAdapter):
         # ``{"contents": [...]}`` before POSTing to the REST endpoint. Do NOT
         # pass ``{"contents": contents}`` here — that produces a double-wrap
         # and the API responds with HTTP 400 ("Input should be a valid list").
-        resp = await asyncio.to_thread(
+        resp = await self._call_sdk_with_retry(
             MultiModalEmbedding.call,
+            model_name,
             api_key=self.api_key,
             model=model_name,
             input=contents,
@@ -154,8 +217,9 @@ class DashScopeMultiModalEmbeddingAdapter(BaseEmbeddingAdapter):
         # TextEmbedding.call POSTs to the DashScope text-embedding endpoint and
         # accepts a flat list of strings for `input`. Response/usage/error shape
         # matches MultiModalEmbedding, so we reuse the shared parsers below.
-        resp = await asyncio.to_thread(
+        resp = await self._call_sdk_with_retry(
             TextEmbedding.call,
+            model_name,
             api_key=self.api_key,
             model=model_name,
             input=inputs,

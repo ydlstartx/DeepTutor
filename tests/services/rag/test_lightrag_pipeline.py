@@ -890,6 +890,7 @@ def test_build_rag_forwards_faiss_vector_storage(monkeypatch) -> None:
         "vector_storage": "FaissVectorDBStorage",
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
+        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
     }
 
 
@@ -898,6 +899,7 @@ def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
     expected = {
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
+        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
     }
 
     engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108  # default == nano
@@ -922,6 +924,7 @@ def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatc
         "enable_llm_cache_for_entity_extract": False,
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
         "default_embedding_timeout": engine._LIGHTRAG_EMBEDDING_TIMEOUT_S,
+        "embedding_func_max_async": engine._LIGHTRAG_EMBEDDING_MAX_ASYNC,
     }
 
 
