@@ -223,10 +223,12 @@ class TestForwardSubscription:
                 yield event
 
         send_gate = asyncio.Event()
+        send_started = asyncio.Event()
         forwarded: list[dict[str, Any]] = []
 
         async def slow_send(event: dict[str, Any]) -> None:
             # A stalled client: never consumes until the test releases it.
+            send_started.set()
             await send_gate.wait()
             forwarded.append(event)
 
@@ -237,20 +239,59 @@ class TestForwardSubscription:
 
         forward_task = asyncio.create_task(_forward_subscription(events, slow_send, on_interrupted))
 
-        # Overflow the chain while the client is stalled: the pump only stops
-        # consuming once the 1024-entry inbox is full, so we need more events
-        # than inbox + subscriber queue (500) combined before the subscriber
-        # queue overflows and the subscription is terminated.
-        for i in range(1600):
+        # Synchronize on observable milestones with wall-clock budgets. The
+        # subscription path does real SQLite reads (backlog fetch, turn fetch),
+        # so bare sleep(0) loops don't give them time to run — which is what
+        # made the original fixed-1600-events version race: depending on
+        # scheduling it either never overflowed (hang on await forward_task)
+        # or overflowed before a single frame reached the WS layer.
+        async def wait_until(pred, what: str, timeout: float = 5.0) -> None:
+            deadline = asyncio.get_running_loop().time() + timeout
+            while not pred():
+                if asyncio.get_running_loop().time() > deadline:
+                    pytest.fail(f"timed out waiting for {what}")
+                await asyncio.sleep(0.01)
+
+        # 1. The overflow can only fire after the runtime subscriber exists.
+        await wait_until(
+            lambda: bool(runtime._executions[turn["id"]].subscribers),
+            "subscriber registration",
+        )
+
+        # 2. Get the pipeline flowing: publish until one frame is in-flight
+        # (blocked on the gate), proving events reached the WS layer — the
+        # drain below then provably delivers something to the client.
+        async def publish(i: int) -> None:
             await runtime._publish_live_event(
                 execution,
                 StreamEvent(type=StreamEventType.CONTENT, source="chat", content=f"tok{i}"),
             )
+
+        for i in range(1000):
+            if send_started.is_set():
+                break
+            await publish(i)
+            await asyncio.sleep(0.005)
+        else:
+            pytest.fail("pipeline never delivered a frame to the stalled client")
+
+        # 3. Overflow the chain: publish until the runtime terminates the
+        # subscriber (visible immediately via execution.subscribers), not a
+        # fixed count — the batching layer absorbs a scheduling-dependent
+        # number of in-flight events on top of inbox (1024) + subscriber
+        # queue (500). The cap turns "never overflows" into a clear failure
+        # instead of a stuck suite.
+        for j in range(10000):
+            if not runtime._executions[turn["id"]].subscribers:
+                break
+            await publish(1000 + j)
             await asyncio.sleep(0)
+        else:
+            pytest.fail("overflow never terminated the slow subscriber")
 
         # Release the client, drain, and confirm the reconnect path fired.
         send_gate.set()
-        await forward_task
+        await asyncio.wait_for(forward_task, timeout=10)
         assert interrupted == [True], "overflow must end in the reconnect path"
         assert len(forwarded) > 0, "client received frames before the stall"
         # 订阅者已从 execution 移除，turn 仍在运行（未合成假 done）
