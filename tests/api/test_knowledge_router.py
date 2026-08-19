@@ -551,6 +551,33 @@ def test_connect_ima_pins_supplied_credentials_to_the_kb(
     assert entry["api_key"] == "other-key"
 
 
+def test_query_only_allows_ima_credentials_and_remote_pointer(
+    monkeypatch, tmp_path: Path, ima_account
+) -> None:
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    calls = _capture_probe(monkeypatch)
+    manager = _real_manager(monkeypatch, tmp_path)
+
+    with TestClient(_build_app()) as client:
+        configured = client.put(
+            "/api/v1/knowledge/rag-pipelines/ima/config",
+            json={"client_id": "account-client", "api_key": "account-key"},
+        )
+        connected = client.post(
+            "/api/v1/knowledge/connect-ima",
+            json={"name": "IMA", "knowledge_base_id": "kb-1"},
+        )
+
+    assert configured.status_code == 200
+    assert configured.json()["configured"] is True
+    assert connected.status_code == 200
+    assert calls == [("account-client", "account-key", "kb-1")]
+    entry = manager.config["knowledge_bases"]["IMA"]
+    assert entry["type"] == "ima"
+    assert entry["knowledge_base_id"] == "kb-1"
+    assert not (manager.base_dir / "IMA").exists()
+
+
 def test_set_rag_provider_mode_persists_validates_and_reflects() -> None:
     with TestClient(_build_app()) as client:
         ok = client.put("/api/v1/knowledge/rag-providers/lightrag/mode", json={"mode": "MIX"})

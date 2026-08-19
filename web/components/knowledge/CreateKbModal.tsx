@@ -94,6 +94,8 @@ interface CreateKbModalProps {
   initialMode?: Mode;
   /** Pre-select a link source (engine id or "obsidian") when opening in link mode. */
   initialSource?: string;
+  /** Lock this dialog to one retrieval-only connection source. */
+  connectionOnlySource?: string;
 }
 
 export default function CreateKbModal({
@@ -109,6 +111,7 @@ export default function CreateKbModal({
   onConfigureProvider,
   initialMode = "new",
   initialSource,
+  connectionOnlySource,
 }: CreateKbModalProps) {
   const { t } = useTranslation();
   const [mode, setMode] = useState<Mode>("new");
@@ -147,11 +150,13 @@ export default function CreateKbModal({
   };
 
   const handleModeChange = (nextMode: Mode) => {
+    if (connectionOnlySource) return;
     if (nextMode !== "link") imaConnection.reset();
     setMode(nextMode);
   };
 
   const handleLinkSourceChange = (source: string) => {
+    if (connectionOnlySource) return;
     if (source !== IMA_PROVIDER) imaConnection.reset();
     setLinkSource(source);
   };
@@ -164,7 +169,7 @@ export default function CreateKbModal({
     const justOpened = isOpen && !wasOpenRef.current;
     wasOpenRef.current = isOpen;
     if (!justOpened) return;
-    setMode(initialMode);
+    setMode(connectionOnlySource ? "link" : initialMode);
     setName("");
     setFiles([]);
     setError(null);
@@ -174,7 +179,9 @@ export default function CreateKbModal({
     setProvider(
       initialProvider || createProviders(providers)[0]?.id || "llamaindex",
     );
-    setLinkSource(initialSource || firstLinkable || OBSIDIAN_SOURCE);
+    setLinkSource(
+      connectionOnlySource || initialSource || firstLinkable || OBSIDIAN_SOURCE,
+    );
     setFolderPath("");
     setProbe(null);
     setProbing(false);
@@ -183,7 +190,14 @@ export default function CreateKbModal({
     setServerMode("");
     setServerProbe(null);
     setServerProbing(false);
-  }, [isOpen, providers, firstLinkable, initialMode, initialSource]);
+  }, [
+    isOpen,
+    providers,
+    firstLinkable,
+    initialMode,
+    initialSource,
+    connectionOnlySource,
+  ]);
 
   // A fresh path / source invalidates a stale probe verdict.
   useEffect(() => {
@@ -332,7 +346,11 @@ export default function CreateKbModal({
     <Modal
       isOpen={isOpen}
       onClose={submitting ? () => {} : handleClose}
-      title={t("Create knowledge base")}
+      title={
+        connectionOnlySource === IMA_PROVIDER
+          ? t("Connect IMA knowledge base")
+          : t("Create knowledge base")
+      }
       titleIcon={<Plus size={16} />}
       width="lg"
       closeOnBackdrop={!submitting}
@@ -367,12 +385,14 @@ export default function CreateKbModal({
     >
       <div className="space-y-4 px-5 py-4">
         {/* New vs. link existing */}
-        <ModeToggle
-          mode={mode}
-          onChange={handleModeChange}
-          disabled={submitting}
-          t={t}
-        />
+        {!connectionOnlySource && (
+          <ModeToggle
+            mode={mode}
+            onChange={handleModeChange}
+            disabled={submitting}
+            t={t}
+          />
+        )}
 
         <div>
           <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
@@ -442,6 +462,7 @@ export default function CreateKbModal({
                 />
               ) : null
             }
+            hideSourcePicker={Boolean(connectionOnlySource)}
             t={t}
           />
         )}
@@ -800,6 +821,7 @@ function LinkModeFields({
   probe,
   onProbe,
   connectionForm,
+  hideSourcePicker,
   t,
 }: {
   providers: RagProviderSummary[];
@@ -814,11 +836,12 @@ function LinkModeFields({
   probe: LinkedFolderProbe | null;
   onProbe: () => void;
   connectionForm?: ReactNode;
+  hideSourcePicker?: boolean;
   t: TFn;
 }) {
   return (
     <>
-      <div>
+      {!hideSourcePicker && <div>
         <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
           {t("Source")}
         </label>
@@ -896,7 +919,7 @@ function LinkModeFields({
             </span>
           </button>
         </div>
-      </div>
+      </div>}
 
       {linkIsIma ? (
         connectionForm

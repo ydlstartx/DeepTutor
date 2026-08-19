@@ -66,6 +66,7 @@ interface EngineDetailProps {
   queryOnly?: boolean;
   onBack: () => void;
   onOpenKb: (name: string) => void;
+  onConnectIma: () => void;
   onSelectMode: (providerId: string, mode: string) => Promise<void> | void;
   /** Called after a config change so the parent can refresh provider state. */
   onChanged: () => void;
@@ -666,9 +667,11 @@ function PageIndexForm({
 function ImaForm({
   onChanged,
   onError,
+  onConnect,
 }: {
   onChanged: () => void;
   onError: (message: string) => void;
+  onConnect: () => void;
 }) {
   const { t } = useTranslation();
   const [config, setConfig] = useState<ImaAccountConfig | null>(null);
@@ -786,6 +789,14 @@ function ImaForm({
           {t("Save changes")}
         </button>
       </div>
+      <button
+        type="button"
+        onClick={onConnect}
+        className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] px-3.5 py-2 text-[12.5px] font-medium text-[var(--foreground)] transition-colors hover:border-[var(--ring)]"
+      >
+        <Database className="h-3.5 w-3.5" />
+        {t("Connect IMA knowledge base")}
+      </button>
     </div>
   );
 }
@@ -1488,6 +1499,7 @@ export default function EngineDetail({
   queryOnly = false,
   onBack,
   onOpenKb,
+  onConnectIma,
   onSelectMode,
   onChanged,
   onError,
@@ -1544,7 +1556,11 @@ export default function EngineDetail({
 
         {queryOnly && (
           <div className="mt-5 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11.5px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-200">
-            {t("Query is available; indexing and knowledge-base modification are disabled by server policy.")}
+            {provider.id === "ima"
+              ? t(
+                  "Local indexing is disabled by server policy. IMA credentials and remote knowledge-base connections remain configurable.",
+                )
+              : t("Query is available; indexing and knowledge-base modification are disabled by server policy.")}
           </div>
         )}
 
@@ -1595,7 +1611,11 @@ export default function EngineDetail({
         {/* Tencent IMA credentials */}
         {provider.id === "ima" && (
           <Section label={t("Credentials")} icon={KeyRound}>
-            <ImaForm onChanged={onChanged} onError={onError} />
+            <ImaForm
+              onChanged={onChanged}
+              onError={onError}
+              onConnect={onConnectIma}
+            />
           </Section>
         )}
 

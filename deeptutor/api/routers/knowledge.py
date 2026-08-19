@@ -1999,7 +1999,7 @@ async def probe_ima_route(payload: ProbeImaRequest):
     return result.to_dict()
 
 
-@router.post("/connect-ima", dependencies=[Depends(require_kb_write_access)])
+@router.post("/connect-ima")
 async def connect_ima_route(payload: ConnectImaRequest):
     """Connect a Tencent IMA knowledge base as a retrieval-only knowledge base.
 

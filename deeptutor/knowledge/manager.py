@@ -504,6 +504,33 @@ class KnowledgeBaseManager:
             yield self.config
             self._save_config()
 
+    @contextmanager
+    def _transact_ima_connection(self):
+        """Persist only an IMA retrieval pointer, even on query-only servers.
+
+        Query-only forbids local knowledge-base construction and index
+        mutation. An IMA entry is different: it creates no local KB directory,
+        performs no ingestion, and only records the remote library id used at
+        query time. Keep this bypass private so every other config mutation
+        continues to flow through :meth:`transact` and its deployment guard.
+        """
+        with exclusive_write_lock(self.config_file):
+            if self.config_file.exists():
+                try:
+                    with open(self.config_file, encoding="utf-8") as handle:
+                        self.config = json.load(handle)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError("Knowledge-base configuration is unreadable.") from exc
+            else:
+                self.config = {"knowledge_bases": {}}
+            if not isinstance(self.config, dict):
+                raise ValueError("Knowledge-base configuration must be a JSON object.")
+            knowledge_bases = self.config.setdefault("knowledge_bases", {})
+            if not isinstance(knowledge_bases, dict):
+                raise ValueError("Knowledge-base entries must be a JSON object.")
+            yield self.config
+            atomic_write_json(self.config_file, self.config)
+
     def update_kb_status(
         self,
         name: str,
@@ -933,7 +960,12 @@ class KnowledgeBaseManager:
         the freshest on-disk config and cannot be interleaved by another
         process's update.
         """
-        with self.transact() as config:
+        transaction = (
+            self._transact_ima_connection
+            if entry.get("type") == IMA_KB_TYPE and is_kb_query_only()
+            else self.transact
+        )
+        with transaction() as config:
             knowledge_bases = config.setdefault("knowledge_bases", {})
             if name in knowledge_bases:
                 raise ValueError(f"A knowledge base named '{name}' already exists.")

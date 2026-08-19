@@ -1,4 +1,4 @@
-"""Deployment policy for immutable, query-only knowledge-base servers."""
+"""Deployment policy for build-disabled, query-only knowledge-base servers."""
 
 from __future__ import annotations
 

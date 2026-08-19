@@ -3088,5 +3088,7 @@
   "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.": "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.",
   "This server provides query-only access. Knowledge bases are built offline and published by an administrator.": "This server provides query-only access. Knowledge bases are built offline and published by an administrator.",
   "Disabled by the server's query-only policy.": "Disabled by the server's query-only policy.",
-  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "Query is available; indexing and knowledge-base modification are disabled by server policy."
+  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "Query is available; indexing and knowledge-base modification are disabled by server policy.",
+  "Connect IMA knowledge base": "Connect IMA knowledge base",
+  "Local indexing is disabled by server policy. IMA credentials and remote knowledge-base connections remain configurable.": "Local indexing is disabled by server policy. IMA credentials and remote knowledge-base connections remain configurable."
 }

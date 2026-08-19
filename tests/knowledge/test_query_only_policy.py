@@ -50,3 +50,37 @@ def test_query_only_delete_is_rejected_before_files_are_touched(monkeypatch, tmp
         manager.delete_knowledge_base("published", confirm=True)
 
     assert marker.read_bytes() == b"published index"
+
+
+def test_query_only_allows_only_ima_pointer_registration(monkeypatch, tmp_path) -> None:
+    base = tmp_path / "knowledge_bases"
+    base.mkdir()
+    original_entry = {"path": "published", "rag_provider": "removed-provider"}
+    (base / "kb_config.json").write_text(
+        json.dumps(
+            {
+                "default": "published",
+                "knowledge_bases": {"published": original_entry},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    manager = KnowledgeBaseManager(base_dir=str(base))
+
+    entry = manager.register_ima_kb("IMA", "", "", "remote-kb")
+
+    assert entry["type"] == "ima"
+    assert entry["knowledge_base_id"] == "remote-kb"
+    assert not (base / "IMA").exists()
+    persisted = json.loads((base / "kb_config.json").read_text(encoding="utf-8"))
+    assert persisted["knowledge_bases"]["IMA"]["type"] == "ima"
+    assert persisted["knowledge_bases"]["published"] == original_entry
+    assert persisted["default"] == "published"
+
+    local_dir = base / "local"
+    local_dir.mkdir()
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        manager.register_knowledge_base("local")
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        manager.register_lightrag_server_kb("remote", "https://example.invalid")

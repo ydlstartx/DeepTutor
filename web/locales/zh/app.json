@@ -3088,5 +3088,7 @@
   "Knowledge bases are built offline and published by an administrator. Existing knowledge bases remain available for retrieval.": "知识库由管理员离线构建并发布，已有知识库仍可正常检索。",
   "This server provides query-only access. Knowledge bases are built offline and published by an administrator.": "此服务器为只查询知识库环境；知识库由管理员离线构建并发布。",
   "Disabled by the server's query-only policy.": "服务器只查询策略已禁用此操作。",
-  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "查询功能可用；索引构建和知识库修改已被服务器策略禁用。"
+  "Query is available; indexing and knowledge-base modification are disabled by server policy.": "查询功能可用；索引构建和知识库修改已被服务器策略禁用。",
+  "Connect IMA knowledge base": "连接 IMA 知识库",
+  "Local indexing is disabled by server policy. IMA credentials and remote knowledge-base connections remain configurable.": "服务器策略已禁用本地索引构建；IMA 凭证和远程知识库连接仍可配置。"
 }

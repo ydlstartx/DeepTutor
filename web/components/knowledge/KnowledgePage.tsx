@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { Loader2 } from "lucide-react";
 import { useKnowledgeBases } from "@/hooks/useKnowledgeBases";
 import { updateRagProviderMode } from "@/lib/knowledge-api";
+import { IMA_PROVIDER } from "@/lib/ima-connection";
 import KnowledgeBaseDetail from "./KnowledgeBaseDetail";
 import KnowledgeHome from "./KnowledgeHome";
 import EngineDetail from "./EngineDetail";
@@ -72,6 +73,10 @@ export default function KnowledgePage() {
   // the unified create flow, pre-set to "link existing → Obsidian".
   const openObsidian = useCallback(() => {
     setCreatePreset({ mode: "link", source: "obsidian" });
+    setCreateOpen(true);
+  }, []);
+  const openIma = useCallback(() => {
+    setCreatePreset({ mode: "link", source: IMA_PROVIDER });
     setCreateOpen(true);
   }, []);
   // Lands on the Overview console unless deep-linked to a KB or an engine.
@@ -267,6 +272,7 @@ export default function KnowledgePage() {
               queryOnly={policy.query_only}
               onBack={() => setView("home")}
               onOpenKb={openKb}
+              onConnectIma={openIma}
               onSelectMode={handleSelectMode}
               onChanged={() => void refresh({ force: true })}
               onError={(message) => setError(message)}
@@ -302,7 +308,7 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      {!policy.query_only && <CreateKbModal
+      {(!policy.query_only || createPreset?.source === IMA_PROVIDER) && <CreateKbModal
         isOpen={createOpen}
         onClose={() => setCreateOpen(false)}
         providers={providers}
@@ -314,6 +320,7 @@ export default function KnowledgePage() {
         onConnectIma={connectIma}
         initialMode={createPreset?.mode}
         initialSource={createPreset?.source}
+        connectionOnlySource={policy.query_only ? IMA_PROVIDER : undefined}
         onConfigureProvider={() => {
           setCreateOpen(false);
           setPipelineOpen(true);

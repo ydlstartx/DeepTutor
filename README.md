@@ -328,10 +328,13 @@ docker run ... \
   ghcr.io/hkuds/deeptutor:latest
 ```
 
-This blocks KB creation, upload/index/re-index, file/config mutation, linking,
-and deletion for every user (including administrators), while list, metadata,
-status, RAG queries, and chat attachments remain available. The production
-image includes the LightRAG query runtime even though indexing is disabled.
+This blocks local KB creation, upload/index/re-index, file/config mutation,
+linking, and deletion for every user (including administrators), while list,
+metadata, status, RAG queries, and chat attachments remain available. Tencent
+IMA is the narrow exception: its account credentials and retrieval-only remote
+KB pointers remain configurable because DeepTutor performs no local ingestion
+or indexing for them. The production image includes the LightRAG query runtime
+even though indexing is disabled.
 Keep the DeepTutor commit/image tag, LightRAG version, embedding provider/model
 and dimension, and the index storage backend compatible between the builder and
 server. Admin KBs live under `data/knowledge_bases`; per-user KBs live under
