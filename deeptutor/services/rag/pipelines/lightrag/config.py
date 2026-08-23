@@ -185,12 +185,12 @@ def query_kwargs_from_settings() -> dict:
 
 
 def indexing_kwargs_from_settings() -> dict:
-    """``RAGAnythingConfig`` batch-processing knobs from runtime settings.
+    """Document-level indexing knobs from runtime settings.
 
-    Only ``max_concurrent_files`` is exposed for now (issue #640); the config
-    object accepts several other batch/context knobs we deliberately leave on
-    RAG-Anything's own defaults. Empty on any read error, so a bad settings
-    file falls back to RAG-Anything's built-in default of 1.
+    ``max_concurrent_files`` is passed to RAG-Anything for compatibility and
+    also bounds DeepTutor's concurrent parse tasks. Graph insertion remains
+    serial to protect LightRAG's mutable stores. Empty on any read error, so a
+    bad settings file falls back to 1.
     """
     try:
         from deeptutor.services.config import load_lightrag_settings

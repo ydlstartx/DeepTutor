@@ -666,6 +666,32 @@ class TestPipelineSearch:
         assert "fell back" in result["retrieval_diagnostic"]
         assert stub.media_calls == ["m1"]
 
+    def test_zero_hit_chinese_phrase_matches_punctuated_inventory_title(self, tmp_path) -> None:
+        base = _kb_config(
+            tmp_path,
+            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
+        )
+
+        class Stub(_SearchStub):
+            async def get_knowledge_list(self, **_kwargs):
+                return parse_knowledge_page(
+                    {
+                        "knowledge_list": [
+                            {"media_id": "m1", "title": "高中数学：函数的定义.pdf"},
+                            {"media_id": "m2", "title": "高中英语语法.pdf"},
+                        ],
+                        "is_end": True,
+                    }
+                )
+
+        stub = Stub(media={"m1": ImaMediaContent(text="函数定义与映射关系")})
+        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
+
+        result = asyncio.run(pipeline.search("高中数学函数定义", "IMA"))
+
+        assert [source["title"] for source in result["sources"]] == ["高中数学：函数的定义.pdf"]
+        assert result["sources"][0]["content"] == "函数定义与映射关系"
+
     def test_search_shapes_snippets_into_context_and_sources(self, tmp_path) -> None:
         base = _kb_config(
             tmp_path,

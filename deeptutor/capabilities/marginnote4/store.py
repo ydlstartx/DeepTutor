@@ -10,7 +10,7 @@ Schema overview
 * ``mn4_cursors`` -- per-device sync position.
 * ``mn4_tombstones`` -- deleted object IDs (soft-delete for conflict resolution).
 
-The database file lives under ``data/marginnote4/<kb_name>.db`` by default.
+The database file lives under ``data/user/marginnote4/<kb_name>.db`` by default.
 """
 
 from __future__ import annotations
@@ -107,6 +107,36 @@ def default_db_path(kb_name: str, *, path_service: Any = None) -> Path:
     return path_service.user_data_dir / "marginnote4" / f"{safe}.db"
 
 
+def managed_db_path(path: str | Path, *, path_service: Any = None) -> Path | None:
+    """Return a safe DeepTutor-owned MarginNote store path, or ``None``.
+
+    MarginNote databases are application state, not arbitrary connected files.
+    Keeping every store below the current workspace's ``user/marginnote4``
+    directory prevents one account from pinning another account's database (or
+    any other server file) and later deleting it through the KB lifecycle.
+    Resolving both paths also rejects parent-directory symlink escapes; a final
+    component that is itself a symlink is refused explicitly.
+    """
+    if path_service is None:
+        from deeptutor.services.path_service import get_path_service
+
+        path_service = get_path_service()
+
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = path_service.user_data_dir / "marginnote4" / candidate
+    if candidate.suffix.lower() != ".db" or candidate.is_symlink():
+        return None
+
+    root = (path_service.user_data_dir / "marginnote4").resolve()
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved
+
+
 def resolve_db_path(
     kb_name: str,
     *,
@@ -129,7 +159,13 @@ def resolve_db_path(
         metadata = _kb_metadata(kb_name)
     pinned = str((metadata or {}).get("db_path") or "").strip()
     if pinned:
-        return Path(pinned)
+        managed = managed_db_path(pinned, path_service=path_service)
+        if managed is not None:
+            return managed
+        logger.warning(
+            "Ignoring unmanaged MarginNote store path for KB %r; using the workspace default",
+            kb_name,
+        )
     return default_db_path(kb_name, path_service=path_service)
 
 
@@ -547,4 +583,4 @@ def _snippet(body: str, query: str, width: int = 160) -> str:
     return ("..." if start else "") + body[start : start + width].strip().replace("\n", " ") + tail
 
 
-__all__ = ["MarginNoteStore"]
+__all__ = ["MarginNoteStore", "default_db_path", "managed_db_path", "resolve_db_path"]

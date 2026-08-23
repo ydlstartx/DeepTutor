@@ -47,12 +47,21 @@ class _WorkerLoopController:
             cancel_requested = self._cancel_requested.is_set()
         if cancel_requested:
             task.cancel()
+            # Calling ``cancel()`` alone injects CancelledError at the next
+            # suspension point, so a job could still execute synchronous code
+            # before its first await. Stop here to honor pre-bind cancellation.
+            raise asyncio.CancelledError
 
     def clear(self) -> None:
         """Drop references once the worker job reaches a terminal state."""
         with self._lock:
             self._loop = None
             self._task = None
+
+    def has_bound_task(self) -> bool:
+        """Return whether cancellation must wait for worker-side cleanup."""
+        with self._lock:
+            return self._task is not None
 
     def cancel(self) -> None:
         """Cancel the worker's actual top-level task, including before bind."""
@@ -169,8 +178,8 @@ async def run_in_worker_loop(
         return await job(bridge)
 
     async def run_bound_job() -> T:
-        controller.bind_current_task()
         try:
+            controller.bind_current_task()
             return await invoke_job()
         finally:
             controller.clear()
@@ -273,46 +282,82 @@ async def run_in_shared_worker_loop(
     owns them) without ever touching the loop itself.
     """
     owner_loop = asyncio.get_running_loop()
+    owner_task = asyncio.current_task()
     bridge = OwnerLoopBridge(owner_loop)
     caller_context = contextvars.copy_context()
     loop = _ensure_shared_loop()
+    controller = _WorkerLoopController()
 
     future: concurrent.futures.Future[Any] = concurrent.futures.Future()
-    task_box: dict[str, asyncio.Task[Any]] = {}
+
+    async def run_bound_job() -> T:
+        try:
+            if owner_task is not None and owner_task.cancelling():
+                raise asyncio.CancelledError
+            controller.bind_current_task()
+            return await job(bridge)
+        finally:
+            controller.clear()
 
     def submit() -> None:
-        try:
-            task = loop.create_task(job(bridge), context=caller_context)
-        except Exception as exc:  # pragma: no cover - loop closing race
-            future.set_exception(exc)
+        # ``Task.cancel()`` increments this counter synchronously. The shared
+        # loop may reach this callback before the owner loop runs our exception
+        # handler, so inspect it here and never create an already-orphaned job.
+        if future.done() or (owner_task is not None and owner_task.cancelling()):
+            future.cancel()
             return
-        task_box["task"] = task
+        try:
+            task = loop.create_task(run_bound_job(), context=caller_context)
+        except Exception as exc:  # pragma: no cover - loop closing race
+            if not future.done():
+                future.set_exception(exc)
+            return
 
         def propagate(done: asyncio.Task[Any]) -> None:
-            if done.cancelled():
-                future.cancel()
-            elif done.exception() is not None:
-                future.set_exception(done.exception())
-            else:
-                future.set_result(done.result())
+            # The owner may have been torn down independently. Never turn a
+            # correctly-finished worker into an InvalidStateError callback.
+            if future.done():
+                return
+            try:
+                if done.cancelled():
+                    future.cancel()
+                elif done.exception() is not None:
+                    future.set_exception(done.exception())
+                else:
+                    future.set_result(done.result())
+            except concurrent.futures.InvalidStateError:
+                # Owner-loop teardown can cancel the wrapped Future between
+                # the done check and publication from this worker thread.
+                pass
 
         task.add_done_callback(propagate)
 
     loop.call_soon_threadsafe(submit)
+    waiter = asyncio.wrap_future(future)
     try:
-        return await asyncio.wrap_future(future)
+        # Do not let cancellation of the owner task cancel the concurrent
+        # Future before the shared-loop task has unwound. The controller holds
+        # a pre-bind cancellation bit, so cancellation is honored even while
+        # ``submit`` is still queued behind synchronous LightRAG work.
+        return await asyncio.shield(waiter)
     except asyncio.CancelledError:
-        task = task_box.get("task")
-        if task is not None:
-            loop.call_soon_threadsafe(task.cancel)
+        bridge.cancel()
+        controller.cancel()
+        # A submit callback queued behind synchronous worker-loop work has no
+        # cleanup to await yet. Finish owner cancellation immediately; the
+        # controller's pre-bind bit and the completed Future both prevent that
+        # callback from starting the job when the loop eventually becomes free.
+        if not controller.has_bound_task():
+            future.cancel()
+            raise
         # Wait for the worker task to finish unwinding — its cleanup must
         # not be stranded — then let the caller's cancellation stand.
-        waiter = asyncio.wrap_future(future)
         while not waiter.done():
             try:
                 await asyncio.shield(waiter)
             except asyncio.CancelledError:
-                pass
+                bridge.cancel()
+                controller.cancel()
         try:
             waiter.result()
         except BaseException:

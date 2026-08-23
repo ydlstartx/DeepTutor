@@ -256,8 +256,8 @@ def test_resolve_db_path_prefers_a_pinned_entry(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path))
     PathService.reset_instance()
     try:
-        pinned = tmp_path / "elsewhere" / "lib.db"
-        assert resolve_db_path("Lib", metadata={"db_path": str(pinned)}) == pinned
+        pinned = PathService.get_instance().user_data_dir / "marginnote4" / "lib.db"
+        assert resolve_db_path("Lib", metadata={"db_path": str(pinned)}) == pinned.resolve()
         assert resolve_db_path("Lib", metadata={}) == default_db_path("Lib")
         # A blank pin is not a pin.
         assert resolve_db_path("Lib", metadata={"db_path": "  "}) == default_db_path("Lib")

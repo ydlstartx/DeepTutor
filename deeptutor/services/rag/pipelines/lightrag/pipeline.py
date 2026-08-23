@@ -150,47 +150,85 @@ class LightRagPipeline:
         io_bridge: OwnerLoopBridge,
         progress_callback: Callable[[int, int], Any] | None = None,
     ) -> int:
-        """Parse each file via the shared parse layer and insert it into LightRAG.
+        """Parse files concurrently, then insert them into LightRAG in order.
 
         Returns the number of documents successfully inserted. Per-file failures
         are logged and skipped so one bad document doesn't abort the batch.
+        Parsing is bounded by ``max_concurrent_files`` and overlaps the serial
+        graph writes. Inserts deliberately remain serial: LightRAG's JSON/graph
+        stores are mutable shared state and cannot safely be written by several
+        document tasks at once.
         """
         from deeptutor.services.parsing import ParserError, get_parse_service
 
         parse_service = get_parse_service()
+        indexing_settings = lr_config.indexing_kwargs_from_settings()
+        try:
+            max_concurrent_files = max(
+                1,
+                int(indexing_settings.get("max_concurrent_files", 1)),
+            )
+        except (TypeError, ValueError):
+            max_concurrent_files = 1
+        parse_slots = asyncio.Semaphore(max_concurrent_files)
+
+        async def parse_file(path: Path) -> tuple[Any | None, ParserError | None]:
+            async with parse_slots:
+                io_bridge.raise_if_cancelled()
+                try:
+                    document = await asyncio.to_thread(parse_service.parse, path)
+                except ParserError as exc:
+                    return None, exc
+                io_bridge.raise_if_cancelled()
+                return document, None
+
+        # Create all tasks up front so later documents can be parsed while the
+        # worker loop serially inserts an earlier one. Awaiting in input order
+        # keeps progress and graph contents deterministic.
+        parse_tasks = [asyncio.create_task(parse_file(Path(path))) for path in file_paths]
         inserted = 0
         total = len(file_paths)
-        for file_path in file_paths:
-            io_bridge.raise_if_cancelled()
-            path = Path(file_path)
-            try:
-                doc = parse_service.parse(path)
-            except ParserError as exc:
-                self.logger.warning("LightRAG: parse failed for %s: %s", path.name, exc)
-                continue
+        try:
+            for path, task in zip(map(Path, file_paths), parse_tasks):
+                io_bridge.raise_if_cancelled()
+                doc, parse_error = await task
+                if parse_error is not None:
+                    self.logger.warning(
+                        "LightRAG: parse failed for %s: %s",
+                        path.name,
+                        parse_error,
+                    )
+                    continue
 
-            content_list = doc.blocks or (
-                [{"type": "text", "text": doc.markdown, "page_idx": 0}] if doc.markdown else []
-            )
-            if not content_list:
-                self.logger.warning("LightRAG: empty document skipped: %s", path.name)
-                continue
+                content_list = doc.blocks or (
+                    [{"type": "text", "text": doc.markdown, "page_idx": 0}] if doc.markdown else []
+                )
+                if not content_list:
+                    self.logger.warning("LightRAG: empty document skipped: %s", path.name)
+                    continue
 
-            await engine.insert(
-                rag,
-                content_list,
-                file_name=path.name,
-                doc_id=doc.source_hash or path.stem,
-            )
-            io_bridge.raise_if_cancelled()
-            doc_error = storage.document_error(Path(rag.working_dir), doc.source_hash or path.stem)
-            if doc_error:
-                raise RuntimeError(f"{path.name}: {doc_error}")
-            inserted += 1
-            self.logger.info("LightRAG: inserted %s", path.name)
-            if progress_callback is not None:
-                await io_bridge.call(progress_callback, inserted, total)
-        return inserted
+                await engine.insert(
+                    rag,
+                    content_list,
+                    file_name=path.name,
+                    doc_id=doc.source_hash or path.stem,
+                )
+                io_bridge.raise_if_cancelled()
+                doc_error = storage.document_error(
+                    Path(rag.working_dir), doc.source_hash or path.stem
+                )
+                if doc_error:
+                    raise RuntimeError(f"{path.name}: {doc_error}")
+                inserted += 1
+                self.logger.info("LightRAG: inserted %s", path.name)
+                if progress_callback is not None:
+                    await io_bridge.call(progress_callback, inserted, total)
+            return inserted
+        finally:
+            for task in parse_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*parse_tasks, return_exceptions=True)
 
     async def _run_indexing(
         self,

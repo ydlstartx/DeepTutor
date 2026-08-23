@@ -64,15 +64,31 @@ def test_ordinary_kb_metadata_has_no_mn4_fields(tmp_path: Path) -> None:
     assert "db_path" not in meta
 
 
-def test_register_marginnote4_kb_creates_pointer(tmp_path: Path) -> None:
+def test_register_marginnote4_kb_creates_pointer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path / "home"))
+    PathService.reset_instance()
+    try:
+        db_path = PathService.get_instance().user_data_dir / "marginnote4" / "test.db"
+        manager = KnowledgeBaseManager(base_dir=str(tmp_path / "kbs"))
+        entry = manager.register_marginnote4_kb(
+            "MyLibrary", db_path=str(db_path), description="Test lib"
+        )
+        assert entry["type"] == "marginnote4"
+        assert entry["db_path"] == str(db_path.resolve())
+        assert entry["description"] == "Test lib"
+        assert "MyLibrary" in manager.list_knowledge_bases()
+    finally:
+        PathService.reset_instance()
+
+
+def test_register_marginnote4_kb_rejects_unmanaged_store_path(tmp_path: Path) -> None:
     manager = KnowledgeBaseManager(base_dir=str(tmp_path / "kbs"))
-    entry = manager.register_marginnote4_kb(
-        "MyLibrary", db_path="/data/mn4/test.db", description="Test lib"
-    )
-    assert entry["type"] == "marginnote4"
-    assert entry["db_path"] == "/data/mn4/test.db"
-    assert entry["description"] == "Test lib"
-    assert "MyLibrary" in manager.list_knowledge_bases()
+
+    with pytest.raises(ValueError, match="managed marginnote4 directory"):
+        manager.register_marginnote4_kb(
+            "Unsafe",
+            db_path=str(tmp_path / "outside.db"),
+        )
 
 
 def test_register_marginnote4_kb_default_path(tmp_path: Path) -> None:
@@ -138,6 +154,40 @@ def test_deleting_the_kb_removes_its_synced_store(tmp_path: Path, monkeypatch) -
         PathService.reset_instance()
 
 
+def test_cancelling_delete_keeps_marginnote_store(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "no")
+    PathService.reset_instance()
+    try:
+        from deeptutor.capabilities.marginnote4.store import MarginNoteStore, resolve_db_path
+
+        manager = KnowledgeBaseManager(base_dir=str(tmp_path / "kbs"))
+        manager.register_marginnote4_kb("Lib")
+        db_path = resolve_db_path("Lib", metadata={})
+        MarginNoteStore(db_path).pair_device(device_name="iPad")
+
+        assert manager.delete_knowledge_base("Lib", confirm=False) is False
+        assert db_path.is_file()
+        assert "Lib" in manager.config.get("knowledge_bases", {})
+    finally:
+        PathService.reset_instance()
+
+
+def test_legacy_unmanaged_store_is_never_deleted(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path / "home"))
+    PathService.reset_instance()
+    try:
+        outside = tmp_path / "outside.db"
+        outside.write_bytes(b"external")
+        manager = KnowledgeBaseManager(base_dir=str(tmp_path / "kbs"))
+        _seed_mn4(manager, "Legacy", db_path=str(outside))
+
+        assert manager.delete_knowledge_base("Legacy", confirm=True) is True
+        assert outside.read_bytes() == b"external"
+    finally:
+        PathService.reset_instance()
+
+
 def test_deleting_an_obsidian_kb_leaves_its_vault_alone(tmp_path: Path) -> None:
     """The counter-case: an external resource the user manages is never touched."""
     vault = tmp_path / "vault"
@@ -184,7 +234,7 @@ def test_register_rejects_a_pinned_path_another_library_owns(tmp_path: Path, mon
     monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path / "home"))
     PathService.reset_instance()
     try:
-        shared = tmp_path / "stores" / "shared.db"
+        shared = PathService.get_instance().user_data_dir / "marginnote4" / "shared.db"
         manager = KnowledgeBaseManager(base_dir=str(tmp_path / "kbs"))
         manager.register_marginnote4_kb("First", db_path=str(shared))
 

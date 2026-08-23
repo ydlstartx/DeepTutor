@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 import logging
-import re
 from typing import Any, Dict, List, Optional
 
 from deeptutor.runtime.home import get_runtime_data_root
@@ -29,6 +28,7 @@ from deeptutor.services.rag.provider_binding import load_kb_config_entry
 from . import media as media_ops
 from . import sources as source_policy
 from .config import ImaNotConfiguredError, resolve_kb_config
+from .text_match import query_terms
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,12 @@ class ImaPipeline:
             key=lambda pair: pair[0],
             reverse=True,
         )
-        candidates = [document for score, document in ranked if score > 0][
+        best_score = ranked[0][0] if ranked else 0
+        # Bigrams make unsegmented Chinese phrases tolerant of punctuation and
+        # particles, but one generic overlap (for example ``高中``) should not
+        # pull in every remotely related file when a much stronger match exists.
+        minimum_score = max(1, (best_score + 1) // 2)
+        candidates = [document for score, document in ranked if score >= minimum_score][
             : source_policy.DEFAULT_HYDRATION_BUDGET
         ]
         if not candidates and len(documents) == 1:
@@ -253,13 +258,9 @@ class ImaPipeline:
         return True
 
 
-def _query_terms(query: str) -> list[str]:
-    return [token.lower() for token in re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", query)]
-
-
 def _title_match_score(query: str, title: str) -> int:
     lowered = title.lower()
-    return sum(term in lowered for term in _query_terms(query))
+    return sum(term in lowered for term in query_terms(query))
 
 
 __all__ = ["ImaPipeline", "PROVIDER"]

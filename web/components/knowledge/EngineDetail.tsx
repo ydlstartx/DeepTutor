@@ -954,7 +954,6 @@ function LightRagForm({
         top_k: form.top_k,
         response_type: form.response_type,
         vector_storage: form.vector_storage,
-        llm_concurrency: form.llm_concurrency,
         embedding_concurrency: form.embedding_concurrency,
         multimodal_concurrency: form.multimodal_concurrency,
         max_concurrent_files: form.max_concurrent_files,
@@ -1003,14 +1002,14 @@ function LightRagForm({
             {t("Applies on the next re-index")}
           </span>
         </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <NumberField
             label={t("Parallel LLM calls")}
             hint={t("Lower this if the provider returns 429 errors")}
-            value={form.llm_concurrency}
+            value={form.llm_model_max_async}
             min={1}
             max={32}
-            onChange={(v) => patch({ llm_concurrency: v })}
+            onChange={(v) => patch({ llm_model_max_async: v })}
           />
           <NumberField
             label={t("Parallel embedding calls")}
@@ -1035,6 +1034,14 @@ function LightRagForm({
             min={0}
             max={3}
             onChange={(v) => patch({ entity_extract_max_gleaning: v })}
+          />
+          <NumberField
+            label={t("Files parsed in parallel")}
+            hint={t("Parsing overlaps; graph writes remain serial for integrity")}
+            value={form.max_concurrent_files}
+            min={1}
+            max={16}
+            onChange={(v) => patch({ max_concurrent_files: v })}
           />
         </div>
       </div>
@@ -1080,47 +1087,6 @@ function LightRagForm({
           />
         </div>
       </div>
-
-      {/* Indexing knobs are a separate axis from the two above: they shape how
-          a knowledge base is built, so changing them only affects the next
-          build — the divider and note keep that from surprising anyone. */}
-      <div className="space-y-4 border-t border-[var(--border)] pt-4">
-        <div className="space-y-0.5">
-          <div className="text-[12px] font-medium text-[var(--foreground)]">
-            {t("Indexing")}
-          </div>
-          <div className="text-[11px] text-[var(--muted-foreground)]">
-            {t("Applies the next time a knowledge base is built or rebuilt.")}
-          </div>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <NumberField
-            label={t("Files in parallel")}
-            hint={t("Higher finishes sooner but uses more memory")}
-            value={form.max_concurrent_files}
-            min={1}
-            max={16}
-            onChange={(v) => patch({ max_concurrent_files: v })}
-          />
-          <NumberField
-            label={t("Concurrent LLM calls")}
-            hint={t("Lower this if your provider rate-limits you")}
-            value={form.llm_model_max_async}
-            min={1}
-            max={32}
-            onChange={(v) => patch({ llm_model_max_async: v })}
-          />
-          <NumberField
-            label={t("Extra extraction passes")}
-            hint={t("Recovers missed entities; each pass costs another call")}
-            value={form.entity_extract_max_gleaning}
-            min={0}
-            max={5}
-            onChange={(v) => patch({ entity_extract_max_gleaning: v })}
-          />
-        </div>
-      </div>
-
       <SaveButton dirty={dirty} saving={saving} onSave={() => void save()} />
     </div>
   );

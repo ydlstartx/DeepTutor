@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from deeptutor.services.config.runtime_settings import RuntimeSettingsService
@@ -51,7 +52,7 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
 
     throughput = svc.save_lightrag(
         {
-            "llm_concurrency": 100,
+            "llm_model_max_async": 100,
             "embedding_concurrency": 0,
             "multimodal_concurrency": 100,
             "entity_extract_max_gleaning": 9,
@@ -62,6 +63,7 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
         }
     )
     assert throughput["llm_concurrency"] == 32
+    assert throughput["llm_model_max_async"] == 32
     assert throughput["embedding_concurrency"] == 1
     assert throughput["multimodal_concurrency"] == 16
     assert throughput["entity_extract_max_gleaning"] == 3
@@ -117,6 +119,33 @@ def test_lightrag_indexing_knobs_round_trip_and_clamp(tmp_path: Path) -> None:
     # Editing one knob must not reset the query knobs beside it.
     assert clamped["top_k"] == 60
     assert clamped["response_type"] == "Multiple Paragraphs"
+
+
+def test_lightrag_canonical_llm_concurrency_wins_over_legacy_alias(tmp_path: Path) -> None:
+    svc = RuntimeSettingsService(tmp_path, process_env={})
+
+    saved = svc.save_lightrag(
+        {
+            "llm_model_max_async": 7,
+            "llm_concurrency": 2,
+        }
+    )
+
+    assert saved["llm_model_max_async"] == 7
+    assert saved["llm_concurrency"] == 7
+
+
+def test_lightrag_legacy_only_concurrency_file_migrates(tmp_path: Path) -> None:
+    (tmp_path / "lightrag.json").write_text(
+        json.dumps({"version": 1, "llm_concurrency": 5}),
+        encoding="utf-8",
+    )
+    svc = RuntimeSettingsService(tmp_path, process_env={})
+
+    loaded = svc.load_lightrag()
+
+    assert loaded["llm_model_max_async"] == 5
+    assert loaded["llm_concurrency"] == 5
 
 
 def test_lightrag_settings_written_before_the_indexing_knobs_still_load(

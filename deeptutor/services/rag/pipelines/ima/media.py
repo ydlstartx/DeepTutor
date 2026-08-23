@@ -25,7 +25,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 import logging
 from pathlib import Path, PurePath, PurePosixPath
-import re
 import tempfile
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -39,6 +38,7 @@ from deeptutor.utils.document_extractor import (
 )
 
 from .envelope import ImaAPIError
+from .text_match import query_terms
 
 # Official IMA media links are short-lived Tencent COS URLs; the downloader
 # refuses anything outside that boundary.
@@ -260,7 +260,7 @@ def _extract_relevant_pdf_pages(path: str, query: str, max_chars: int) -> str:
 
 
 def _select_relevant_pages(pages: Iterable[tuple[int, str]], query: str, max_chars: int) -> str:
-    terms = _query_terms(query)
+    terms = query_terms(query)
     leading: list[str] = []
     leading_chars = 0
     max_candidates = 32
@@ -302,10 +302,6 @@ def _select_relevant_pages(pages: Iterable[tuple[int, str]], query: str, max_cha
         output.append(block[:remaining])
         size += separator_size + min(len(block), remaining)
     return "\n\n".join(output).strip()
-
-
-def _query_terms(query: str) -> list[str]:
-    return [token.lower() for token in re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", query)]
 
 
 def _extractable_filename(*candidates: str) -> str:

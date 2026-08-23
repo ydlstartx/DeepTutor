@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -90,6 +93,52 @@ def test_same_bytes_different_name_share_cache(
     service.parse(_pdf(tmp_path, b"identical", "first.pdf"), engine="fake")
     service.parse(_pdf(tmp_path, b"identical", "second.pdf"), engine="fake")
     assert len(parser.calls) == 1
+
+
+def test_concurrent_same_bytes_are_parsed_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parser = _FakeParser()
+    parse_started = threading.Event()
+    second_call_started = threading.Event()
+    allow_parse_to_finish = threading.Event()
+    calls_guard = threading.Lock()
+
+    def blocking_parse(source_path: Path, workdir: Path, *, config, on_output=None) -> None:
+        with calls_guard:
+            parser.calls.append(source_path)
+        parse_started.set()
+        if not allow_parse_to_finish.wait(1.0):
+            raise AssertionError("test did not release parser")
+        (workdir / f"{source_path.stem}.md").write_text("# md", encoding="utf-8")
+
+    parser.parse = blocking_parse  # type: ignore[method-assign]
+    _use(monkeypatch, parser)
+    service = ParseService(cache_root=tmp_path / "cache")
+    first_pdf = _pdf(tmp_path, b"identical", "first.pdf")
+    second_pdf = _pdf(tmp_path, b"identical", "second.pdf")
+
+    def parse_second() -> object:
+        second_call_started.set()
+        return service.parse(second_pdf, engine="fake")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.parse, first_pdf, engine="fake")
+        assert parse_started.wait(1.0)
+        second = pool.submit(parse_second)
+        assert second_call_started.wait(1.0)
+        try:
+            time.sleep(0.05)
+            with calls_guard:
+                calls_before_release = len(parser.calls)
+        finally:
+            allow_parse_to_finish.set()
+        first_result = first.result(timeout=1.0)
+        second_result = second.result(timeout=1.0)
+
+    assert calls_before_release == 1
+    assert len(parser.calls) == 1
+    assert first_result.workdir == second_result.workdir
 
 
 def test_not_ready_raises_before_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

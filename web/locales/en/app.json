@@ -3251,6 +3251,8 @@
   "Indexing": "Indexing",
   "Applies the next time a knowledge base is built or rebuilt.": "Applies the next time a knowledge base is built or rebuilt.",
   "Files in parallel": "Files in parallel",
+  "Files parsed in parallel": "Files parsed in parallel",
+  "Parsing overlaps; graph writes remain serial for integrity": "Parsing overlaps; graph writes remain serial for integrity",
   "Higher finishes sooner but uses more memory": "Higher finishes sooner but uses more memory",
   "Concurrent LLM calls": "Concurrent LLM calls",
   "Lower this if your provider rate-limits you": "Lower this if your provider rate-limits you",

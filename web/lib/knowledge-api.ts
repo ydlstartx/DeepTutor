@@ -84,7 +84,7 @@ export interface LightRagConfig {
   llm_concurrency: number;
   embedding_concurrency: number;
   multimodal_concurrency: number;
-  /** Files RAG-Anything processes in parallel while indexing. */
+  /** Documents DeepTutor parses concurrently; graph insertion remains serial. */
   max_concurrent_files: number;
   /** Concurrent LLM calls LightRAG's internal queue issues. */
   llm_model_max_async: number;

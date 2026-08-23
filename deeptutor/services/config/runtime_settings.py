@@ -301,9 +301,10 @@ DEFAULT_GRAPHRAG_SETTINGS: dict[str, Any] = {
 # is the number of entities/relations the query pulls; ``response_type`` mirrors
 # GraphRAG's. These ride into ``QueryParam`` via the engine's aquery() call;
 # wiring is defensive (an older RAG-Anything that rejects a kwarg degrades to a
-# mode-only query). ``max_concurrent_files`` maps to RAGAnythingConfig's batch
-# knob; ``llm_model_max_async`` / ``entity_extract_max_gleaning`` ride into
-# LightRAG's own constructor via RAGAnything's ``lightrag_kwargs`` passthrough.
+# mode-only query). ``max_concurrent_files`` bounds DeepTutor's concurrent
+# document parsing (graph insertion stays serial); ``llm_model_max_async`` /
+# ``entity_extract_max_gleaning`` ride into LightRAG's own constructor via
+# RAGAnything's ``lightrag_kwargs`` passthrough.
 DEFAULT_LIGHTRAG_SETTINGS: dict[str, Any] = {
     "version": 1,
     "top_k": 60,
@@ -578,7 +579,17 @@ class RuntimeSettingsService:
         return payload
 
     def load_lightrag(self) -> dict[str, Any]:
-        return self._load_or_create("lightrag", DEFAULT_LIGHTRAG_SETTINGS, self._normalize_lightrag)
+        defaults = DEFAULT_LIGHTRAG_SETTINGS
+        loaded = _json_object(self.path_for("lightrag"))
+        if loaded and "llm_model_max_async" not in loaded and "llm_concurrency" in loaded:
+            # `_load_or_create` merges defaults before normalizing. Seed the
+            # canonical default from the legacy-only file so that merge does
+            # not hide the value we are trying to migrate.
+            defaults = {
+                **DEFAULT_LIGHTRAG_SETTINGS,
+                "llm_model_max_async": loaded["llm_concurrency"],
+            }
+        return self._load_or_create("lightrag", defaults, self._normalize_lightrag)
 
     def save_lightrag(self, settings: dict[str, Any]) -> dict[str, Any]:
         payload = self._normalize_lightrag({**DEFAULT_LIGHTRAG_SETTINGS, **settings})
@@ -898,6 +909,18 @@ class RuntimeSettingsService:
             0,
             max(0, chunk_token_size - 1),
         )
+        # ``llm_model_max_async`` is LightRAG's public setting. Read the old
+        # dev-branch name only when the canonical key is absent, then emit a
+        # synchronized alias for older clients.
+        raw_llm_model_max_async = settings.get("llm_model_max_async")
+        if raw_llm_model_max_async is None:
+            raw_llm_model_max_async = settings.get("llm_concurrency")
+        llm_model_max_async = _coerce_clamped_int(
+            raw_llm_model_max_async,
+            8,
+            1,
+            32,
+        )
         return {
             "version": 1,
             "top_k": _coerce_clamped_int(settings.get("top_k"), 60, 1, 200),
@@ -906,20 +929,8 @@ class RuntimeSettingsService:
             "max_concurrent_files": _coerce_clamped_int(
                 settings.get("max_concurrent_files"), 1, 1, 16
             ),
-            # Keep the old dev-branch key as a synchronized compatibility
-            # alias, while using upstream's public name as the canonical one.
-            "llm_model_max_async": _coerce_clamped_int(
-                settings.get("llm_concurrency", settings.get("llm_model_max_async")),
-                8,
-                1,
-                32,
-            ),
-            "llm_concurrency": _coerce_clamped_int(
-                settings.get("llm_concurrency", settings.get("llm_model_max_async")),
-                8,
-                1,
-                32,
-            ),
+            "llm_model_max_async": llm_model_max_async,
+            "llm_concurrency": llm_model_max_async,
             "embedding_concurrency": _coerce_clamped_int(
                 settings.get("embedding_concurrency"), 2, 1, 16
             ),

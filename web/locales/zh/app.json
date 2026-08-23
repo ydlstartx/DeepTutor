@@ -3251,6 +3251,8 @@
   "Indexing": "索引",
   "Applies the next time a knowledge base is built or rebuilt.": "下次构建或重建知识库时生效。",
   "Files in parallel": "并行处理文件数",
+  "Files parsed in parallel": "并行解析文件数",
+  "Parsing overlaps; graph writes remain serial for integrity": "文件解析可并发重叠；为保证索引完整性，图写入仍保持串行",
   "Higher finishes sooner but uses more memory": "调高更快完成，但占用更多内存",
   "Concurrent LLM calls": "并发 LLM 调用数",
   "Lower this if your provider rate-limits you": "如果提供商限流，请调低",

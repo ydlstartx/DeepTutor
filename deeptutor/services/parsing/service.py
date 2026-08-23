@@ -79,42 +79,8 @@ class ParseService:
         source_hash = cache.source_hash_from_path(source_path)
         cache_root = self._cache_root()
 
-        hit = cache.lookup(cache_root, source_hash, sig)
-        if hit is not None:
-            logger.info("Parse cache hit for %s (%s/%s)", source_path.name, engine_name, sig)
-            markdown, blocks, asset_dir = cache.load_ir(hit)
-            return ParsedDocument(
-                markdown=markdown,
-                blocks=blocks,
-                asset_dir=asset_dir,
-                source_hash=source_hash,
-                parser_signature=sig,
-                engine=engine_name,
-                workdir=hit,
-            )
-
-        report = parser.is_ready(config)
-        if not report.ready:
-            raise ParserError(report.message or f"The '{engine_name}' engine is not ready.")
-
-        workdir = cache.reserve(cache_root, source_hash, sig)
-        logger.info("Parsing %s with %s (signature %s)", source_path.name, engine_name, sig)
-        try:
-            parser.parse(source_path, workdir, config=config, on_output=on_output)
+        def load_cached(workdir: Path) -> ParsedDocument:
             markdown, blocks, asset_dir = cache.load_ir(workdir)
-            if not markdown and not blocks:
-                raise ParserError(
-                    f"The '{engine_name}' engine produced no content for {source_path.name}."
-                )
-            cache.write_manifest(
-                workdir,
-                {
-                    "engine": engine_name,
-                    "signature": sig,
-                    "source_hash": source_hash,
-                    "source_name": source_path.name,
-                },
-            )
             return ParsedDocument(
                 markdown=markdown,
                 blocks=blocks,
@@ -124,9 +90,58 @@ class ParseService:
                 engine=engine_name,
                 workdir=workdir,
             )
-        except Exception:
-            cache.cleanup_failed(workdir)
-            raise
+
+        hit = cache.lookup(cache_root, source_hash, sig)
+        if hit is not None:
+            logger.info("Parse cache hit for %s (%s/%s)", source_path.name, engine_name, sig)
+            return load_cached(hit)
+
+        report = parser.is_ready(config)
+        if not report.ready:
+            raise ParserError(report.message or f"The '{engine_name}' engine is not ready.")
+
+        with cache.key_lock(cache_root, source_hash, sig):
+            # Another caller may have completed this key while we waited.
+            hit = cache.lookup(cache_root, source_hash, sig)
+            if hit is not None:
+                logger.info(
+                    "Parse cache hit after wait for %s (%s/%s)",
+                    source_path.name,
+                    engine_name,
+                    sig,
+                )
+                return load_cached(hit)
+
+            workdir = cache.reserve(cache_root, source_hash, sig)
+            logger.info("Parsing %s with %s (signature %s)", source_path.name, engine_name, sig)
+            try:
+                parser.parse(source_path, workdir, config=config, on_output=on_output)
+                markdown, blocks, asset_dir = cache.load_ir(workdir)
+                if not markdown and not blocks:
+                    raise ParserError(
+                        f"The '{engine_name}' engine produced no content for {source_path.name}."
+                    )
+                cache.write_manifest(
+                    workdir,
+                    {
+                        "engine": engine_name,
+                        "signature": sig,
+                        "source_hash": source_hash,
+                        "source_name": source_path.name,
+                    },
+                )
+                return ParsedDocument(
+                    markdown=markdown,
+                    blocks=blocks,
+                    asset_dir=asset_dir,
+                    source_hash=source_hash,
+                    parser_signature=sig,
+                    engine=engine_name,
+                    workdir=workdir,
+                )
+            except Exception:
+                cache.cleanup_failed(workdir)
+                raise
 
 
 _service: Optional[ParseService] = None

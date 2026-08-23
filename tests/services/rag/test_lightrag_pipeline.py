@@ -791,7 +791,8 @@ def test_indexing_isolated_from_owner_loop_with_context_and_progress(tmp_path, m
     owner_thread = captured["owner_thread"]
     assert captured["build_thread"] != owner_thread
     assert captured["worker_thread"] != owner_thread
-    assert set(captured["parse_threads"]) == {captured["worker_thread"]}
+    assert owner_thread not in captured["parse_threads"]
+    assert captured["worker_thread"] not in captured["parse_threads"]
     assert captured["io_thread"] == owner_thread
     assert captured["worker_context"] == "user-761"
     assert captured["io_context"] == "user-761"
@@ -813,6 +814,48 @@ def test_indexing_isolated_from_owner_loop_with_context_and_progress(tmp_path, m
             "doc_id": "hash-two",
         },
     ]
+
+
+def test_indexing_parses_files_with_bounded_concurrency(tmp_path, monkeypatch) -> None:
+    from deeptutor.services.parsing.types import ParsedDocument
+
+    state = {"active": 0, "peak": 0}
+    lock = threading.Lock()
+
+    class _ParseService:
+        def parse(self, path, **_):
+            with lock:
+                state["active"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+            try:
+                time.sleep(0.05)
+                source = Path(path)
+                return ParsedDocument(
+                    markdown=source.stem,
+                    blocks=[],
+                    source_hash=f"hash-{source.stem}",
+                    engine="fake",
+                )
+            finally:
+                with lock:
+                    state["active"] -= 1
+
+    monkeypatch.setattr("deeptutor.services.parsing.get_parse_service", lambda: _ParseService())
+    monkeypatch.setattr(
+        "deeptutor.services.rag.pipelines.lightrag.config.indexing_kwargs_from_settings",
+        lambda: {"max_concurrent_files": 2},
+    )
+    inserts = _stub_engine(monkeypatch)
+    _force_available(monkeypatch, True)
+    docs = [tmp_path / f"doc-{index}.pdf" for index in range(4)]
+    for doc in docs:
+        doc.write_bytes(b"%PDF")
+
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    assert asyncio.run(pipe.initialize("kb", [str(doc) for doc in docs])) is True
+
+    assert state["peak"] == 2
+    assert [insert["file"] for insert in inserts] == [doc.name for doc in docs]
 
 
 def test_indexing_worker_exception_propagates_unchanged(tmp_path, monkeypatch) -> None:
@@ -898,6 +941,43 @@ def test_shared_worker_loop_survives_cancellation() -> None:
             return "alive"
 
         assert await run_in_shared_worker_loop(ping) == "alive"
+
+    asyncio.run(scenario())
+
+
+def test_shared_worker_loop_honors_cancellation_before_submit() -> None:
+    """A queued job must not start after its owner has already cancelled.
+
+    The shared loop can be busy in synchronous GraphML/FAISS work, leaving the
+    thread-safe ``submit`` callback queued for a while. Cancellation during
+    that window used to miss the not-yet-created Task; it then ran anyway and
+    tried to publish into an already-cancelled concurrent Future.
+    """
+
+    async def scenario() -> None:
+        from deeptutor.services.rag.pipelines.lightrag import worker
+
+        shared_loop = worker._ensure_shared_loop()
+        release_loop = threading.Event()
+        job_started = threading.Event()
+        shared_loop.call_soon_threadsafe(lambda: release_loop.wait(1.0))
+
+        async def job(_bridge) -> None:
+            job_started.set()
+
+        task = asyncio.create_task(run_in_shared_worker_loop(job))
+        await asyncio.sleep(0)  # queue submit behind the blocking callback
+        task.cancel()
+        try:
+            await asyncio.sleep(0.05)
+            completed_before_release = task.done()
+        finally:
+            release_loop.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.01)
+        assert completed_before_release is True
+        assert job_started.is_set() is False
 
     asyncio.run(scenario())
 

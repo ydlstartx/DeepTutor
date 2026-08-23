@@ -1180,6 +1180,16 @@ class KnowledgeBaseManager:
             raise ValueError(f"A knowledge base named '{name}' already exists.")
 
         db_path = (db_path or "").strip()
+        if db_path:
+            from deeptutor.capabilities.marginnote4.store import managed_db_path
+
+            managed = managed_db_path(db_path)
+            if managed is None:
+                raise ValueError(
+                    "MarginNote store paths must be .db files inside the current "
+                    "workspace's managed marginnote4 directory."
+                )
+            db_path = str(managed)
         claimed_by = self._marginnote4_store_owner(name, db_path, knowledge_bases)
         if claimed_by:
             # Distinct names can still derive one store: the default path keeps
@@ -1730,14 +1740,6 @@ class KnowledgeBaseManager:
         connected = is_connected_kb(entry)
         if connected:
             dir_exists = False
-        # One connected kind does own storage we created: a MarginNote library's
-        # synced objects live in a SQLite file under our own data directory, not
-        # in an external resource the user manages. Leaving it behind would also
-        # resurrect every paired device the moment a library of the same name is
-        # connected again.
-        if entry.get("type") == MARGINNOTE4_KB_TYPE:
-            self._delete_marginnote4_store(name, entry)
-
         if not confirm:
             # Ask for confirmation in CLI
             print(f"⚠️  Warning: This will permanently delete the knowledge base '{name}'")
@@ -1746,6 +1748,14 @@ class KnowledgeBaseManager:
             if response.lower() != "yes":
                 print("Deletion cancelled.")
                 return False
+
+        # One connected kind does own storage we created: a MarginNote library's
+        # synced objects live in a SQLite file under our own data directory, not
+        # in an external resource the user manages. This must happen only after
+        # confirmation, and the helper independently re-checks that the resolved
+        # path is still inside the managed workspace root.
+        if entry.get("type") == MARGINNOTE4_KB_TYPE:
+            self._delete_marginnote4_store(name, entry)
 
         if dir_exists:
 
@@ -1802,10 +1812,23 @@ class KnowledgeBaseManager:
         list is worse than an orphan file, exactly as for the index directory
         above.
         """
-        from deeptutor.capabilities.marginnote4.store import resolve_db_path
+        from deeptutor.capabilities.marginnote4.store import managed_db_path, resolve_db_path
 
         try:
-            db_path = resolve_db_path(name, metadata=entry)
+            pinned = str(entry.get("db_path") or "").strip()
+            # Deletion must never reinterpret an unsafe legacy pin as the
+            # default path: that default could now belong to another library.
+            # Validate the exact persisted target when one exists.
+            db_path = Path(pinned) if pinned else resolve_db_path(name, metadata={})
+            managed = managed_db_path(db_path)
+            if managed is None:
+                logger.warning(
+                    "Refusing to remove unmanaged MarginNote store for KB '%s': %s",
+                    name,
+                    db_path,
+                )
+                return
+            db_path = managed
             db_path.unlink(missing_ok=True)
             # SQLite's WAL companions, when the last connection left them.
             for suffix in ("-wal", "-shm"):

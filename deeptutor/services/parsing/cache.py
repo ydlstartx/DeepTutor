@@ -18,19 +18,33 @@ both it and the engines share one loader.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
 import logging
 from pathlib import Path
 import shutil
+import threading
 from typing import Any, Optional
+
+from deeptutor.services.file_io import exclusive_write_lock
 
 logger = logging.getLogger(__name__)
 
 MANIFEST_FILENAME = "manifest.json"
 _HASH_PREFIX = "sha256"
 _READ_CHUNK = 1 << 20  # 1 MiB
+
+
+class _KeyLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.users = 0
+
+
+_key_locks_guard = threading.Lock()
+_key_locks: dict[str, _KeyLockEntry] = {}
 
 
 def source_hash_from_path(path: Path) -> str:
@@ -45,6 +59,34 @@ def source_hash_from_path(path: Path) -> str:
 
 def signature_dir(cache_root: Path, source_hash: str, sig_hash: str) -> Path:
     return cache_root / source_hash[:2] / source_hash / sig_hash
+
+
+@contextmanager
+def key_lock(cache_root: Path, source_hash: str, sig_hash: str):
+    """Serialize one content/signature parse across threads and processes.
+
+    The in-process lock prevents duplicate parser work between concurrent
+    indexing tasks. The sibling file lock extends the same guarantee across
+    server workers without placing the lock inside the incomplete cache
+    directory that :func:`reserve` may remove.
+    """
+    target = signature_dir(cache_root, source_hash, sig_hash)
+    key = str(target.absolute())
+    with _key_locks_guard:
+        entry = _key_locks.get(key)
+        if entry is None:
+            entry = _KeyLockEntry()
+            _key_locks[key] = entry
+        entry.users += 1
+    try:
+        with entry.lock:
+            with exclusive_write_lock(target):
+                yield
+    finally:
+        with _key_locks_guard:
+            entry.users -= 1
+            if entry.users == 0 and _key_locks.get(key) is entry:
+                _key_locks.pop(key, None)
 
 
 def is_ready(workdir: Optional[Path]) -> bool:
@@ -182,6 +224,7 @@ __all__ = [
     "MANIFEST_FILENAME",
     "source_hash_from_path",
     "signature_dir",
+    "key_lock",
     "is_ready",
     "lookup",
     "reserve",

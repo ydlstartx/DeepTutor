@@ -13,6 +13,7 @@ from deeptutor.capabilities.marginnote4 import (
 )
 from deeptutor.capabilities.marginnote4 import binding as mn4_binding
 from deeptutor.core.context import UnifiedContext
+from deeptutor.services.path_service import PathService
 
 
 def _bind(monkeypatch, db_path: str, name: str = "mylibrary") -> None:
@@ -36,17 +37,24 @@ def test_capability_inactive_without_mn4_kb(monkeypatch, tmp_path: Path) -> None
 
 
 def test_capability_active_injects_db_path(monkeypatch, tmp_path: Path) -> None:
-    db_path = str(tmp_path / "test.db")
-    _bind(monkeypatch, db_path)
-    cap = MarginNoteCapability()
-    ctx = UnifiedContext(user_message="hi", knowledge_bases=["mylibrary"])
-    assert cap.is_active(ctx) is True
-    assert tuple(cap.owned_tools) == MARGINNOTE_TOOL_NAMES
-    # db_path injected for marginnote tools, even overwriting a forged value
-    assert cap.augment_kwargs("marginnote_read", {}, ctx)["_db_path"] == db_path
-    assert cap.augment_kwargs("marginnote_read", {"_db_path": "/etc"}, ctx)["_db_path"] == db_path
-    # but never for a non-marginnote tool
-    assert "_db_path" not in cap.augment_kwargs("rag", {}, ctx)
+    monkeypatch.setenv("DEEPTUTOR_HOME", str(tmp_path))
+    PathService.reset_instance()
+    try:
+        db_path = str(PathService.get_instance().user_data_dir / "marginnote4" / "test.db")
+        _bind(monkeypatch, db_path)
+        cap = MarginNoteCapability()
+        ctx = UnifiedContext(user_message="hi", knowledge_bases=["mylibrary"])
+        assert cap.is_active(ctx) is True
+        assert tuple(cap.owned_tools) == MARGINNOTE_TOOL_NAMES
+        # db_path injected for marginnote tools, even overwriting a forged value
+        assert cap.augment_kwargs("marginnote_read", {}, ctx)["_db_path"] == db_path
+        assert (
+            cap.augment_kwargs("marginnote_read", {"_db_path": "/etc"}, ctx)["_db_path"] == db_path
+        )
+        # but never for a non-marginnote tool
+        assert "_db_path" not in cap.augment_kwargs("rag", {}, ctx)
+    finally:
+        PathService.reset_instance()
 
 
 def test_system_block_contains_library_name(monkeypatch, tmp_path: Path) -> None:
