@@ -18,12 +18,20 @@ def test_llamaindex_defaults_when_absent(tmp_path: Path) -> None:
     assert loaded["chunk_overlap"] == 50
     assert loaded["parse_concurrency"] == 2
     assert loaded["image_description_concurrency"] == 8
+    assert loaded["image_description_timeout_seconds"] == 60
 
 
 def test_llamaindex_roundtrip(tmp_path: Path) -> None:
     svc = RuntimeSettingsService(tmp_path, process_env={})
     svc.save_llamaindex(
-        {"retrieval_profile": "vector", "top_k": 8, "chunk_size": 1024, "chunk_overlap": 0}
+        {
+            "retrieval_profile": "vector",
+            "top_k": 8,
+            "chunk_size": 1024,
+            "chunk_overlap": 0,
+            "image_description_concurrency": 8,
+            "image_description_timeout_seconds": 120,
+        }
     )
 
     loaded = svc.load_llamaindex(include_process_overrides=False)
@@ -31,6 +39,8 @@ def test_llamaindex_roundtrip(tmp_path: Path) -> None:
     assert loaded["top_k"] == 8
     assert loaded["chunk_size"] == 1024
     assert loaded["chunk_overlap"] == 0
+    assert loaded["image_description_concurrency"] == 8
+    assert loaded["image_description_timeout_seconds"] == 120
     # Its own file beside the other per-feature settings.
     assert (tmp_path / "llamaindex.json").exists()
 
@@ -45,7 +55,8 @@ def test_llamaindex_clamps_out_of_range(tmp_path: Path) -> None:
             "chunk_size": 8,
             "chunk_overlap": 99999,
             "parse_concurrency": 99,
-            "image_description_concurrency": 0,
+            "image_description_concurrency": 999,
+            "image_description_timeout_seconds": 0,
         }
     )
     loaded = svc.load_llamaindex(include_process_overrides=False)
@@ -57,7 +68,8 @@ def test_llamaindex_clamps_out_of_range(tmp_path: Path) -> None:
     # Overlap is clamped below the chunk size so chunking never degenerates.
     assert loaded["chunk_overlap"] == 63
     assert loaded["parse_concurrency"] == 8
-    assert loaded["image_description_concurrency"] == 1
+    assert loaded["image_description_concurrency"] == 16
+    assert loaded["image_description_timeout_seconds"] == 5
 
 
 def test_llamaindex_profile_env_override(tmp_path: Path) -> None:
@@ -91,3 +103,18 @@ def test_indexing_concurrency_from_settings(monkeypatch) -> None:
     )
 
     assert config.indexing_concurrency() == (3, 7)
+
+
+def test_image_description_limits_use_runtime_settings(monkeypatch) -> None:
+    from deeptutor.services.rag.pipelines.llamaindex import config
+
+    monkeypatch.setattr(
+        config,
+        "_load_runtime_settings",
+        lambda: {
+            "image_description_concurrency": 7,
+            "image_description_timeout_seconds": 90,
+        },
+    )
+
+    assert config.image_description_limits() == (7, 90.0)

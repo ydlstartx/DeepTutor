@@ -107,6 +107,17 @@ def indexing_concurrency() -> tuple[int, int]:
         return 2, 8
 
 
+def image_description_limits() -> tuple[int, float]:
+    """Return the configured vision-call concurrency and per-image timeout."""
+    try:
+        settings = _load_runtime_settings()
+        concurrency = int(settings.get("image_description_concurrency", 8) or 8)
+        timeout_seconds = float(settings.get("image_description_timeout_seconds", 60) or 60)
+        return min(16, max(1, concurrency)), min(600.0, max(5.0, timeout_seconds))
+    except Exception:
+        return 8, 60.0
+
+
 __all__ = [
     "HYBRID_PROFILE",
     "RetrievalConfig",
@@ -115,6 +126,7 @@ __all__ = [
     "chunk_geometry",
     "default_top_k",
     "indexing_concurrency",
+    "image_description_limits",
     "normalize_retrieval_profile",
     "retrieval_config_from_env",
     "retrieval_config_from_settings",

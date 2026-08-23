@@ -4,6 +4,8 @@ import { useTranslation } from "react-i18next";
 import { Star, Trash2 } from "lucide-react";
 import {
   formatKnowledgeTimestamp,
+  isMarginNoteKb,
+  providerUsesEmbeddingMetadata,
   type KnowledgeBase,
 } from "@/lib/knowledge-helpers";
 
@@ -24,7 +26,15 @@ export default function KbSettingsSection({
 }: KbSettingsSectionProps) {
   const { t } = useTranslation();
   const meta = kb.metadata || {};
-  const provider = kb.statistics?.rag_provider || "llamaindex";
+  // A MarginNote library runs no engine and no embedding, and its `path` is
+  // a name rather than a folder that exists — reporting the ordinary fields
+  // described a pipeline and a directory it never has.
+  const isMarginNote = isMarginNoteKb(kb);
+  const provider = isMarginNote
+    ? t("MarginNote 4")
+    : kb.statistics?.rag_provider || "llamaindex";
+  const pageIndexProvider =
+    isMarginNote || !providerUsesEmbeddingMetadata(provider);
   const embeddingLabel = meta.embedding_model
     ? typeof meta.embedding_dim === "number"
       ? `${meta.embedding_model} · ${meta.embedding_dim}${t("d")}`
@@ -49,17 +59,29 @@ export default function KbSettingsSection({
 
         <dl className="grid gap-3 rounded-lg border border-[var(--border)] bg-[var(--background)] p-3 sm:grid-cols-2">
           <Field label={t("RAG provider")}>{provider}</Field>
-          <Field label={t("Embedding")}>{embeddingLabel}</Field>
+          {!pageIndexProvider && (
+            <Field label={t("Embedding")}>{embeddingLabel}</Field>
+          )}
           <Field label={t("Created")}>{created || "—"}</Field>
           <Field label={t("Updated")}>{updated || "—"}</Field>
-          <Field label={t("Last indexed")}>{lastIndexed || "—"}</Field>
-          {kb.path && (
-            <Field label={t("On-disk path")} className="sm:col-span-2">
-              <span className="font-mono text-[10.5px] text-[var(--muted-foreground)]">
-                {kb.path}
-              </span>
-            </Field>
+          {!isMarginNote && (
+            <Field label={t("Last indexed")}>{lastIndexed || "—"}</Field>
           )}
+          {isMarginNote
+            ? meta.db_path && (
+                <Field label={t("Synced store")} className="sm:col-span-2">
+                  <span className="font-mono text-[10.5px] text-[var(--muted-foreground)]">
+                    {meta.db_path}
+                  </span>
+                </Field>
+              )
+            : kb.path && (
+                <Field label={t("On-disk path")} className="sm:col-span-2">
+                  <span className="font-mono text-[10.5px] text-[var(--muted-foreground)]">
+                    {kb.path}
+                  </span>
+                </Field>
+              )}
         </dl>
       </section>
 
@@ -100,6 +122,10 @@ export default function KbSettingsSection({
                 ? t(
                     "Removing this connection only deletes the DeepTutor pointer. The remote IMA knowledge base is not changed.",
                   )
+                : isMarginNote
+                  ? t(
+                      "Deleting this library removes its synced objects and unpairs every device. Nothing in MarginNote 4 itself is touched.",
+                    )
                 : t(
                     "Deleting a knowledge base permanently removes its raw documents and index versions.",
                   )}

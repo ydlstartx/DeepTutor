@@ -14,7 +14,10 @@ native query modes.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 import importlib.util
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -28,6 +31,7 @@ from .config import (
     build_llm_model_func,
     build_vision_model_func,
     indexing_kwargs_from_settings,
+    lightrag_kwargs_from_settings,
     normalize_mode,
     query_kwargs_from_settings,
 )
@@ -327,6 +331,61 @@ def _install_lean_faiss_storage() -> None:
     faiss_impl.FaissVectorDBStorage = LeanFaissVectorDBStorage
 
 
+def _accepts(target: Any, name: str) -> bool:
+    """Whether ``target``'s constructor takes a keyword called *name*.
+
+    The settings knobs below ride on RAG-Anything parameters that arrived in
+    different releases — ``lightrag_kwargs`` only exists from ~1.2.5, while the
+    supported range starts at 1.0.1. Asking first keeps an older install
+    working on RAG-Anything's own defaults instead of dying with a TypeError
+    that takes the whole LightRAG engine down. Same defensive posture the query
+    path already takes for ``QueryParam`` kwargs.
+    """
+    import inspect
+
+    try:
+        return name in inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _drop_unsupported(target: Any, kwargs: dict[str, Any], *, what: str) -> dict[str, Any]:
+    supported = {key: value for key, value in kwargs.items() if _accepts(target, key)}
+    for key in kwargs.keys() - supported.keys():
+        logger.warning(
+            "Installed RAG-Anything does not accept %s=%r on %s; leaving it at "
+            "the library default. Upgrade raganything to use this setting.",
+            key,
+            kwargs[key],
+            what,
+        )
+    return supported
+
+
+def _build_config(config_cls: Any, working_dir: Path) -> Any:
+    knobs = _drop_unsupported(config_cls, indexing_kwargs_from_settings(), what="RAGAnythingConfig")
+    return config_cls(working_dir=str(working_dir), **knobs)
+
+
+def _construct(
+    rag_cls: Any,
+    *,
+    lightrag_overrides: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> Any:
+    extra = lightrag_kwargs_from_settings()
+    extra.update(dict(lightrag_overrides or {}))
+    if extra and _accepts(rag_cls, "lightrag_kwargs"):
+        kwargs["lightrag_kwargs"] = extra
+    elif extra:
+        logger.warning(
+            "Installed RAG-Anything has no lightrag_kwargs passthrough; %s stay "
+            "at LightRAG's defaults. Upgrade raganything to use these settings.",
+            ", ".join(sorted(extra)),
+        )
+    return rag_cls(**kwargs)
+
+
 def build_rag(
     working_dir: Path,
     vector_storage: str | None = None,
@@ -360,12 +419,11 @@ def build_rag(
         engine_id = DEFAULT_VECTOR_STORAGE
     storage_cls = VECTOR_STORAGE_CLASSES[engine_id]
 
-    lightrag_kwargs: dict[str, Any] = {}
+    lightrag_overrides: dict[str, Any] = {}
     # Keep LightRAG's call watchdog strictly a backstop behind DeepTutor's own
     # attempt cap + retries (see the constants above).
-    lightrag_kwargs["default_llm_timeout"] = _LIGHTRAG_LLM_TIMEOUT_S
-    lightrag_kwargs["default_embedding_timeout"] = _LIGHTRAG_EMBEDDING_TIMEOUT_S
-    lightrag_kwargs.update(indexing_kwargs_from_settings())
+    lightrag_overrides["default_llm_timeout"] = _LIGHTRAG_LLM_TIMEOUT_S
+    lightrag_overrides["default_embedding_timeout"] = _LIGHTRAG_EMBEDDING_TIMEOUT_S
     from deeptutor.knowledge.policy import is_kb_query_only
 
     if is_kb_query_only():
@@ -374,8 +432,8 @@ def build_rag(
         # no indexing endpoint ran. Query-only deployments must keep retrieval
         # fully read-only, so skip that cache while retaining query embeddings
         # and every native retrieval mode.
-        lightrag_kwargs["enable_llm_cache"] = False
-        lightrag_kwargs["enable_llm_cache_for_entity_extract"] = False
+        lightrag_overrides["enable_llm_cache"] = False
+        lightrag_overrides["enable_llm_cache_for_entity_extract"] = False
     if storage_cls is not None:
         if not importlib.util.find_spec("faiss"):
             raise RuntimeError(
@@ -385,16 +443,20 @@ def build_rag(
             )
         _install_lean_faiss_storage()
         # RAG-Anything forwards lightrag_kwargs into LightRAG(**params).
-        lightrag_kwargs["vector_storage"] = storage_cls
+        lightrag_overrides["vector_storage"] = storage_cls
 
-    config = RAGAnythingConfig(working_dir=str(working_dir))
+    config = _build_config(RAGAnythingConfig, working_dir)
     adapter_kwargs = {"io_bridge": io_bridge} if io_bridge is not None else {}
-    rag = RAGAnything(
+    funcs = {
+        "llm_model_func": build_llm_model_func(**adapter_kwargs),
+        "vision_model_func": build_vision_model_func(**adapter_kwargs),
+        "embedding_func": build_embedding_func(**adapter_kwargs),
+    }
+    rag = _construct(
+        RAGAnything,
         config=config,
-        llm_model_func=build_llm_model_func(**adapter_kwargs),
-        vision_model_func=build_vision_model_func(**adapter_kwargs),
-        embedding_func=build_embedding_func(**adapter_kwargs),
-        lightrag_kwargs=lightrag_kwargs,
+        lightrag_overrides=lightrag_overrides,
+        **funcs,
     )
     # DeepTutor always feeds RAG-Anything a pre-parsed ``content_list`` (the
     # parse layer runs upstream via DeepTutor's own ParseService), so
@@ -423,6 +485,59 @@ async def insert(rag: Any, content_list: list[dict], *, file_name: str, doc_id: 
         file_path=file_name,
         doc_id=doc_id,
     )
+
+
+def _managed_queue_funcs(lightrag: Any) -> Iterable[Callable[..., Any]]:
+    """Yield each current LightRAG queue wrapper exactly once."""
+    role_funcs = getattr(lightrag, "role_llm_funcs", {})
+    candidates: list[object] = []
+    if isinstance(role_funcs, Mapping):
+        candidates.extend(role_funcs.values())
+
+    embedding = getattr(lightrag, "embedding_func", None)
+    candidates.append(getattr(embedding, "func", None))
+    candidates.append(getattr(lightrag, "rerank_model_func", None))
+
+    seen: set[int] = set()
+    for candidate in candidates:
+        if not callable(candidate) or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        yield candidate
+
+
+async def _shutdown_queues(lightrag: Any, *, cancel_pending: bool) -> None:
+    """Bound cleanup of LightRAG's role, embedding, and rerank queues."""
+    shutdowns: list[Awaitable[Any]] = []
+    for func in _managed_queue_funcs(lightrag):
+        shutdown = getattr(func, "shutdown", None)
+        if callable(shutdown):
+            result = shutdown(graceful=not cancel_pending, timeout=5.0)
+            if inspect.isawaitable(result):
+                shutdowns.append(result)
+    if not shutdowns:
+        return
+
+    results = await asyncio.gather(*shutdowns, return_exceptions=True)
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures:
+        raise RuntimeError(
+            f"Failed to shut down {len(failures)} LightRAG managed queue(s)"
+        ) from failures[0]
+
+
+async def finalize(rag: Any, *, cancel_pending: bool) -> None:
+    """Stop managed work before finalizing RAG-Anything storage resources."""
+    lightrag = getattr(rag, "lightrag", None)
+    if lightrag is not None:
+        await _shutdown_queues(lightrag, cancel_pending=cancel_pending)
+
+    finalizer = getattr(rag, "finalize_storages", None)
+    if not callable(finalizer):
+        return
+    result = finalizer()
+    if inspect.isawaitable(result):
+        await result
 
 
 async def ensure_ready(rag: Any) -> None:
@@ -461,4 +576,4 @@ async def query(rag: Any, question: str, mode: str | None = None) -> str:
     return result if isinstance(result, str) else str(result)
 
 
-__all__ = ["build_rag", "insert", "ensure_ready", "query"]
+__all__ = ["build_rag", "ensure_ready", "finalize", "insert", "query"]

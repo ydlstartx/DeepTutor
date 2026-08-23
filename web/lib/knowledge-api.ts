@@ -26,6 +26,8 @@ export interface RagProviderSummary {
   description: string;
   /** Whether the engine is ready to use (e.g. its API key is set). */
   configured?: boolean;
+  /** Actionable reason when configured is false. */
+  readiness_reason?: string;
   /** Whether the engine needs an API key configured before use. */
   requires_api_key?: boolean;
   /** Retrieval modes this engine supports (empty for mode-less engines). */
@@ -37,7 +39,6 @@ export interface RagProviderSummary {
 }
 
 export interface PageIndexConfig {
-  api_base_url: string;
   api_key_set: boolean;
   configured: boolean;
 }
@@ -60,9 +61,10 @@ export interface LlamaIndexConfig {
   /** Chunk geometry — applies to documents indexed after the change. */
   chunk_size: number;
   chunk_overlap: number;
-  /** Parallel document parsers and multimodal image-description requests. */
+  /** Parallel document parsers and bounded multimodal image-description work. */
   parse_concurrency: number;
   image_description_concurrency: number;
+  image_description_timeout_seconds: number;
 }
 
 export interface GraphRagConfig {
@@ -78,9 +80,15 @@ export interface LightRagConfig {
   response_type: string;
   /** Vector-storage engine for NEW index versions ("nano" | "faiss"). */
   vector_storage: string;
+  /** Legacy alias kept for settings written before llm_model_max_async. */
   llm_concurrency: number;
   embedding_concurrency: number;
   multimodal_concurrency: number;
+  /** Files RAG-Anything processes in parallel while indexing. */
+  max_concurrent_files: number;
+  /** Concurrent LLM calls LightRAG's internal queue issues. */
+  llm_model_max_async: number;
+  /** Extra extraction passes per chunk, to recover missed entities. */
   entity_extract_max_gleaning: number;
   chunk_token_size: number;
   chunk_overlap_token_size: number;
@@ -328,7 +336,6 @@ export async function getPageIndexConfig(options?: {
 export async function updatePageIndexConfig(payload: {
   /** Omit to keep the stored key, "" to clear it, any value to replace it. */
   api_key?: string;
-  api_base_url?: string;
 }): Promise<PageIndexConfig> {
   const res = await apiFetch(apiUrl(PAGEINDEX_CONFIG_PATH), {
     method: "PUT",
@@ -647,7 +654,7 @@ export interface KnowledgeTaskResponse {
   noop?: boolean;
 }
 
-async function readErrorDetail(
+export async function readErrorDetail(
   res: Response,
   fallback: string,
 ): Promise<string> {
@@ -674,10 +681,14 @@ export async function createKnowledgeBase(payload: {
   name: string;
   provider: string;
   files: File[];
+  pageindexMode?: "flash" | "standard";
 }): Promise<KnowledgeTaskResponse> {
   const form = new FormData();
   form.append("name", payload.name);
   form.append("rag_provider", payload.provider);
+  if (payload.pageindexMode) {
+    form.append("pageindex_mode", payload.pageindexMode);
+  }
   appendFilesWithPaths(form, payload.files);
 
   const res = await apiFetch(apiUrl("/api/v1/knowledge/create"), {
@@ -712,6 +723,34 @@ export async function connectObsidianVault(payload: {
     status: string;
     name: string;
     vault_path: string;
+  };
+}
+
+export async function connectMarginNote4Library(payload: {
+  name: string;
+  description?: string;
+}): Promise<{ status: string; name: string; db_path?: string }> {
+  const res = await apiFetch(apiUrl("/api/v1/knowledge/connect-marginnote4"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // `db_path` is deliberately not sent: leaving it blank keeps one rule for
+    // where the store lives (derived from the name), which is what lets the
+    // pairing endpoints, the Add-on's syncs and the capability binding agree.
+    body: JSON.stringify({
+      name: payload.name,
+      description: payload.description ?? "",
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, "Failed to connect MarginNote 4 library"),
+    );
+  }
+  invalidateKnowledgeCaches();
+  return (await res.json()) as {
+    status: string;
+    name: string;
+    db_path?: string;
   };
 }
 
@@ -1048,11 +1087,15 @@ export async function connectLightRagServer(payload: {
 export async function uploadKnowledgeBaseFiles(
   name: string,
   files: File[],
-  options?: { provider?: string },
+  options?: { provider?: string; destSubdir?: string },
 ): Promise<KnowledgeTaskResponse> {
   const form = new FormData();
   appendFilesWithPaths(form, files);
   if (options?.provider) form.append("rag_provider", options.provider);
+  // Places the batch under an existing KB folder. A folder pick reports paths
+  // relative to the chosen directory, so its ancestors are not in the payload
+  // — this is how the caller says where the subtree belongs (#866).
+  if (options?.destSubdir) form.append("dest_subdir", options.destSubdir);
 
   const res = await apiFetch(
     apiUrl(`/api/v1/knowledge/${encodeURIComponent(name)}/upload`),

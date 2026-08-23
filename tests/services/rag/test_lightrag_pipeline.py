@@ -70,7 +70,7 @@ def test_indexing_kwargs_bridge_runtime_throughput_settings(monkeypatch) -> None
         },
     )
 
-    assert lr_config.indexing_kwargs_from_settings() == {
+    assert lr_config.lightrag_kwargs_from_settings() == {
         "llm_model_max_async": 12,
         "embedding_func_max_async": 3,
         "max_parallel_insert": 7,

@@ -13,6 +13,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import {
   BarChart3,
+  BookOpenText,
   BrainCircuit,
   Clapperboard,
   Code2,
@@ -38,6 +39,10 @@ import type { ContextBudget } from "@/components/chat/home/ContextBudgetChip";
 import { ChatMessageList } from "@/components/chat/home/ChatMessages";
 import { TurnNavigator } from "@/components/chat/home/TurnNavigator";
 import SessionLoadingView from "@/components/chat/home/SessionLoadingView";
+import {
+  SESSION_LOAD_TIMEOUT_MS,
+  shouldSurfaceLoadFailure,
+} from "@/lib/session-load";
 import StarterSuggestions from "@/components/chat/home/StarterSuggestions";
 import MasteryPathStrip from "@/components/chat/home/MasteryPathStrip";
 // Imported eagerly so the drawer shell is always mounted off-screen —
@@ -65,6 +70,7 @@ import {
   type MessageRequestSnapshot,
 } from "@/context/UnifiedChatContext";
 import { useAppShell } from "@/context/AppShellContext";
+import { READER_ASK_EVENT, ReaderPane } from "@/components/reading/ReaderPane";
 import type { FilePreviewSource } from "@/components/chat/preview/previewerFor";
 import type { LLMSelection, StreamEvent } from "@/lib/unified-ws";
 import {
@@ -76,6 +82,8 @@ import { readChatLaunchIntent } from "@/lib/chat-launch-intent";
 import { useAttachmentLimits } from "@/lib/attachment-limits";
 import { useChatAutoScroll } from "@/hooks/useChatAutoScroll";
 import { useMeasuredHeight } from "@/hooks/useMeasuredHeight";
+import { useSetupSync } from "@/hooks/useSetupSync";
+import { consumePendingPrompt } from "@/lib/pending-prompt";
 import {
   loadCapabilityPlaygroundConfigs,
   resolveCapabilityPlaygroundConfig,
@@ -212,11 +220,8 @@ interface CapabilityDef {
   icon: LucideIcon;
   allowedTools: ToolName[];
   defaultTools: ToolName[];
-  // Loop-engine capabilities run on the chat agent loop (solve / mastery) rather
-  // than a bespoke pipeline. They are collapsed into the "More" flyout in the
-  // capability picker instead of listed directly. Driven by the loop-capability
-  // registry on the backend; mirrored here as a static flag.
-  loopEngine?: boolean;
+  /** Collapse this capability into the picker's secondary "More" flyout. */
+  secondary?: boolean;
 }
 
 const CAPABILITIES: CapabilityDef[] = [
@@ -244,7 +249,7 @@ const CAPABILITIES: CapabilityDef[] = [
     icon: BrainCircuit,
     allowedTools: ["web_search", "code_execution", "reason"],
     defaultTools: ["web_search", "code_execution", "reason"],
-    loopEngine: true,
+    secondary: true,
   },
   {
     value: "deep_question",
@@ -261,6 +266,7 @@ const CAPABILITIES: CapabilityDef[] = [
     icon: Microscope,
     allowedTools: ["web_search", "paper_search", "code_execution"],
     defaultTools: ["web_search", "paper_search", "code_execution"],
+    secondary: true,
   },
   {
     value: "visualize",
@@ -281,7 +287,14 @@ const CAPABILITIES: CapabilityDef[] = [
     // These are only the extra optional tools the tutor may also reach for.
     allowedTools: ["web_search", "code_execution"],
     defaultTools: [],
-    loopEngine: true,
+  },
+  {
+    value: "immersive_reading",
+    label: "Immersive Reading",
+    description: "Read a document with the assistant, cited line by line",
+    icon: BookOpenText,
+    allowedTools: ["web_search", "code_execution", "reason"],
+    defaultTools: [],
   },
 ];
 
@@ -293,6 +306,10 @@ interface KnowledgeBase {
     type?: string;
     /** Backend of a connected subagent: "claude_code" | "codex" | "partner". */
     agent_kind?: string;
+    rag_provider?: string;
+  };
+  statistics?: {
+    rag_provider?: string;
   };
 }
 
@@ -378,6 +395,11 @@ export default function ChatPage() {
   const stream = useChatStream();
 
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [knowledgeBasesLoaded, setKnowledgeBasesLoaded] = useState(false);
+  const availableKbNames = useMemo(
+    () => new Set(knowledgeBases.map((kb) => kb.name)),
+    [knowledgeBases],
+  );
   // A connected agent to preselect once it loads, from `?agent=<name>` on the
   // URL (the partner list page links here to drop straight into a chat with a
   // partner). Captured once at first client render — the URL is rewritten to
@@ -580,6 +602,7 @@ export default function ChatPage() {
   // Session-loading overlay: shown while navigating from chat-history →
   // session detail. Holds an AbortController so the user can cancel.
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionLoadFailed, setSessionLoadFailed] = useState(false);
   const loadAbortRef = useRef<AbortController | null>(null);
   // Bridge ref: ``ChatComposer`` writes a prefill function into this on
   // mount; ``ChatMessageList`` reads it via ``handlePrefillComposer`` so an
@@ -588,6 +611,23 @@ export default function ChatPage() {
   const handlePrefillComposer = useCallback((text: string) => {
     prefillInputRef.current?.(text);
   }, []);
+
+  useEffect(() => {
+    const pending = consumePendingPrompt();
+    if (!pending) return;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const attempt = () => {
+      if (prefillInputRef.current) {
+        handlePrefillComposer(pending);
+        return;
+      }
+      if (attempts++ >= 20) return;
+      timer = setTimeout(attempt, 100);
+    };
+    timer = setTimeout(attempt, 0);
+    return () => clearTimeout(timer);
+  }, [handlePrefillComposer]);
 
   // A clickable node inside an inlined visualization SVG (data-prompt) — and the
   // html widget's sendPrompt bridge — dispatch this window event; mirror it into
@@ -601,6 +641,27 @@ export default function ChatPage() {
     return () => window.removeEventListener("dt:visualize-prompt", onVizPrompt);
   }, [handlePrefillComposer]);
 
+  useEffect(() => {
+    const onReaderAsk = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          quote?: string;
+          locator?: number;
+          unit?: string;
+        }>
+      ).detail;
+      const quote = (detail?.quote || "").trim();
+      if (!quote) return;
+      const unit = detail?.unit || "page";
+      const where = detail?.locator ? ` (${unit} ${detail.locator})` : "";
+      handlePrefillComposer(
+        `> ${quote}\n\n${t("Explain this passage")}${where}: `,
+      );
+    };
+    window.addEventListener(READER_ASK_EVENT, onReaderAsk);
+    return () => window.removeEventListener(READER_ASK_EVENT, onReaderAsk);
+  }, [handlePrefillComposer, t]);
+
   const activeCap = useMemo(
     () => getCapability(state.activeCapability),
     [state.activeCapability],
@@ -608,6 +669,7 @@ export default function ChatPage() {
   const isQuizMode = activeCap.value === "deep_question";
   const isVisualizeMode = activeCap.value === "visualize";
   const isResearchMode = activeCap.value === "deep_research";
+  const isReadingMode = activeCap.value === "immersive_reading";
   const capabilityNeedsConfig = isQuizMode || isVisualizeMode || isResearchMode;
 
   // Edit-invalidates-confirm wrappers — flipping any field after the user
@@ -659,6 +721,7 @@ export default function ChatPage() {
       ensureActivityPanelOpen();
     }
   }, [capabilityNeedsConfig, ensureActivityPanelOpen]);
+  useSetupSync(stream.messages);
   const hasMessages = stream.messages.length > 0;
   // Time-of-day greeting: seeded once on mount from the user's local clock so
   // the heading stays stable while they're on the page. State (not useMemo)
@@ -966,12 +1029,12 @@ export default function ChatPage() {
     loadAbortRef.current?.abort();
     loadAbortRef.current = null;
     setSessionLoading(false);
+    setSessionLoadFailed(false);
     navigateToHome();
   }, [navigateToHome]);
 
   /**
-   * Shared helper: kick off a load. The user can cancel via the ✕ button;
-   * otherwise the loading overlay stays until the API responds (no timeout).
+   * Shared helper: kick off a bounded, retryable session load.
    *
    * A session we already hold in memory is painted right away and refreshed
    * in the background — switching back to a conversation read earlier in this
@@ -985,9 +1048,17 @@ export default function ChatPage() {
       loadAbortRef.current = ctrl;
       const cached = showCachedSession(sid);
       setSessionLoading(!cached);
+      setSessionLoadFailed(false);
+
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        ctrl.abort();
+      }, SESSION_LOAD_TIMEOUT_MS);
 
       void loadSession(sid, { signal: ctrl.signal, revalidate: cached })
         .then(() => {
+          clearTimeout(timeout);
           if (!ctrl.signal.aborted) {
             loadAbortRef.current = null;
             setSessionLoading(false);
@@ -1014,23 +1085,24 @@ export default function ChatPage() {
           }
         })
         .catch(() => {
-          if (!ctrl.signal.aborted) {
-            loadAbortRef.current = null;
-            setSessionLoading(false);
-            // A background refresh that fails leaves the cached copy on
-            // screen; only a cold open has nothing to fall back to.
-            if (!cached) navigateToHome();
-          }
+          clearTimeout(timeout);
+          const surface = shouldSurfaceLoadFailure({
+            aborted: ctrl.signal.aborted,
+            timedOut,
+            cached,
+          });
+          if (!surface) return;
+          loadAbortRef.current = null;
+          setSessionLoading(false);
+          setSessionLoadFailed(true);
         });
     },
-    [
-      loadSession,
-      navigateToHome,
-      showCachedSession,
-      scrollToBottom,
-      shouldAutoScrollRef,
-    ],
+    [loadSession, showCachedSession, scrollToBottom, shouldAutoScrollRef],
   );
+
+  const retrySessionLoad = useCallback(() => {
+    if (sessionIdParam) startSessionLoad(sessionIdParam);
+  }, [sessionIdParam, startSessionLoad]);
 
   // Initial mount — load the session from the URL.
   // Uses a ref-based flag so Strict Mode double-mount doesn't break the flow:
@@ -1062,12 +1134,14 @@ export default function ChatPage() {
     if (sessionIdParam) {
       if (sessionIdParam === state.sessionId) {
         setSessionLoading(false);
+        setSessionLoadFailed(false);
         return;
       }
       startSessionLoad(sessionIdParam);
     } else {
       newSession();
       setSessionLoading(false);
+      setSessionLoadFailed(false);
     }
   }, [sessionIdParam, startSessionLoad, newSession, state.sessionId]);
 
@@ -1087,7 +1161,9 @@ export default function ChatPage() {
       try {
         const list = await listKnowledgeBases({ force: options?.force });
         setKnowledgeBases(list);
+        setKnowledgeBasesLoaded(true);
       } catch {
+        setKnowledgeBasesLoaded(false);
         setKnowledgeBases([]);
       }
     },
@@ -1107,6 +1183,13 @@ export default function ChatPage() {
   useEffect(() => {
     void refreshKnowledgeBases();
   }, [refreshKnowledgeBases]);
+
+  useEffect(() => {
+    if (!knowledgeBasesLoaded) return;
+    const selected = state.knowledgeBases;
+    const pruned = selected.filter((name) => availableKbNames.has(name));
+    if (pruned.length !== selected.length) setKBs(pruned);
+  }, [availableKbNames, knowledgeBasesLoaded, setKBs, state.knowledgeBases]);
 
   const refreshUserEnabledTools = useCallback(
     async (options?: { force?: boolean }) => {
@@ -1362,8 +1445,11 @@ export default function ChatPage() {
   // Fold all messages once per stream.messages change to power the
   // SessionActivityPanel on the right (tools, KBs, space refs, attachments).
   const sessionActivity = useMemo(
-    () => buildSessionActivity(stream.messages),
-    [stream.messages],
+    () =>
+      buildSessionActivity(stream.messages, {
+        availableKbNames: knowledgeBasesLoaded ? availableKbNames : undefined,
+      }),
+    [availableKbNames, knowledgeBasesLoaded, stream.messages],
   );
 
   // Context-window readout for the composer chip: the newest turn that was
@@ -1908,6 +1994,13 @@ export default function ChatPage() {
           messages={stream.messages}
           viewerPanelRef={viewerPanelRef}
         />
+        <div className="relative h-full overflow-hidden">
+          <div
+            data-reader-open={isReadingMode ? "true" : "false"}
+            className="dt-reader-shell"
+          >
+            {isReadingMode && <ReaderPane onClose={() => setCapability("")} />}
+          </div>
         <div
           // When the preview drawer is open AND the viewport is wide enough,
           // push the chat content to the left by the drawer's width so the two
@@ -1918,6 +2011,7 @@ export default function ChatPage() {
           // hand-tune it without fighting Tailwind's arbitrary-value parser.
           data-preview-open={previewSource ? "true" : "false"}
           data-viewer-open={viewerPanelOpen ? "true" : "false"}
+          data-reader-open={isReadingMode ? "true" : "false"}
           className="chat-preview-shell flex h-full flex-col overflow-hidden bg-[var(--background)]"
         >
           <div className="mx-auto flex w-full max-w-[960px] flex-wrap items-center justify-between gap-x-3 gap-y-1.5 px-6 pt-3 pb-0">
@@ -1987,10 +2081,14 @@ export default function ChatPage() {
             </div>
           </div>
           <div className="flex w-full flex-1 min-h-0 flex-col">
-            {sessionLoading ? (
+            {sessionLoading || sessionLoadFailed ? (
               <div className="flex w-full flex-1 min-h-0 justify-center px-6">
                 <div className="h-full w-full max-w-[960px]">
-                  <SessionLoadingView onCancel={cancelSessionLoad} />
+                  <SessionLoadingView
+                    onCancel={cancelSessionLoad}
+                    failed={sessionLoadFailed}
+                    onRetry={retrySessionLoad}
+                  />
                 </div>
               </div>
             ) : !hasMessages ? (
@@ -2062,6 +2160,9 @@ export default function ChatPage() {
                       onEditMessage={editMessage}
                       onSwitchBranch={switchBranch}
                       onSubmitUserReply={submitUserReply}
+                      availableKbNames={
+                        knowledgeBasesLoaded ? availableKbNames : undefined
+                      }
                     />
                     <div
                       ref={messagesEndRef}
@@ -2174,7 +2275,7 @@ export default function ChatPage() {
             {!hasMessages ? (
               <StarterSuggestions
                 onPick={(prompt) => void handleSend(prompt)}
-                disabled={state.isStreaming}
+                disabled={stream.isStreaming}
               />
             ) : null}
             <div
@@ -2238,6 +2339,7 @@ export default function ChatPage() {
             onClose={() => setViewerOpen(false)}
             onAutoOpen={() => setViewerOpen(true)}
           />
+        </div>
         </div>
       </GeogebraTabProvider>
     </QuizFollowupProvider>

@@ -38,12 +38,10 @@ dependencies = [
     "prompt_toolkit>=3.0.36",
     "pyte>=0.8.1",  # in-memory terminal emulator: scrape Claude Code's /model TUI on sync
     # MCP client. Core rather than a `partners`-only extra (issue #792): the
-    # connection manager and the built-in PageIndex MCP server are injected on
-    # any turn where a PageIndex API key is configured, so a plain
-    # `pip install deeptutor` has to be able to import `mcp` — otherwise the
-    # connection task dies with ModuleNotFoundError and every turn stalls for
-    # the full connect timeout.
+    # default chat/tool surface includes configurable MCP servers, so a plain
+    # install must be able to connect them without an optional extra.
     "mcp>=1.26.0,<2.0.0",
+    "pageindex>=0.2.10,<0.3.0",
     # Full app dependencies included by default for `pip install deeptutor`.
     "anthropic>=0.30.0",
     "dashscope>=1.14.0",
@@ -94,6 +92,7 @@ cli = [
     "dashscope>=1.14.0",
     "perplexityai>=0.1.0",
     "oauth-cli-kit>=0.1.1",
+    "pageindex>=0.2.10,<0.3.0",
     # RAG (LlamaIndex)
     "llama-index>=0.14.12",
     "llama-index-retrievers-bm25>=0.7.1,<0.8.0",
@@ -120,9 +119,13 @@ cli = [
 # CLI) for in-app browser login and CLI-driven agent tools.
 # Upper-bounded on purpose: the provider probes the SDK for its turn-limit
 # and permission-mode kwargs, and a minor bump that renames them would make
-# every options build fail. Not in `all` — it vendors a ~130 MB headless CLI
-# and chat works over plain HTTP without it.
-codebuddy = ["codebuddy-agent-sdk>=0.1.24,<0.2"]
+# every options build fail — codebuddy_provider fails closed with a clear
+# message rather than running the agent unrestricted. The floor tracks the
+# published series: there is no 0.1.24 on PyPI (0.1.x stops at 0.1.19), so the
+# old `>=0.1.24,<0.2` range was unsatisfiable and any resolver rejected it.
+# Not in `all` — it vendors a ~130 MB headless CLI and chat works over plain
+# HTTP without it.
+codebuddy = ["codebuddy-agent-sdk>=0.3,<0.4"]
 
 # Compatibility extra for source installs and older docs. These packages are
 # already included in the public `deeptutor` wheel.
@@ -231,14 +234,15 @@ graphrag = ["graphrag>=3.0.1,<4.0.0; python_version < '3.14'"]
 # isolated in services/rag/pipelines/lightrag/engine.py. raganything pulls
 # `mineru[core]`, which is capped at python <3.14, so this carries the same
 # `python_version` marker as graphrag to avoid a silent backtrack/downgrade on
-# 3.14+. Floor is 1.0.1 (no 1.0.0 was ever published) with a <2.0.0 ceiling so
+# 3.14+. Floor is 1.2.5, the first release carrying the ``lightrag_kwargs``
+# passthrough used by the indexing settings, with a <2.0.0 ceiling so
 # a future API-breaking 2.x isn't pulled in silently. lightrag-hku is pinned
 # separately because raganything declares it unpinned: 1.5.x moved
 # `role_llm_funcs` out of the dataclass fields, which breaks raganything's
 # multimodal processors (KeyError: 'role_llm_funcs'). Cap at <1.5.0 until
 # raganything catches up with the 1.5 role-based LLM refactor.
 rag-lightrag = [
-    "raganything>=1.0.1,<2.0.0; python_version < '3.14'",
+    "raganything>=1.2.5,<2.0.0; python_version < '3.14'",
     "lightrag-hku>=1.4.0,<1.5.0; python_version < '3.14'",
 ]
 

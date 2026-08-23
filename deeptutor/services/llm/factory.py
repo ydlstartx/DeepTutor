@@ -352,6 +352,7 @@ async def complete(
     max_retries: int = DEFAULT_MAX_RETRIES,
     retry_delay: float = DEFAULT_RETRY_DELAY,
     exponential_backoff: bool = DEFAULT_EXPONENTIAL_BACKOFF,
+    allow_image_fallback: bool | None = None,
     **kwargs: Any,
 ) -> str:
     caller_extra_headers = kwargs.pop("extra_headers", None)
@@ -384,6 +385,11 @@ async def complete(
     extra_kwargs = _sanitize_call_kwargs(
         binding=capability_binding, model=config.model, kwargs=kwargs
     )
+    image_fallback_enabled = (
+        not supports_vision(capability_binding, config.model)
+        if allow_image_fallback is None
+        else allow_image_fallback
+    )
 
     try:
         response = await provider.chat_with_retry(
@@ -391,7 +397,7 @@ async def complete(
             model=config.model,
             reasoning_effort=config.reasoning_effort,
             retry_delays=retry_delays,
-            allow_image_fallback=not supports_vision(capability_binding, config.model),
+            allow_image_fallback=image_fallback_enabled,
             **extra_kwargs,
         )
     except Exception as exc:
@@ -416,6 +422,7 @@ async def stream(
     max_retries: int = DEFAULT_MAX_RETRIES,
     retry_delay: float = DEFAULT_RETRY_DELAY,
     exponential_backoff: bool = DEFAULT_EXPONENTIAL_BACKOFF,
+    allow_image_fallback: bool | None = None,
     **kwargs: Any,
 ) -> AsyncGenerator[str, None]:
     caller_extra_headers = kwargs.pop("extra_headers", None)
@@ -454,6 +461,11 @@ async def stream(
     extra_kwargs = _sanitize_call_kwargs(
         binding=capability_binding, model=config.model, kwargs=kwargs
     )
+    image_fallback_enabled = (
+        not supports_vision(capability_binding, config.model)
+        if allow_image_fallback is None
+        else allow_image_fallback
+    )
 
     queue: asyncio.Queue[str | BaseException | None] = asyncio.Queue()
     saw_output = False
@@ -491,7 +503,7 @@ async def stream(
                 on_content_delta=_on_content_delta,
                 on_reasoning_delta=_on_reasoning_delta,
                 retry_delays=retry_delays,
-                allow_image_fallback=not supports_vision(capability_binding, config.model),
+                allow_image_fallback=image_fallback_enabled,
                 **extra_kwargs,
             )
             if in_think_block:

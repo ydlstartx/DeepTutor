@@ -42,6 +42,7 @@ export default function KnowledgePage() {
     connectObsidian,
     connectLinkedFolder,
     connectLightRagServer,
+    connectMarginNote4,
     connectIma,
     importExistingKb,
   } = useKnowledgeBases();
@@ -80,6 +81,11 @@ export default function KnowledgePage() {
   }, []);
   const openIma = useCallback(() => {
     setCreatePreset({ mode: "link", source: IMA_PROVIDER });
+    setCreateOpen(true);
+  }, []);
+  // Same deal for a MarginNote library.
+  const openMarginNote4 = useCallback(() => {
+    setCreatePreset({ mode: "link", source: "marginnote4" });
     setCreateOpen(true);
   }, []);
   // Lands on the Overview console unless deep-linked to a KB or an engine.
@@ -183,9 +189,9 @@ export default function KnowledgePage() {
   );
 
   const handleUpload = useCallback(
-    async (kbName: string, files: File[]) => {
+    async (kbName: string, files: File[], destSubdir?: string) => {
       try {
-        await uploadFiles(kbName, files);
+        await uploadFiles(kbName, files, undefined, destSubdir);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
         throw err;
@@ -269,6 +275,7 @@ export default function KnowledgePage() {
               onCreate={openCreate}
               onImport={() => setImportOpen(true)}
               onConnectObsidian={openObsidian}
+              onConnectMarginNote4={openMarginNote4}
             />
           ) : view === "engine" && selectedProvider ? (
             <EngineDetail
@@ -294,6 +301,7 @@ export default function KnowledgePage() {
               onCreate={openCreate}
               onImport={() => setImportOpen(true)}
               onConnectObsidian={openObsidian}
+              onConnectMarginNote4={openMarginNote4}
             />
           ) : (
             <KnowledgeBaseDetail
@@ -325,6 +333,7 @@ export default function KnowledgePage() {
         onConnectLinkedFolder={connectLinkedFolder}
         onConnectObsidian={connectObsidian}
         onConnectLightRagServer={connectLightRagServer}
+        onConnectMarginNote4={connectMarginNote4}
         onConnectIma={connectIma}
         initialMode={createPreset?.mode}
         initialSource={createPreset?.source}

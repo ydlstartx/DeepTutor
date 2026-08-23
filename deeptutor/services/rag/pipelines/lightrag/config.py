@@ -22,14 +22,19 @@ Decoupling notes:
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 import importlib.util
 import logging
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from .worker import OwnerLoopBridge
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # LightRAG's native retrieval modes. ``hybrid`` (KG + vector) is the safest
 # general default and matches the shared per-KB ``search_mode`` default.
@@ -49,6 +54,18 @@ Do not add Markdown fences, explanations, or introductory text."""
 # Conservative cap for the embedding wrapper when the model doesn't advertise one.
 _DEFAULT_MAX_TOKEN_SIZE = 8192
 
+# Keep retries at the LightRAG adapter boundary so RAG-Anything receives one
+# predictable policy for both text and vision calls. Provider retries are disabled
+# on every attempt to prevent the two retry layers from multiplying.
+_ADAPTER_MAX_ATTEMPTS = 3
+_ADAPTER_RETRY_DELAYS_SECONDS = (1.0, 2.0)
+_ADAPTER_MAX_RETRY_DELAY_SECONDS = 60.0
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
+_HTTP_STATUS_PATTERN = re.compile(
+    r"\b(?:http(?: status)?|status(?: code)?|error code)\s*[:=-]?\s*(\d{3})\b",
+    re.I,
+)
+
 
 class LightRagNotAvailableError(RuntimeError):
     """Raised when the optional ``raganything`` dependency is not installed."""
@@ -56,6 +73,77 @@ class LightRagNotAvailableError(RuntimeError):
 
 class LightRagNotConfiguredError(RuntimeError):
     """Raised when DeepTutor's LLM / embedding config can't back LightRAG."""
+
+
+def _http_status_code(exc: Exception) -> int | None:
+    """Return a structured or safely normalized HTTP status for an LLM error."""
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        return status_code
+
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if isinstance(response_status, int) and not isinstance(response_status, bool):
+        return response_status
+
+    # The Codex provider currently returns a safe, normalized ``HTTP NNN``
+    # message through LLMAPIError instead of preserving the status attribute.
+    is_llm_api_error = any(cls.__name__ == "LLMAPIError" for cls in type(exc).__mro__)
+    message = getattr(exc, "message", None)
+    if is_llm_api_error and isinstance(message, str):
+        match = _HTTP_STATUS_PATTERN.search(message)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def _retry_classification(exc: Exception) -> tuple[bool, str]:
+    """Classify retryability without inspecting or logging provider payloads."""
+    from deeptutor.services.llm.request_compat import is_transient_transport_error
+
+    status_code = _http_status_code(exc)
+    if status_code is not None:
+        return status_code in _RETRYABLE_HTTP_STATUS_CODES, f"http_{status_code}"
+    if is_transient_transport_error(exc):
+        return True, "transport"
+    return False, "non_retryable"
+
+
+def _retry_delay_seconds(exc: Exception, scheduled_delay: float) -> float:
+    """Honor a safe Retry-After value without allowing unbounded sleeps."""
+    from deeptutor.services.llm.error_mapping import retry_after_seconds
+
+    requested_delay = retry_after_seconds(exc)
+    if requested_delay is None:
+        return scheduled_delay
+    return min(requested_delay, _ADAPTER_MAX_RETRY_DELAY_SECONDS)
+
+
+async def _run_adapter_with_retry(
+    request: Callable[[], Awaitable[_T]],
+    *,
+    io_bridge: OwnerLoopBridge | None,
+) -> _T:
+    """Run one adapter request with bounded, non-multiplying retries."""
+    for attempt in range(1, _ADAPTER_MAX_ATTEMPTS + 1):
+        try:
+            if io_bridge is not None:
+                return await io_bridge.run(request)
+            return await request()
+        except Exception as exc:
+            should_retry, status = _retry_classification(exc)
+            if not should_retry or attempt == _ADAPTER_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "LightRAG adapter retry attempt=%d exception=%s status=%s",
+                attempt,
+                type(exc).__name__,
+                status,
+            )
+            delay = _retry_delay_seconds(exc, _ADAPTER_RETRY_DELAYS_SECONDS[attempt - 1])
+            await asyncio.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
 def is_lightrag_available() -> bool:
@@ -97,13 +185,42 @@ def query_kwargs_from_settings() -> dict:
 
 
 def indexing_kwargs_from_settings() -> dict:
-    """LightRAG construction knobs that control indexing throughput/cost."""
+    """``RAGAnythingConfig`` batch-processing knobs from runtime settings.
+
+    Only ``max_concurrent_files`` is exposed for now (issue #640); the config
+    object accepts several other batch/context knobs we deliberately leave on
+    RAG-Anything's own defaults. Empty on any read error, so a bad settings
+    file falls back to RAG-Anything's built-in default of 1.
+    """
+    try:
+        from deeptutor.services.config import load_lightrag_settings
+
+        settings = load_lightrag_settings()
+        return {"max_concurrent_files": int(settings.get("max_concurrent_files", 1))}
+    except Exception:
+        return {}
+
+
+def lightrag_kwargs_from_settings() -> dict:
+    """Extra kwargs forwarded to LightRAG's own constructor via RAG-Anything's
+    ``lightrag_kwargs`` passthrough.
+
+    ``llm_model_max_async`` bounds how many concurrent LLM calls LightRAG's
+    internal priority queue issues (covers both query and entity-extraction
+    traffic, since both ride the same wrapped ``llm_model_func``).
+    ``entity_extract_max_gleaning`` controls how many extra extraction passes
+    LightRAG runs per chunk to recover entities/relations the first pass
+    missed. Empty on any read error, so a bad settings file falls back to
+    LightRAG's own built-in defaults.
+    """
     try:
         from deeptutor.services.config import load_lightrag_settings
 
         settings = load_lightrag_settings()
         return {
-            "llm_model_max_async": int(settings.get("llm_concurrency", 8)),
+            "llm_model_max_async": int(
+                settings.get("llm_model_max_async", settings.get("llm_concurrency", 8))
+            ),
             "embedding_func_max_async": int(settings.get("embedding_concurrency", 2)),
             "max_parallel_insert": int(settings.get("multimodal_concurrency", 8)),
             "entity_extract_max_gleaning": int(settings.get("entity_extract_max_gleaning", 0)),
@@ -185,15 +302,18 @@ def build_llm_model_func(*, io_bridge: OwnerLoopBridge | None = None):
                 system_prompt=system_prompt,
                 history_messages=request_history,
                 messages=messages,
+                max_retries=0,
+                allow_image_fallback=False,
             )
 
         original_prompt = prompt or ""
         original_history = list(history_messages or [])
 
         async def run_request(request_prompt: str, request_history: list[dict[str, Any]]):
-            if io_bridge is not None:
-                return await io_bridge.run(lambda: request(request_prompt, request_history))
-            return await request(request_prompt, request_history)
+            return await _run_adapter_with_retry(
+                lambda: request(request_prompt, request_history),
+                io_bridge=io_bridge,
+            )
 
         result = await run_request(original_prompt, original_history)
         is_extraction = (
@@ -248,9 +368,17 @@ def build_vision_model_func(*, io_bridge: OwnerLoopBridge | None = None):
                 history_messages=history_messages or [],
                 image_data=image_data,
                 messages=messages,
+                max_retries=0,
+                # Never strip the image and answer anyway. The provider's
+                # stage-2 fallback exists to salvage a text answer from a model
+                # that turns out not to take images, but here the *whole point*
+                # of the call is the image: a description produced without it is
+                # invented, and it would be indexed as fact. Fail the image
+                # instead, and let the caller log and skip it.
+                allow_image_fallback=False,
             )
 
-        return await io_bridge.run(request) if io_bridge is not None else await request()
+        return await _run_adapter_with_retry(request, io_bridge=io_bridge)
 
     return vision_model_func
 
@@ -303,6 +431,7 @@ __all__ = [
     "normalize_mode",
     "query_kwargs_from_settings",
     "indexing_kwargs_from_settings",
+    "lightrag_kwargs_from_settings",
     "build_llm_model_func",
     "build_vision_model_func",
     "build_embedding_func",
