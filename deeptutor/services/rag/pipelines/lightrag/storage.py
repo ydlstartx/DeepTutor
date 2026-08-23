@@ -24,12 +24,17 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from xml.etree.ElementTree import ParseError
+
+from defusedxml import ElementTree as DefusedElementTree
+from defusedxml.common import DefusedXmlException
 
 from deeptutor.services.file_io import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
 META_FILENAME = "meta.json"
+GRAPH_FILENAME = "graph_chunk_entity_relation.graphml"
 PROVIDER = "lightrag"
 
 # Glob patterns LightRAG writes once it has actually built chunk/vector data.
@@ -39,6 +44,17 @@ _OUTPUT_GLOBS = ("vdb_*.json", "kv_store_text_chunks.json")
 _DOC_STATUS_FILENAME = "kv_store_doc_status.json"
 _SUCCESS_STATUSES = {"processed", "completed", "done", "success", "indexed"}
 _FAILED_STATUSES = {"failed", "error"}
+
+
+def validate_graphml_file(path: Path) -> None:
+    """Parse a GraphML file and verify its minimal document structure."""
+    tree = DefusedElementTree.parse(path)
+    root = tree.getroot()
+    root_name = str(root.tag).rsplit("}", 1)[-1]
+    if root_name != "graphml":
+        raise ValueError(f"expected <graphml> root, found <{root_name}>")
+    if not any(str(child.tag).rsplit("}", 1)[-1] == "graph" for child in root):
+        raise ValueError("GraphML document has no <graph> element")
 
 
 def working_dir(root_dir: Path) -> Path:
@@ -66,6 +82,31 @@ def has_output(root_dir: Path | None) -> bool:
             except OSError:
                 continue
     return False
+
+
+def graph_integrity_error(root_dir: Path | None) -> str | None:
+    """Describe an unreadable/incomplete GraphML store, if one exists.
+
+    LightRAG treats a missing graph as an empty graph. That fallback is safe
+    for a fresh working directory, but dangerous when KV/vector output already
+    proves that documents were indexed: silently continuing would mix an empty
+    knowledge graph with populated companion stores.
+    """
+    if root_dir is None:
+        return None
+    root = Path(root_dir)
+    graph_path = root / GRAPH_FILENAME
+    if not graph_path.exists():
+        if has_output(root):
+            return f"missing GraphML file: {graph_path}"
+        return None
+    try:
+        if not graph_path.is_file() or graph_path.stat().st_size == 0:
+            return f"empty GraphML file: {graph_path}"
+        validate_graphml_file(graph_path)
+    except (DefusedXmlException, OSError, ParseError, ValueError) as exc:
+        return f"invalid GraphML file {graph_path}: {exc}"
+    return None
 
 
 def _doc_status_has_success(root_dir: Path) -> bool | None:
@@ -200,12 +241,15 @@ def write_meta(root_dir: Path, vector_storage: str = "nano") -> None:
 
 
 __all__ = [
+    "GRAPH_FILENAME",
     "META_FILENAME",
     "PROVIDER",
     "document_error",
     "failure_summary",
+    "graph_integrity_error",
     "has_output",
     "read_vector_storage",
+    "validate_graphml_file",
     "working_dir",
     "write_meta",
 ]

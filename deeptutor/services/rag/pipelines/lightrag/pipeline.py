@@ -133,6 +133,15 @@ class LightRagPipeline:
         except Exception as exc:  # pragma: no cover - best-effort
             self.logger.warning("Could not clean up failed version dir %s: %s", root_dir, exc)
 
+    @staticmethod
+    def _raise_if_corrupt_index(root_dir: Path) -> None:
+        problem = storage.graph_integrity_error(root_dir)
+        if problem:
+            raise RuntimeError(
+                "LightRAG index is corrupted and cannot be updated safely: "
+                f"{problem}. Rebuild the knowledge base before adding documents."
+            )
+
     async def _ingest(
         self,
         rag: Any,
@@ -202,6 +211,8 @@ class LightRagPipeline:
         later queries through ``_get_rag`` will reopen.
         """
 
+        if storage.has_output(working_dir):
+            self._raise_if_corrupt_index(working_dir)
         engine_id = storage.read_vector_storage(working_dir)
 
         async def job(io_bridge: OwnerLoopBridge) -> int:
@@ -244,6 +255,7 @@ class LightRagPipeline:
                 await self._drop_rag(root_dir)
                 self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
+            self._raise_if_corrupt_index(root_dir)
             storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
             self.logger.info("KB '%s' initialized with LightRAG (%d docs)", kb_name, count)
             return True
@@ -292,6 +304,7 @@ class LightRagPipeline:
                     await self._drop_rag(root_dir)
                     self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
+            self._raise_if_corrupt_index(root_dir)
             storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
             self.logger.info("Added %d doc(s) to LightRAG KB '%s'", count, kb_name)
             return True
@@ -323,6 +336,21 @@ class LightRagPipeline:
                 "sources": [],
                 "provider": storage.PROVIDER,
                 "needs_reindex": True,
+            }
+
+        graph_problem = storage.graph_integrity_error(root_dir)
+        if graph_problem:
+            return {
+                "query": query,
+                "answer": (
+                    "This LightRAG index is corrupted and cannot be queried safely. "
+                    f"{graph_problem}. Rebuild the knowledge base before querying."
+                ),
+                "content": "",
+                "sources": [],
+                "provider": storage.PROVIDER,
+                "needs_reindex": True,
+                "error_type": "corrupt_index",
             }
 
         mode = self._resolve_mode(kb_name, kwargs)

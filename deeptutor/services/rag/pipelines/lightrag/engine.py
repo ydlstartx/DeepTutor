@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 from pathlib import Path
+from stat import S_IMODE
+import tempfile
 from typing import Any
 
 from .config import (
@@ -53,6 +56,167 @@ DEFAULT_VECTOR_STORAGE = "nano"
 # embedding client's entire retry budget (6 attempts × 60s + backoff ≈ 390s).
 _LIGHTRAG_LLM_TIMEOUT_S = 900
 _LIGHTRAG_EMBEDDING_TIMEOUT_S = 240
+
+
+def _is_xml_10_char(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        codepoint in {0x09, 0x0A, 0x0D}
+        or 0x20 <= codepoint <= 0xD7FF
+        or 0xE000 <= codepoint <= 0xFFFD
+        or 0x10000 <= codepoint <= 0x10FFFF
+    )
+
+
+def _sanitize_xml_text(value: str) -> tuple[str, int]:
+    """Repair characters that XML 1.0 cannot serialize.
+
+    JSON decoding commonly turns an unescaped LaTeX ``\\beta`` / ``\\frac``
+    into backspace/form-feed plus the remaining letters. Recover those two
+    prefixes; replace every other illegal code point visibly instead of
+    silently dropping source text.
+    """
+    replacements = {"\x08": r"\b", "\x0c": r"\f"}
+    parts: list[str] = []
+    changed = 0
+    for char in value:
+        if _is_xml_10_char(char):
+            parts.append(char)
+            continue
+        parts.append(replacements.get(char, "\ufffd"))
+        changed += 1
+    return "".join(parts), changed
+
+
+def _sanitize_xml_value(value: Any) -> tuple[Any, int]:
+    if isinstance(value, str):
+        return _sanitize_xml_text(value)
+    if isinstance(value, list):
+        cleaned: list[Any] = []
+        changed = 0
+        for item in value:
+            next_item, item_changed = _sanitize_xml_value(item)
+            cleaned.append(next_item)
+            changed += item_changed
+        return cleaned, changed
+    if isinstance(value, tuple):
+        cleaned_tuple: list[Any] = []
+        changed = 0
+        for item in value:
+            next_item, item_changed = _sanitize_xml_value(item)
+            cleaned_tuple.append(next_item)
+            changed += item_changed
+        return tuple(cleaned_tuple), changed
+    if isinstance(value, dict):
+        cleaned_dict: dict[Any, Any] = {}
+        changed = 0
+        for key, item in value.items():
+            next_key, key_changed = _sanitize_xml_value(key)
+            next_item, item_changed = _sanitize_xml_value(item)
+            cleaned_dict[next_key] = next_item
+            changed += key_changed + item_changed
+        return cleaned_dict, changed
+    return value, 0
+
+
+def _sanitize_graph_for_xml(graph: Any) -> int:
+    """Make graph ids and attributes XML-safe before GraphML persistence."""
+    import networkx as nx
+
+    changed = 0
+    relabel: dict[Any, Any] = {}
+    for node in graph.nodes:
+        if not isinstance(node, str):
+            continue
+        clean_node, node_changed = _sanitize_xml_text(node)
+        if not node_changed:
+            continue
+        if clean_node in graph and clean_node != node:
+            raise ValueError(f"XML sanitization would merge graph nodes: {node!r}")
+        relabel[node] = clean_node
+        changed += node_changed
+    if relabel:
+        nx.relabel_nodes(graph, relabel, copy=False)
+
+    attribute_maps = [graph.graph]
+    attribute_maps.extend(data for _, data in graph.nodes(data=True))
+    attribute_maps.extend(data for *_edge, data in graph.edges(data=True))
+    for attributes in attribute_maps:
+        for key, value in tuple(attributes.items()):
+            clean_value, value_changed = _sanitize_xml_value(value)
+            if value_changed:
+                attributes[key] = clean_value
+                changed += value_changed
+    return changed
+
+
+def _atomic_write_nx_graph(graph: Any, file_name: str, workspace: str = "_") -> None:
+    """Write a verified GraphML file without exposing a partial target."""
+    import networkx as nx
+
+    target = Path(file_name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target_mode = S_IMODE(target.stat().st_mode) if target.exists() else None
+    changed = _sanitize_graph_for_xml(graph)
+    if changed:
+        logger.warning(
+            "[%s] Repaired %d XML-invalid character(s) before GraphML persistence",
+            workspace,
+            changed,
+        )
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        logger.info(
+            "[%s] Writing graph with %d nodes, %d edges",
+            workspace,
+            graph.number_of_nodes(),
+            graph.number_of_edges(),
+        )
+        nx.write_graphml(graph, temporary)
+        # Import lazily to keep this adapter's optional-dependency surface
+        # small while sharing the same structural validation used on reads.
+        from .storage import validate_graphml_file
+
+        validate_graphml_file(temporary)
+        with open(temporary, "rb") as handle:
+            os.fsync(handle.fileno())
+        if target_mode is not None:
+            os.chmod(temporary, target_mode)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _install_atomic_networkx_storage() -> None:
+    """Patch the pinned LightRAG NetworkX backend with safe persistence."""
+    try:
+        from lightrag.kg.networkx_impl import NetworkXStorage
+    except (ImportError, ModuleNotFoundError):
+        return
+
+    if getattr(NetworkXStorage, "_deeptutor_atomic_graphml", False):
+        return
+
+    original_index_done = NetworkXStorage.index_done_callback
+
+    async def strict_index_done(self: Any) -> bool:
+        result = await original_index_done(self)
+        if result is False:
+            raise RuntimeError(
+                f"LightRAG failed to persist GraphML safely: {self._graphml_xml_file}"
+            )
+        return result
+
+    NetworkXStorage.write_nx_graph = staticmethod(_atomic_write_nx_graph)
+    NetworkXStorage.index_done_callback = strict_index_done
+    NetworkXStorage._deeptutor_atomic_graphml = True
 
 
 def _install_lean_faiss_storage() -> None:
@@ -183,6 +347,11 @@ def build_rag(
     """
     from raganything import RAGAnything, RAGAnythingConfig
 
+    # LightRAG's NetworkX backend writes GraphML directly to the live target
+    # and swallows write failures. Install DeepTutor's guarded writer before
+    # RAG-Anything constructs or loads any storage objects.
+    _install_atomic_networkx_storage()
+
     engine_id = (vector_storage or DEFAULT_VECTOR_STORAGE).strip().lower()
     if engine_id not in VECTOR_STORAGE_CLASSES:
         logger.warning(
@@ -242,8 +411,15 @@ def build_rag(
 
 async def insert(rag: Any, content_list: list[dict], *, file_name: str, doc_id: str) -> None:
     """Insert a pre-parsed ``content_list`` (multimodal-aware, no re-parsing)."""
+    cleaned_content, changed = _sanitize_xml_value(content_list)
+    if changed:
+        logger.warning(
+            "LightRAG: repaired %d XML-invalid character(s) in parsed content for %s",
+            changed,
+            file_name,
+        )
     await rag.insert_content_list(
-        content_list=content_list,
+        content_list=cleaned_content,
         file_path=file_name,
         doc_id=doc_id,
     )

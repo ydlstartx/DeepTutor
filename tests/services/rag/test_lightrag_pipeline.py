@@ -166,6 +166,27 @@ def test_storage_meta_and_has_output(tmp_path) -> None:
     assert meta["provider"] == "lightrag"
 
 
+def test_storage_reports_truncated_or_missing_graph_for_ready_index(tmp_path) -> None:
+    root = tmp_path / "version-1"
+    root.mkdir()
+    (root / "kv_store_doc_status.json").write_text(
+        json.dumps({"doc-1": {"status": "processed", "chunks_list": ["chunk-1"]}}),
+        encoding="utf-8",
+    )
+
+    assert "missing GraphML" in storage.graph_integrity_error(root)
+
+    graph = root / storage.GRAPH_FILENAME
+    graph.write_text("<graphml><graph>", encoding="utf-8")
+    assert "invalid GraphML" in storage.graph_integrity_error(root)
+
+    graph.write_text("<graphml><graph/></graphml>", encoding="utf-8")
+    assert storage.graph_integrity_error(root) is None
+
+    graph.write_text("<graphml/>", encoding="utf-8")
+    assert "no <graph>" in storage.graph_integrity_error(root)
+
+
 class _FakeEmbeddingFunc:
     """Stands in for ``lightrag.utils.EmbeddingFunc``.
 
@@ -484,6 +505,91 @@ def test_build_rag_skips_raganything_parser_install_check(monkeypatch) -> None:
     assert captured["config"].working_dir == "/tmp/kb-wd"
 
 
+def test_insert_repairs_xml_invalid_latex_control_characters() -> None:
+    captured: dict[str, object] = {}
+
+    class _Rag:
+        async def insert_content_list(self, **kwargs):
+            captured.update(kwargs)
+
+    original = [
+        {
+            "type": "text",
+            "text": "i_\x08eta and f=\x0crac{a}{b}",
+            "metadata": {"label": "bad\x00value"},
+        }
+    ]
+    asyncio.run(engine.insert(_Rag(), original, file_name="chapter.pdf", doc_id="chapter"))
+
+    cleaned = captured["content_list"]
+    assert cleaned[0]["text"] == r"i_\beta and f=\frac{a}{b}"
+    assert cleaned[0]["metadata"]["label"] == "bad\ufffdvalue"
+    assert original[0]["text"] == "i_\x08eta and f=\x0crac{a}{b}"
+
+
+def test_atomic_graphml_write_preserves_previous_file_on_failure(tmp_path, monkeypatch) -> None:
+    nx = pytest.importorskip("networkx")
+    target = tmp_path / storage.GRAPH_FILENAME
+    original = b"<graphml><graph/></graphml>"
+    target.write_bytes(original)
+
+    def fail_after_partial_write(_graph, path):
+        Path(path).write_text("<graphml><graph>", encoding="utf-8")
+        raise OSError("simulated interrupted write")
+
+    monkeypatch.setattr(nx, "write_graphml", fail_after_partial_write)
+    with pytest.raises(OSError, match="interrupted write"):
+        engine._atomic_write_nx_graph(nx.Graph(), str(target), "test")
+
+    assert target.read_bytes() == original
+    assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+
+def test_atomic_graphml_write_sanitizes_graph_and_produces_parseable_file(tmp_path) -> None:
+    nx = pytest.importorskip("networkx")
+    target = tmp_path / storage.GRAPH_FILENAME
+    target.write_text("<graphml><graph/></graphml>", encoding="utf-8")
+    target.chmod(0o664)
+    graph = nx.Graph()
+    graph.add_node("\x08eta", description="i_\x08eta")
+
+    engine._atomic_write_nx_graph(graph, str(target), "test")
+
+    loaded = nx.read_graphml(target)
+    assert list(loaded.nodes) == [r"\beta"]
+    assert loaded.nodes[r"\beta"]["description"] == r"i_\beta"
+    assert target.stat().st_mode & 0o777 == 0o664
+
+
+def test_networkx_storage_patch_propagates_upstream_save_failure(monkeypatch) -> None:
+    fake_lightrag = types.ModuleType("lightrag")
+    fake_lightrag.__path__ = []
+    fake_kg = types.ModuleType("lightrag.kg")
+    fake_kg.__path__ = []
+    fake_impl = types.ModuleType("lightrag.kg.networkx_impl")
+
+    class _Storage:
+        _graphml_xml_file = "/tmp/graph.graphml"  # noqa: S108
+
+        @staticmethod
+        def write_nx_graph(*_args):
+            raise AssertionError("old writer should be replaced")
+
+        async def index_done_callback(self):
+            return False
+
+    fake_impl.NetworkXStorage = _Storage
+    monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag)
+    monkeypatch.setitem(sys.modules, "lightrag.kg", fake_kg)
+    monkeypatch.setitem(sys.modules, "lightrag.kg.networkx_impl", fake_impl)
+
+    engine._install_atomic_networkx_storage()
+
+    assert _Storage.write_nx_graph is engine._atomic_write_nx_graph
+    with pytest.raises(RuntimeError, match="failed to persist GraphML"):
+        asyncio.run(_Storage().index_done_callback())
+
+
 def test_lightrag_query_initializes_raganything_before_aquery(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -561,6 +667,9 @@ def _stub_engine(monkeypatch, answer: str = "ANSWER") -> list[dict]:
             ),
             encoding="utf-8",
         )
+        (rag.working_dir / storage.GRAPH_FILENAME).write_text(
+            "<graphml><graph/></graphml>", encoding="utf-8"
+        )
 
     async def fake_query(rag, question, mode):
         return f"{answer}|{mode}"
@@ -635,6 +744,9 @@ def test_indexing_isolated_from_owner_loop_with_context_and_progress(tmp_path, m
                     }
                 ),
                 encoding="utf-8",
+            )
+            (self.working_dir / storage.GRAPH_FILENAME).write_text(
+                "<graphml><graph/></graphml>", encoding="utf-8"
             )
 
     def fake_build_rag(working_dir, *_a, io_bridge=None, **_):
@@ -909,6 +1021,63 @@ def test_search_needs_reindex_without_output(tmp_path) -> None:
     assert res["provider"] == "lightrag"
 
 
+def _write_ready_lightrag_store(root: Path, *, graph: str) -> None:
+    root.mkdir(parents=True)
+    (root / "kv_store_doc_status.json").write_text(
+        json.dumps(
+            {
+                "doc-1": {
+                    "status": "processed",
+                    "file_path": "chapter2.pdf",
+                    "chunks_list": ["chunk-1"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "vdb_chunks.json").write_text(json.dumps({"vectors": [[1.0]]}), encoding="utf-8")
+    (root / storage.GRAPH_FILENAME).write_text(graph, encoding="utf-8")
+    (root / storage.META_FILENAME).write_text(
+        json.dumps({"provider": "lightrag", "vector_storage": "nano"}),
+        encoding="utf-8",
+    )
+
+
+def test_add_documents_rejects_corrupt_existing_graph_before_loading_engine(
+    tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "kb" / "version-1"
+    _write_ready_lightrag_store(root, graph="<graphml><graph>")
+    _force_available(monkeypatch, True)
+    monkeypatch.setattr(
+        engine,
+        "build_rag",
+        lambda *_a, **_k: pytest.fail("corrupt graph must be rejected before engine load"),
+    )
+    pdf = tmp_path / "chapter3.pdf"
+    pdf.write_bytes(b"%PDF")
+
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    with pytest.raises(RuntimeError, match="corrupted.*Rebuild"):
+        asyncio.run(pipe.add_documents("kb", [str(pdf)]))
+
+
+def test_search_reports_corrupt_graph_as_needing_reindex(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "kb" / "version-1"
+    _write_ready_lightrag_store(root, graph="<graphml><graph>")
+    monkeypatch.setattr(
+        engine,
+        "build_rag",
+        lambda *_a, **_k: pytest.fail("corrupt graph must not be queried"),
+    )
+
+    result = asyncio.run(LightRagPipeline(kb_base_dir=str(tmp_path)).search("q", "kb"))
+
+    assert result["error_type"] == "corrupt_index"
+    assert result["needs_reindex"] is True
+    assert "Rebuild" in result["answer"]
+
+
 def test_search_not_configured_when_unavailable(tmp_path, monkeypatch) -> None:
     _force_available(monkeypatch, True)
     _stub_engine(monkeypatch)
@@ -1164,6 +1333,7 @@ def _stub_engine_counting(monkeypatch) -> list:
                 {doc_id: {"status": "processed", "file_path": file_name, "chunks_list": ["c1"]}}
             )
         )
+        (rag.working_dir / storage.GRAPH_FILENAME).write_text("<graphml><graph/></graphml>")
 
     async def fake_query(rag, question, mode):
         return "A"
