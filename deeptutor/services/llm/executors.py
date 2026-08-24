@@ -18,8 +18,7 @@ from deeptutor.services.llm.provider_registry import (
     strip_provider_prefix,
 )
 from deeptutor.services.llm.reasoning_params import (
-    default_reasoning_effort_for,
-    is_toggle_effort,
+    build_openai_compatible_reasoning_kwargs,
 )
 
 from .config import get_token_limit_kwargs
@@ -206,11 +205,14 @@ async def sdk_complete(
     token_kwargs = get_token_limit_kwargs(resolved_model, max_tokens_val)
     payload.update(token_kwargs)
 
-    effective_effort = reasoning_effort or default_reasoning_effort_for(
-        provider_name, resolved_model
+    payload.update(
+        build_openai_compatible_reasoning_kwargs(
+            spec=find_by_name(provider_name),
+            binding=provider_name,
+            model=resolved_model,
+            reasoning_effort=reasoning_effort,
+        )
     )
-    if effective_effort and not is_toggle_effort(effective_effort):
-        payload["reasoning_effort"] = effective_effort
     payload.update(kwargs)
     apply_model_overrides(find_by_name(provider_name), resolved_model, payload)
 
@@ -283,11 +285,14 @@ async def sdk_stream(
     token_kwargs = get_token_limit_kwargs(resolved_model, max_tokens_val)
     payload.update(token_kwargs)
 
-    effective_effort = reasoning_effort or default_reasoning_effort_for(
-        provider_name, resolved_model
+    payload.update(
+        build_openai_compatible_reasoning_kwargs(
+            spec=find_by_name(provider_name),
+            binding=provider_name,
+            model=resolved_model,
+            reasoning_effort=reasoning_effort,
+        )
     )
-    if effective_effort and not is_toggle_effort(effective_effort):
-        payload["reasoning_effort"] = effective_effort
     payload.update(kwargs)
     apply_model_overrides(find_by_name(provider_name), resolved_model, payload)
 

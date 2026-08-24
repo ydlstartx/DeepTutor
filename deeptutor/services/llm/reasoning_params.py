@@ -70,10 +70,10 @@ def _disable_thinking_by_default(provider_name: str, model_name: str) -> bool:
 def default_reasoning_effort_for(provider: str | None, model: str | None) -> str | None:
     """Return the implicit ``reasoning_effort`` for ``provider``/``model``, if any.
 
-    Used by callers that don't go through :func:`build_openai_compatible_reasoning_kwargs`
-    (currently the openai-SDK path in ``executors.py`` and the aiohttp fallback
-    in ``cloud_provider.py``). Returns ``None`` when no default applies — the
-    caller should leave the field unset in that case.
+    Used by :func:`build_openai_compatible_reasoning_kwargs` to keep implicit
+    defaults consistent across the OpenAI SDK and raw HTTP execution paths.
+    Returns ``None`` when no default applies — callers should leave the field
+    unset in that case.
 
     The single source of truth is :data:`_PROVIDER_DEFAULT_OFF_PATTERNS` so all
     three execution paths agree on which models need thinking disabled by default.
@@ -116,7 +116,9 @@ def build_openai_compatible_reasoning_kwargs(
             thinking_style = custom_style
             patterns = custom_patterns
 
-    resolved_effort = reasoning_effort
+    resolved_effort = reasoning_effort.strip() if isinstance(reasoning_effort, str) else None
+    if not resolved_effort:
+        resolved_effort = None
     if resolved_effort is None:
         if patterns and _matches(model_name, patterns):
             resolved_effort = "high"
@@ -135,11 +137,17 @@ def build_openai_compatible_reasoning_kwargs(
 
     kwargs: dict[str, Any] = {}
     if resolved_effort and not toggle_effort:
-        suppress_top_level = bool(
-            thinking_style and (semantic_effort == "minimal" or thinking_style == "enable_thinking")
-        )
-        if not suppress_top_level:
-            kwargs["reasoning_effort"] = resolved_effort
+        if provider_name == "openrouter":
+            # OpenRouter's normalized API uses a nested reasoning object. The
+            # OpenAI SDK carries non-standard body fields through extra_body.
+            kwargs.setdefault("extra_body", {})["reasoning"] = {"effort": resolved_effort}
+        else:
+            suppress_top_level = bool(
+                thinking_style
+                and (semantic_effort == "minimal" or thinking_style == "enable_thinking")
+            )
+            if not suppress_top_level:
+                kwargs["reasoning_effort"] = resolved_effort
 
     if thinking_style and resolved_effort is not None:
         thinking_enabled = semantic_effort not in ("minimal", "off")
@@ -154,6 +162,31 @@ def build_openai_compatible_reasoning_kwargs(
     return kwargs
 
 
+def build_openai_compatible_reasoning_body(
+    *,
+    spec: Any,
+    binding: str | None,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    """Return reasoning fields for a raw OpenAI-compatible JSON body.
+
+    :func:`build_openai_compatible_reasoning_kwargs` targets the OpenAI SDK,
+    where gateway-specific fields live under ``extra_body``. Raw HTTP callers
+    must merge that object into the JSON body instead.
+    """
+    kwargs = build_openai_compatible_reasoning_kwargs(
+        spec=spec,
+        binding=binding,
+        model=model,
+        reasoning_effort=reasoning_effort,
+    )
+    extra_body = kwargs.pop("extra_body", None)
+    if isinstance(extra_body, dict):
+        kwargs.update(extra_body)
+    return kwargs
+
+
 def is_toggle_effort(effort: str | None) -> bool:
     """True for the UI thinking-toggle values ``"on"``/``"off"``.
 
@@ -165,6 +198,7 @@ def is_toggle_effort(effort: str | None) -> bool:
 
 
 __all__ = [
+    "build_openai_compatible_reasoning_body",
     "build_openai_compatible_reasoning_kwargs",
     "default_reasoning_effort_for",
     "is_toggle_effort",

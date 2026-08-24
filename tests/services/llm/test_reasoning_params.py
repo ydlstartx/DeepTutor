@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from deeptutor.services.llm.reasoning_params import (
+    build_openai_compatible_reasoning_body,
     build_openai_compatible_reasoning_kwargs,
     default_reasoning_effort_for,
     is_toggle_effort,
@@ -161,3 +162,23 @@ class TestToggleEffortValues:
         assert not is_toggle_effort("high")
         assert not is_toggle_effort("")
         assert not is_toggle_effort(None)
+
+
+def test_openrouter_reasoning_uses_normalized_nested_body() -> None:
+    spec = find_by_name("openrouter")
+
+    sdk_kwargs = build_openai_compatible_reasoning_kwargs(
+        spec=spec,
+        binding="openrouter",
+        model="openai/gpt-5.6-sol",
+        reasoning_effort="max",
+    )
+    raw_body = build_openai_compatible_reasoning_body(
+        spec=spec,
+        binding="openrouter",
+        model="openai/gpt-5.6-sol",
+        reasoning_effort="max",
+    )
+
+    assert sdk_kwargs == {"extra_body": {"reasoning": {"effort": "max"}}}
+    assert raw_body == {"reasoning": {"effort": "max"}}

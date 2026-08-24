@@ -123,6 +123,18 @@ def test_services_custom_qwen_enables_thinking_without_top_level_effort() -> Non
     assert kwargs["extra_body"] == {"enable_thinking": True}
 
 
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max"])
+def test_services_openrouter_gpt_56_forwards_explicit_reasoning_effort(effort: str) -> None:
+    kwargs = _build_services_kwargs(
+        "openrouter",
+        effort,
+        model="openai/gpt-5.6-sol",
+    )
+
+    assert "reasoning_effort" not in kwargs
+    assert kwargs["extra_body"] == {"reasoning": {"effort": effort}}
+
+
 @pytest.mark.parametrize(
     "model",
     [

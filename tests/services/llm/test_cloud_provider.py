@@ -62,6 +62,7 @@ class _FakeStreamResponse(_FakeResponse):
 class _FakeSession:
     def __init__(self, response: _FakeResponse) -> None:
         self._response = response
+        self.post_calls: list[dict[str, object]] = []
 
     async def __aenter__(self):
         return self
@@ -75,6 +76,7 @@ class _FakeSession:
         return None
 
     def post(self, _url: str, **_kwargs: object) -> _FakeResponse:
+        self.post_calls.append({"url": _url, **_kwargs})
         return self._response
 
     def get(self, _url: str, **_kwargs: object) -> _FakeResponse:
@@ -136,6 +138,35 @@ async def test_cloud_stream_yields_chunks(monkeypatch: MonkeyPatch) -> None:
         chunks.append(chunk)
 
     assert "".join(chunks) == "hi"
+
+
+@pytest.mark.asyncio
+async def test_cloud_openrouter_uses_nested_reasoning_body(monkeypatch: MonkeyPatch) -> None:
+    fake_response = _FakeResponse(
+        200,
+        {"choices": [{"message": {"content": "ok"}}]},
+    )
+    fake_session = _FakeSession(fake_response)
+    monkeypatch.setattr(
+        cloud_provider.aiohttp,
+        "ClientSession",
+        lambda *args, **kwargs: fake_session,
+    )
+
+    result = await cloud_provider.complete(
+        prompt="hello",
+        model="openai/gpt-5.6-sol",
+        api_key="sk-or-test",
+        base_url="https://openrouter.ai/api/v1",
+        binding="openrouter",
+        reasoning_effort="high",
+    )
+
+    assert result == "ok"
+    body = fake_session.post_calls[0]["json"]
+    assert isinstance(body, dict)
+    assert body["reasoning"] == {"effort": "high"}
+    assert "reasoning_effort" not in body
 
 
 @pytest.mark.asyncio

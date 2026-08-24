@@ -118,6 +118,40 @@ async def test_sdk_complete_passes_disable_ssl_http_client(
 
 
 @pytest.mark.asyncio
+async def test_sdk_complete_openrouter_uses_nested_reasoning_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deeptutor.services.llm import executors
+
+    _capture_async_openai(monkeypatch, executors)
+    captured_payload: dict[str, Any] = {}
+
+    async def fake_create_with_format_fallback(
+        _client: Any, payload: dict[str, Any], **_kwargs: Any
+    ) -> Any:
+        captured_payload.update(payload)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        )
+
+    monkeypatch.setattr(executors, "_create_with_format_fallback", fake_create_with_format_fallback)
+
+    result = await executors.sdk_complete(
+        prompt="hi",
+        system_prompt="system",
+        provider_name="openrouter",
+        model="openai/gpt-5.6-sol",
+        api_key="sk-or-test",
+        base_url="https://openrouter.ai/api/v1",
+        reasoning_effort="xhigh",
+    )
+
+    assert result == "ok"
+    assert captured_payload["extra_body"] == {"reasoning": {"effort": "xhigh"}}
+    assert "reasoning_effort" not in captured_payload
+
+
+@pytest.mark.asyncio
 async def test_sdk_stream_passes_disable_ssl_http_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

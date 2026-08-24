@@ -14,6 +14,7 @@ from typing import cast
 import aiohttp
 
 from deeptutor.services.config import load_system_settings
+from deeptutor.services.provider_registry import find_by_name
 
 from .capabilities import (
     disable_response_format_at_runtime,
@@ -22,7 +23,7 @@ from .capabilities import (
 )
 from .config import get_token_limit_kwargs
 from .exceptions import LLMAPIError, LLMAuthenticationError, LLMConfigError
-from .reasoning_params import default_reasoning_effort_for, is_toggle_effort
+from .reasoning_params import build_openai_compatible_reasoning_body
 from .utils import (
     build_auth_headers,
     build_chat_url,
@@ -84,21 +85,6 @@ def _coerce_int(value: object, default: int | None) -> int | None:
 
 # Use lowercase to avoid constant redefinition warning
 _ssl_warning_logged = False
-
-# Providers that handle thinking mode through extra_body (rather than
-# top-level reasoning_effort).  "minimal" means disable thinking — these
-# providers reject the literal "minimal" value and expect extra_body instead.
-_BINDINGS_WITH_EXTRA_BODY_THINKING = frozenset(
-    {
-        "deepseek",
-        "dashscope",
-        "volcengine",
-        "volcengine_coding_plan",
-        "byteplus",
-        "byteplus_coding_plan",
-        "minimax",
-    }
-)
 
 
 def _looks_like_unsupported_response_format(error_text: str) -> bool:
@@ -345,17 +331,18 @@ async def _openai_complete(
     response_format = kwargs.get("response_format")
     if response_format is not None:
         data["response_format"] = response_format
-    reasoning_effort = kwargs.get("reasoning_effort")
-    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
-        effort = reasoning_effort.strip()
-        if not is_toggle_effort(effort) and not (
-            effort.lower() == "minimal" and binding.lower() in _BINDINGS_WITH_EXTRA_BODY_THINKING
-        ):
-            data["reasoning_effort"] = effort
-    else:
-        implicit_effort = default_reasoning_effort_for(binding, model)
-        if implicit_effort:
-            data["reasoning_effort"] = implicit_effort
+    data.update(
+        build_openai_compatible_reasoning_body(
+            spec=find_by_name(binding),
+            binding=binding,
+            model=model,
+            reasoning_effort=(
+                kwargs["reasoning_effort"]
+                if isinstance(kwargs.get("reasoning_effort"), str)
+                else None
+            ),
+        )
+    )
 
     timeout = aiohttp.ClientTimeout(total=120)
     connector = _get_aiohttp_connector()
@@ -518,17 +505,18 @@ async def _openai_stream(
     response_format = kwargs.get("response_format")
     if response_format is not None:
         data["response_format"] = response_format
-    reasoning_effort = kwargs.get("reasoning_effort")
-    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
-        effort = reasoning_effort.strip()
-        if not is_toggle_effort(effort) and not (
-            effort.lower() == "minimal" and binding.lower() in _BINDINGS_WITH_EXTRA_BODY_THINKING
-        ):
-            data["reasoning_effort"] = effort
-    else:
-        implicit_effort = default_reasoning_effort_for(binding, model)
-        if implicit_effort:
-            data["reasoning_effort"] = implicit_effort
+    data.update(
+        build_openai_compatible_reasoning_body(
+            spec=find_by_name(binding),
+            binding=binding,
+            model=model,
+            reasoning_effort=(
+                kwargs["reasoning_effort"]
+                if isinstance(kwargs.get("reasoning_effort"), str)
+                else None
+            ),
+        )
+    )
 
     timeout = aiohttp.ClientTimeout(total=300)
     connector = _get_aiohttp_connector()

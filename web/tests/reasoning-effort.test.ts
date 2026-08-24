@@ -99,6 +99,29 @@ test("known reasoning families get conservative provider-specific choices", () =
   ]);
 });
 
+test("OpenRouter GPT-5.6 Sol exposes its complete supported effort levels", () => {
+  const expected = [
+    "",
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ];
+
+  assert.deepEqual(values("openrouter", "openai/gpt-5.6-sol"), expected);
+  assert.deepEqual(values("openai", "gpt-5.6-sol"), expected);
+  assert.deepEqual(values("openrouter", "openai/gpt-5.60-sol"), [
+    "",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+});
+
 test("unknown models stay hidden unless they already carry an override", () => {
   assert.deepEqual(values("openai", "gpt-4o"), []);
   assert.deepEqual(values("unknown", "model", "vendor-level"), [

@@ -11,6 +11,7 @@ const LABELS: Record<string, string> = {
   medium: "Medium",
   high: "High",
   xhigh: "Extra high",
+  max: "Max",
   adaptive: "Adaptive",
 };
 
@@ -33,6 +34,7 @@ const OPENAI_PROVIDERS = new Set([
   "azure_openai",
   "openai_codex",
   "github_copilot",
+  "openrouter",
 ]);
 const BINARY_THINKING_PROVIDERS = new Set([
   "deepseek",
@@ -46,6 +48,11 @@ const BINARY_THINKING_PROVIDERS = new Set([
 
 function includesAny(value: string, patterns: string[]): boolean {
   return patterns.some((pattern) => value.includes(pattern));
+}
+
+function isGpt56Model(modelName: string): boolean {
+  const unprefixed = modelName.split("/").at(-1) ?? modelName;
+  return unprefixed === "gpt-5.6" || unprefixed.startsWith("gpt-5.6-");
 }
 
 function options(values: string[], current: string): ReasoningEffortOption[] {
@@ -153,6 +160,12 @@ export function reasoningEffortOptions(
   }
 
   if (OPENAI_PROVIDERS.has(provider) || provider === "custom") {
+    // GPT-5.6 replaced the older family's `minimal` level with `none` and
+    // added `max`. OpenRouter keeps the vendor prefix in model IDs (for
+    // example `openai/gpt-5.6-sol`), so match the family within the full ID.
+    if (isGpt56Model(modelName)) {
+      return options(["none", "low", "medium", "high", "xhigh", "max"], current);
+    }
     const isGpt5OrCodex = includesAny(modelName, ["gpt-5", "codex"]);
     if (isGpt5OrCodex) {
       return options(["minimal", "low", "medium", "high", "xhigh"], current);
