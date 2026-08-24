@@ -1,15 +1,14 @@
-"""Thin adapter over the RAG-Anything / LightRAG Python API.
+"""Thin adapters over the RAG-Anything / LightRAG Python APIs.
 
 This is the ONLY module that imports ``raganything`` / ``lightrag``. Everything
 version-sensitive lives here, so an API shift between releases is a one-file
 fix. All imports are lazy so DeepTutor runs fine without the optional dependency
 installed.
 
-A RAG-Anything instance is built from DeepTutor's LLM/vision/embedding adapters
-(see ``config.py``) over a per-KB ``working_dir``. Documents are inserted as a
-MinerU-style ``content_list`` (produced upstream by the parse layer), so the
-multimodal step never re-parses anything; retrieval delegates to LightRAG's
-native query modes.
+Full deployments build a RAG-Anything instance from DeepTutor's
+LLM/vision/embedding adapters. Query-only deployments construct native LightRAG
+directly, avoiding RAG-Anything's unused MinerU/PyTorch dependency tree while
+opening the exact same per-KB stores and retaining every native query mode.
 """
 
 from __future__ import annotations
@@ -349,15 +348,23 @@ def _accepts(target: Any, name: str) -> bool:
         return False
 
 
-def _drop_unsupported(target: Any, kwargs: dict[str, Any], *, what: str) -> dict[str, Any]:
+def _drop_unsupported(
+    target: Any,
+    kwargs: dict[str, Any],
+    *,
+    what: str,
+    package: str = "RAG-Anything",
+) -> dict[str, Any]:
     supported = {key: value for key, value in kwargs.items() if _accepts(target, key)}
     for key in kwargs.keys() - supported.keys():
         logger.warning(
-            "Installed RAG-Anything does not accept %s=%r on %s; leaving it at "
-            "the library default. Upgrade raganything to use this setting.",
+            "Installed %s does not accept %s=%r on %s; leaving it at "
+            "the library default. Upgrade %s to use this setting.",
+            package,
             key,
             kwargs[key],
             what,
+            package,
         )
     return supported
 
@@ -373,8 +380,7 @@ def _construct(
     lightrag_overrides: Mapping[str, Any] | None = None,
     **kwargs: Any,
 ) -> Any:
-    extra = lightrag_kwargs_from_settings()
-    extra.update(dict(lightrag_overrides or {}))
+    extra = dict(lightrag_overrides or {})
     if extra and _accepts(rag_cls, "lightrag_kwargs"):
         kwargs["lightrag_kwargs"] = extra
     elif extra:
@@ -386,16 +392,93 @@ def _construct(
     return rag_cls(**kwargs)
 
 
+def _is_query_only() -> bool:
+    from deeptutor.knowledge.policy import is_kb_query_only
+
+    return is_kb_query_only()
+
+
+class _NativeQueryRag:
+    """RAG-Anything-shaped facade over native LightRAG retrieval.
+
+    The pipeline intentionally consumes one small common interface for full and
+    query-only images. This facade supplies only lifecycle and query methods —
+    it has no insertion API, adding a provider-specific backstop behind the
+    deployment-wide query-only policy.
+    """
+
+    def __init__(self, lightrag: Any) -> None:
+        self.lightrag = lightrag
+        self.working_dir = Path(lightrag.working_dir)
+        self._ready = False
+
+    async def _ensure_lightrag_initialized(self) -> dict[str, Any]:
+        if self._ready:
+            return {"success": True}
+        try:
+            await self.lightrag.initialize_storages()
+            from lightrag.kg.shared_storage import initialize_pipeline_status
+
+            await initialize_pipeline_status()
+        except Exception as exc:
+            return {"success": False, "error": f"Failed to initialize LightRAG: {exc}"}
+        self._ready = True
+        return {"success": True}
+
+    async def aquery(self, question: str, mode: str | None = None, **kwargs: Any) -> Any:
+        from lightrag import QueryParam
+
+        query_kwargs = _drop_unsupported(
+            QueryParam,
+            kwargs,
+            what="QueryParam",
+            package="LightRAG",
+        )
+        param = QueryParam(mode=normalize_mode(mode) or DEFAULT_MODE, **query_kwargs)
+        return await self.lightrag.aquery(question, param=param)
+
+    async def finalize_storages(self) -> None:
+        if not self._ready:
+            return
+        await self.lightrag.finalize_storages()
+        self._ready = False
+
+
+def _build_native_query_rag(
+    working_dir: Path,
+    *,
+    lightrag_overrides: Mapping[str, Any],
+    io_bridge: OwnerLoopBridge | None,
+) -> _NativeQueryRag:
+    from lightrag import LightRAG
+
+    adapter_kwargs = {"io_bridge": io_bridge} if io_bridge is not None else {}
+    params: dict[str, Any] = {
+        "working_dir": str(working_dir),
+        "llm_model_func": build_llm_model_func(**adapter_kwargs),
+        "embedding_func": build_embedding_func(**adapter_kwargs),
+        **lightrag_overrides,
+    }
+    params = _drop_unsupported(
+        LightRAG,
+        params,
+        what="LightRAG",
+        package="LightRAG",
+    )
+    return _NativeQueryRag(LightRAG(**params))
+
+
 def build_rag(
     working_dir: Path,
     vector_storage: str | None = None,
     *,
     io_bridge: OwnerLoopBridge | None = None,
 ) -> Any:
-    """Construct a RAG-Anything instance rooted at ``working_dir``.
+    """Construct the deployment's LightRAG facade rooted at ``working_dir``.
 
-    Pinned to RAG-Anything's config-based constructor; this is the single spot
-    to touch if its API changes between releases.
+    Full deployments use RAG-Anything for multimodal insertion. Query-only
+    deployments use native LightRAG and therefore need neither RAG-Anything nor
+    MinerU/PyTorch at runtime.
 
     ``vector_storage`` picks the vector-store engine ("nano" | "faiss"). The
     caller resolves it from the on-disk version's meta.json (falling back to
@@ -404,8 +487,6 @@ def build_rag(
     ``io_bridge`` routes DeepTutor-owned network calls back to the service
     event loop when the instance runs inside an indexing worker thread.
     """
-    from raganything import RAGAnything, RAGAnythingConfig
-
     # LightRAG's NetworkX backend writes GraphML directly to the live target
     # and swallows write failures. Install DeepTutor's guarded writer before
     # RAG-Anything constructs or loads any storage objects.
@@ -419,14 +500,13 @@ def build_rag(
         engine_id = DEFAULT_VECTOR_STORAGE
     storage_cls = VECTOR_STORAGE_CLASSES[engine_id]
 
-    lightrag_overrides: dict[str, Any] = {}
+    lightrag_overrides = lightrag_kwargs_from_settings()
     # Keep LightRAG's call watchdog strictly a backstop behind DeepTutor's own
     # attempt cap + retries (see the constants above).
     lightrag_overrides["default_llm_timeout"] = _LIGHTRAG_LLM_TIMEOUT_S
     lightrag_overrides["default_embedding_timeout"] = _LIGHTRAG_EMBEDDING_TIMEOUT_S
-    from deeptutor.knowledge.policy import is_kb_query_only
-
-    if is_kb_query_only():
+    query_only = _is_query_only()
+    if query_only:
         # LightRAG enables a persistent LLM response cache by default. A query
         # miss would therefore write into the published index tree even though
         # no indexing endpoint ran. Query-only deployments must keep retrieval
@@ -444,6 +524,15 @@ def build_rag(
         _install_lean_faiss_storage()
         # RAG-Anything forwards lightrag_kwargs into LightRAG(**params).
         lightrag_overrides["vector_storage"] = storage_cls
+
+    if query_only:
+        return _build_native_query_rag(
+            working_dir,
+            lightrag_overrides=lightrag_overrides,
+            io_bridge=io_bridge,
+        )
+
+    from raganything import RAGAnything, RAGAnythingConfig
 
     config = _build_config(RAGAnythingConfig, working_dir)
     adapter_kwargs = {"io_bridge": io_bridge} if io_bridge is not None else {}
@@ -512,7 +601,15 @@ async def _shutdown_queues(lightrag: Any, *, cancel_pending: bool) -> None:
     for func in _managed_queue_funcs(lightrag):
         shutdown = getattr(func, "shutdown", None)
         if callable(shutdown):
-            result = shutdown(graceful=not cancel_pending, timeout=5.0)
+            # LightRAG 1.4.x exposes ``shutdown()`` with no arguments, while
+            # newer queue wrappers accept graceful/timeout controls. Keep the
+            # cleanup path compatible with the full supported 1.4.x range.
+            shutdown_kwargs: dict[str, Any] = {}
+            if _accepts(shutdown, "graceful"):
+                shutdown_kwargs["graceful"] = not cancel_pending
+            if _accepts(shutdown, "timeout"):
+                shutdown_kwargs["timeout"] = 5.0
+            result = shutdown(**shutdown_kwargs)
             if inspect.isawaitable(result):
                 shutdowns.append(result)
     if not shutdowns:
@@ -527,7 +624,7 @@ async def _shutdown_queues(lightrag: Any, *, cancel_pending: bool) -> None:
 
 
 async def finalize(rag: Any, *, cancel_pending: bool) -> None:
-    """Stop managed work before finalizing RAG-Anything storage resources."""
+    """Stop managed work before finalizing the facade's storage resources."""
     lightrag = getattr(rag, "lightrag", None)
     if lightrag is not None:
         await _shutdown_queues(lightrag, cancel_pending=cancel_pending)
@@ -541,8 +638,8 @@ async def finalize(rag: Any, *, cancel_pending: bool) -> None:
 
 
 async def ensure_ready(rag: Any) -> None:
-    """Ensure RAG-Anything has an initialized LightRAG instance."""
-    if getattr(rag, "lightrag", None) is not None:
+    """Ensure the full or query-only facade has initialized LightRAG stores."""
+    if getattr(rag, "lightrag", None) is not None and not isinstance(rag, _NativeQueryRag):
         return
 
     initializer = getattr(rag, "_ensure_lightrag_initialized", None)
@@ -559,8 +656,8 @@ async def query(rag: Any, question: str, mode: str | None = None) -> str:
 
     Extra knobs (top_k, response_type) from the lightrag.json slice ride into
     LightRAG's ``QueryParam`` via aquery's ``**kwargs``. Wiring is defensive: an
-    older RAG-Anything that rejects one of these kwargs falls back to a
-    mode-only query rather than failing the search.
+    older RAG-Anything or LightRAG release that rejects one of these kwargs
+    falls back to a mode-only query rather than failing the search.
     """
     resolved = normalize_mode(mode) or DEFAULT_MODE
     extra = query_kwargs_from_settings()
@@ -569,7 +666,7 @@ async def query(rag: Any, question: str, mode: str | None = None) -> str:
         result = await rag.aquery(question, mode=resolved, **extra)
     except TypeError:
         if extra:
-            logger.debug("RAG-Anything rejected extra query kwargs; retrying mode-only.")
+            logger.debug("LightRAG facade rejected extra query kwargs; retrying mode-only.")
             result = await rag.aquery(question, mode=resolved)
         else:
             raise

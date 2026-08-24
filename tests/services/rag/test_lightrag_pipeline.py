@@ -104,12 +104,24 @@ def test_normalize_mode(given, expected) -> None:
     assert lr_config.normalize_mode(given) == expected
 
 
-def test_is_lightrag_available_false_when_dependency_missing(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("query_only", "required_package"),
+    [(False, "raganything"), (True, "lightrag")],
+)
+def test_is_lightrag_available_checks_deployment_dependency(
+    monkeypatch, query_only, required_package
+) -> None:
+    looked_up: list[str] = []
+
     def fake_find_spec(name):
-        return None if name == "raganything" else object()
+        looked_up.append(name)
+        return None
 
     monkeypatch.setattr(lr_config.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr("deeptutor.knowledge.policy.is_kb_query_only", lambda: query_only)
+
     assert lr_config.is_lightrag_available() is False
+    assert looked_up == [required_package]
 
 
 # --------------------------------------------------------------------------- #
@@ -1268,6 +1280,118 @@ def _stub_raganything(monkeypatch) -> dict:
     return captured
 
 
+def _stub_native_lightrag(monkeypatch) -> dict:
+    captured: dict[str, object] = {"pipeline_status_calls": 0}
+
+    class _FakeQueryParam:
+        def __init__(
+            self,
+            mode="mix",
+            top_k=40,
+            response_type="Multiple Paragraphs",
+        ) -> None:
+            self.mode = mode
+            self.top_k = top_k
+            self.response_type = response_type
+
+    class _FakeLightRAG:
+        def __init__(
+            self,
+            working_dir,
+            llm_model_func,
+            embedding_func,
+            vector_storage=None,
+            enable_llm_cache=True,
+            enable_llm_cache_for_entity_extract=True,
+            default_llm_timeout=180,
+            default_embedding_timeout=30,
+            llm_model_max_async=4,
+            embedding_func_max_async=8,
+            max_parallel_insert=2,
+            entity_extract_max_gleaning=1,
+            chunk_token_size=1200,
+            chunk_overlap_token_size=100,
+            embedding_batch_num=10,
+            force_llm_summary_on_merge=8,
+        ) -> None:
+            self.working_dir = working_dir
+            self.role_llm_funcs = {}
+            self.embedding_func = embedding_func
+            captured["constructor"] = {
+                "working_dir": working_dir,
+                "llm_model_func": llm_model_func,
+                "embedding_func": embedding_func,
+                "vector_storage": vector_storage,
+                "enable_llm_cache": enable_llm_cache,
+                "enable_llm_cache_for_entity_extract": enable_llm_cache_for_entity_extract,
+                "default_llm_timeout": default_llm_timeout,
+                "default_embedding_timeout": default_embedding_timeout,
+                "llm_model_max_async": llm_model_max_async,
+                "embedding_func_max_async": embedding_func_max_async,
+                "max_parallel_insert": max_parallel_insert,
+                "entity_extract_max_gleaning": entity_extract_max_gleaning,
+                "chunk_token_size": chunk_token_size,
+                "chunk_overlap_token_size": chunk_overlap_token_size,
+                "embedding_batch_num": embedding_batch_num,
+                "force_llm_summary_on_merge": force_llm_summary_on_merge,
+            }
+
+        async def initialize_storages(self) -> None:
+            captured["initialized"] = True
+
+        async def aquery(self, question, param=None):
+            captured["query"] = (question, param)
+            return "native answer"
+
+        async def finalize_storages(self) -> None:
+            captured["finalized"] = True
+
+    async def initialize_pipeline_status() -> None:
+        captured["pipeline_status_calls"] = int(captured["pipeline_status_calls"]) + 1
+
+    fake_lightrag = types.ModuleType("lightrag")
+    fake_lightrag.__path__ = []
+    fake_lightrag.LightRAG = _FakeLightRAG
+    fake_lightrag.QueryParam = _FakeQueryParam
+    fake_kg = types.ModuleType("lightrag.kg")
+    fake_kg.__path__ = []
+    fake_shared = types.ModuleType("lightrag.kg.shared_storage")
+    fake_shared.initialize_pipeline_status = initialize_pipeline_status
+    monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag)
+    monkeypatch.setitem(sys.modules, "lightrag.kg", fake_kg)
+    monkeypatch.setitem(sys.modules, "lightrag.kg.shared_storage", fake_shared)
+    monkeypatch.setattr(engine, "_is_query_only", lambda: True)
+    monkeypatch.setattr(engine, "build_llm_model_func", lambda **_: "llm")
+    monkeypatch.setattr(engine, "build_embedding_func", lambda **_: "embed")
+    monkeypatch.setattr(
+        engine,
+        "build_vision_model_func",
+        lambda **_: (_ for _ in ()).throw(AssertionError("query runtime must not build vision")),
+    )
+    monkeypatch.setattr(engine, "_install_lean_faiss_storage", lambda: None)
+    monkeypatch.setattr(engine.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        engine,
+        "indexing_kwargs_from_settings",
+        lambda: {"max_concurrent_files": 8},
+    )
+    monkeypatch.setattr(
+        engine,
+        "lightrag_kwargs_from_settings",
+        lambda: {
+            "llm_model_max_async": 8,
+            "embedding_func_max_async": 2,
+            "max_parallel_insert": 8,
+            "entity_extract_max_gleaning": 0,
+            "chunk_token_size": 1400,
+            "chunk_overlap_token_size": 80,
+            "embedding_batch_num": 20,
+            "force_llm_summary_on_merge": 16,
+        },
+    )
+    return captured
+
+
 def test_build_rag_forwards_faiss_vector_storage(monkeypatch) -> None:
     captured = _stub_raganything(monkeypatch)
     # The lean-storage install is a separate concern (covered by
@@ -1316,13 +1440,24 @@ def test_build_rag_nano_and_unknown_pass_no_storage_kwarg(monkeypatch) -> None:
     assert captured["lightrag_kwargs"] == expected
 
 
-def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatch) -> None:
-    captured = _stub_raganything(monkeypatch)
-    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+def test_query_only_build_uses_native_lightrag_without_insertion_surface(monkeypatch) -> None:
+    captured = _stub_native_lightrag(monkeypatch)
+    monkeypatch.setattr(
+        engine,
+        "query_kwargs_from_settings",
+        lambda: {"top_k": 60, "response_type": "Multiple Paragraphs"},
+    )
 
-    engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108
+    rag = engine.build_rag(Path("/tmp/kb-wd"), "faiss")  # noqa: S108
+    answer = asyncio.run(engine.query(rag, "hello", "hybrid"))
+    asyncio.run(engine.finalize(rag, cancel_pending=False))
 
-    assert captured["lightrag_kwargs"] == {
+    assert not hasattr(rag, "insert_content_list")
+    assert captured["constructor"] == {
+        "working_dir": "/tmp/kb-wd",
+        "llm_model_func": "llm",
+        "embedding_func": "embed",
+        "vector_storage": "FaissVectorDBStorage",
         "enable_llm_cache": False,
         "enable_llm_cache_for_entity_extract": False,
         "default_llm_timeout": engine._LIGHTRAG_LLM_TIMEOUT_S,
@@ -1336,6 +1471,76 @@ def test_build_rag_disables_persistent_query_cache_in_query_only_mode(monkeypatc
         "embedding_batch_num": 20,
         "force_llm_summary_on_merge": 16,
     }
+    question, param = captured["query"]
+    assert answer == "native answer"
+    assert question == "hello"
+    assert param.mode == "hybrid"
+    assert param.top_k == 60
+    assert param.response_type == "Multiple Paragraphs"
+    assert captured["initialized"] is True
+    assert captured["pipeline_status_calls"] == 1
+    assert captured["finalized"] is True
+
+
+def test_native_query_facade_matches_installed_lightrag_lifecycle(tmp_path) -> None:
+    """Exercise the real optional dependency when it is present locally."""
+    np = pytest.importorskip("numpy")
+    lightrag = pytest.importorskip("lightrag")
+    lightrag_utils = pytest.importorskip("lightrag.utils")
+
+    async def fake_llm(_prompt, **_kwargs):
+        return "unused"
+
+    async def fake_embedding(texts):
+        return np.ones((len(texts), 2), dtype=np.float32)
+
+    async def scenario() -> None:
+        native = lightrag.LightRAG(
+            working_dir=str(tmp_path),
+            llm_model_func=fake_llm,
+            embedding_func=lightrag_utils.EmbeddingFunc(
+                embedding_dim=2,
+                max_token_size=16,
+                func=fake_embedding,
+            ),
+            enable_llm_cache=False,
+            enable_llm_cache_for_entity_extract=False,
+        )
+        rag = engine._NativeQueryRag(native)
+        await engine.ensure_ready(rag)
+        assert rag._ready is True
+        await engine.finalize(rag, cancel_pending=False)
+        assert rag._ready is False
+
+    asyncio.run(scenario())
+
+
+def test_lightrag_queue_shutdown_supports_old_and_new_signatures() -> None:
+    calls: list[object] = []
+
+    async def old_shutdown() -> None:
+        calls.append("old")
+
+    async def new_shutdown(*, graceful: bool, timeout: float) -> None:
+        calls.append((graceful, timeout))
+
+    async def old_func():
+        return None
+
+    async def new_func():
+        return None
+
+    old_func.shutdown = old_shutdown
+    new_func.shutdown = new_shutdown
+    fake_lightrag = types.SimpleNamespace(
+        role_llm_funcs={"old": old_func, "new": new_func},
+        embedding_func=None,
+        rerank_model_func=None,
+    )
+
+    asyncio.run(engine._shutdown_queues(fake_lightrag, cancel_pending=True))
+
+    assert calls == ["old", (False, 5.0)]
 
 
 def test_build_rag_lightrag_watchdog_stays_a_backstop(monkeypatch) -> None:

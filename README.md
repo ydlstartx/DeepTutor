@@ -323,19 +323,35 @@ Open [http://127.0.0.1:3782](http://127.0.0.1:3782). The container creates `/app
 - **Different host ports:** change the left side of each `-p host:container` mapping (e.g. `-p 127.0.0.1:8088:3782`). If you change container-side ports in `/app/data/user/settings/system.json`, restart and update the right side of each mapping to match.
 - **Detached:** add `-d`, then `docker logs -f deeptutor` to follow, `docker stop deeptutor` to stop, `docker rm deeptutor` before reusing the name. The `deeptutor-data` volume keeps your settings and workspace across restarts.
 
-**Query-only knowledge-base production mode.** Build indexes on a compatible
-development machine, publish the complete knowledge-base tree (the
+**Query-only knowledge-base production mode.** The Dockerfile provides two
+explicit production profiles:
+
+```bash
+# Local/offline builder: includes RAG-Anything, MinerU and its ML stack.
+docker build --target production -t deeptutor:full .
+
+# Cloud retrieval server: omits RAG-Anything, MinerU, PyTorch and CUDA.
+docker build --target production-query -t deeptutor:query .
+```
+
+The `dev` image workflow publishes the same profiles as `:dev` (full) and
+`:dev-query` (slim retrieval). Use the explicit target when building either
+deployment profile from source.
+
+Build indexes on a compatible development machine, publish the complete
+knowledge-base tree (the
 `kb_config.json` plus each KB directory, including `raw/`, `metadata.json`, and
-all `version-N/` directories), then start the server with:
+all `version-N/` directories), then start the slim server with:
 
 ```bash
 docker run ... \
-  -e DEEPTUTOR_KB_QUERY_ONLY=true \
   -v /host/data:/app/data \
-  ghcr.io/hkuds/deeptutor:latest
+  deeptutor:query
 ```
 
-This blocks local KB creation, upload/index/re-index, file/config mutation, and
+The query image defaults `DEEPTUTOR_KB_QUERY_ONLY=true`, omits the multimodal
+indexing stack, and exposes LightRAG through a query-only facade. That policy
+blocks local KB creation, upload/index/re-index, file/config mutation, and
 linking for every user, while list, metadata, status, RAG queries, and chat
 attachments remain available. Ordinary users also cannot delete knowledge
 bases; administrators may remove existing KBs as an operational cleanup action.
@@ -353,8 +369,10 @@ configurable because DeepTutor performs no local ingestion or indexing for
 them. DeepTutor can list IMA's remote files and, when IMA returns no usable
 snippet, securely stream an on-demand PDF of up to 200 MB for bounded text
 extraction; the download is temporary and is never ingested into a local index.
-The production image includes the LightRAG query runtime
-even though indexing is disabled.
+The slim image opens published LightRAG indexes through native LightRAG, so
+multimodal text descriptions already stored in the index remain retrievable
+without shipping RAG-Anything's parsing/indexing dependency tree. LlamaIndex
+and IMA retrieval keep using their existing query paths.
 Keep the DeepTutor commit/image tag, LightRAG version, embedding provider/model
 and dimension, and the index storage backend compatible between the builder and
 server. Admin KBs live under `data/knowledge_bases`; per-user KBs live under

@@ -5,7 +5,8 @@
 # containing both the FastAPI backend and Next.js frontend
 #
 # Build/run:
-#   docker build -t deeptutor:local .
+#   docker build --target production -t deeptutor:local .
+#   docker build --target production-query -t deeptutor:query .
 #   docker run -p 127.0.0.1:3782:3782 -p 127.0.0.1:8001:8001 \
 #     -v deeptutor-data:/app/data deeptutor:local
 #
@@ -59,9 +60,9 @@ RUN npm run build
 FROM node:22-slim AS node-runtime
 
 # ============================================
-# Stage 2: Python Base with Dependencies
+# Stage 2: Shared Python Runtime Dependencies
 # ============================================
-FROM python:3.11-slim AS python-base
+FROM python:3.11-slim AS python-common
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -93,21 +94,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy dependency metadata before application source so ordinary code changes
-# keep the (heavy) Python runtime layer cached.  LightRAG versions come only
-# from pyproject.toml's rag-lightrag extra; Docker does not duplicate them.
+# keep the Python runtime layer cached.
 COPY requirements/ ./requirements/
 COPY requirements.txt ./
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt && \
-    python -c "import pathlib,tomllib; p=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); pathlib.Path('/tmp/rag-lightrag.txt').write_text('\\n'.join(p['project']['optional-dependencies']['rag-lightrag'])+'\\n')" && \
+    pip install -r requirements.txt
+
+# Full local runtime: multimodal indexing through RAG-Anything/MinerU. This is
+# intentionally heavy and may pull PyTorch plus CUDA libraries.
+FROM python-common AS python-full
+RUN python -c "import pathlib,tomllib; p=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); pathlib.Path('/tmp/rag-lightrag.txt').write_text('\\n'.join(p['project']['optional-dependencies']['rag-lightrag'])+'\\n')" && \
     pip install -r /tmp/rag-lightrag.txt && \
-    python -c "import lightrag, raganything; print('LightRAG query runtime import: OK')"
+    python -c "import lightrag, raganything; print('LightRAG indexing runtime import: OK')"
+
+# Cloud query runtime: opens the same LightRAG stores directly, without the
+# unused RAG-Anything -> MinerU -> PyTorch/CUDA dependency chain.
+FROM python-common AS python-query
+RUN python -c "import pathlib,tomllib; p=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); pathlib.Path('/tmp/rag-lightrag-query.txt').write_text('\\n'.join(p['project']['optional-dependencies']['rag-lightrag-query'])+'\\n')" && \
+    pip install -r /tmp/rag-lightrag-query.txt && \
+    python -c "import importlib.metadata as md, importlib.util, lightrag; names={(d.metadata.get('Name') or '').lower() for d in md.distributions()}; banned=sorted(n for n in names if n in {'torch','triton','cuda-python','onnxruntime-gpu','raganything','mineru'} or n.startswith(('nvidia-','cupy'))); assert importlib.util.find_spec('raganything') is None; assert importlib.util.find_spec('mineru') is None; assert importlib.util.find_spec('torch') is None; assert not banned, f'GPU/indexing packages leaked into query runtime: {banned}'; print('LightRAG query runtime import: OK')"
 
 # ============================================
-# Stage 3: Production Image
+# Stage 3: Shared Production Runtime
 # ============================================
-FROM python:3.11-slim AS production
+FROM python:3.11-slim AS production-runtime
 
 # Labels
 LABEL maintainer="DeepTutor Team" \
@@ -133,7 +144,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install system dependencies
-# Note: libgl1 and libglib2.0-0 are required for OpenCV (used by mineru)
 # Note: git is required to install CLI apps — most of the CLI-Anything catalog
 #       installs with `pip install git+…`, which shells out to git. It is needed
 #       in *this* image and not in the runner: installing is a privileged
@@ -144,11 +154,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
     supervisor \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Node.js from node-runtime stage (platform-matched binary)
@@ -157,10 +162,6 @@ COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && node --version && npm --version
-
-# Copy Python packages from builder stage
-COPY --from=python-base /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=python-base /usr/local/bin /usr/local/bin
 
 # Copy built frontend from frontend-builder stage (standalone mode)
 # The standalone output contains a self-contained server.js + minimal node_modules
@@ -444,6 +445,44 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 # Set entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+# ============================================
+# Stage 3a: Query-only Production Image
+# ============================================
+FROM production-runtime AS production-query
+
+LABEL io.deeptutor.image-profile="query"
+
+# This image omits RAG-Anything/MinerU and DeepTutor's native LightRAG facade
+# exposes query methods only. Keep the server-side policy enabled to block
+# every provider's create/index mutation routes.
+ENV DEEPTUTOR_KB_QUERY_ONLY=true \
+    DEEPTUTOR_IMAGE_PROFILE=query
+
+COPY --from=python-query /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-query /usr/local/bin /usr/local/bin
+
+# Fail the build if dependency drift reintroduces the GPU/indexing stack.
+RUN python -c "import importlib.metadata as md, importlib.util, faiss, lightrag; names={(d.metadata.get('Name') or '').lower() for d in md.distributions()}; banned=sorted(n for n in names if n in {'torch','triton','cuda-python','onnxruntime-gpu','raganything','mineru'} or n.startswith(('nvidia-','cupy'))); assert importlib.util.find_spec('raganything') is None; assert importlib.util.find_spec('mineru') is None; assert importlib.util.find_spec('torch') is None; assert not banned, f'GPU/indexing packages leaked into query image: {banned}'; print('DeepTutor query image dependency check: OK')"
+
+# ============================================
+# Stage 3b: Full Production Image
+# ============================================
+FROM production-runtime AS production
+
+LABEL io.deeptutor.image-profile="full"
+
+# OpenCV runtime libraries used by MinerU in the full local/indexing image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-full /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-full /usr/local/bin /usr/local/bin
 
 # ============================================
 # Stage 4: Development Image (Optional)

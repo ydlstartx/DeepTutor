@@ -246,6 +246,13 @@ rag-lightrag = [
     "lightrag-hku>=1.4.0,<1.5.0; python_version < '3.14'",
 ]
 
+# Query-only LightRAG runtime for cloud images. Existing multimodal indexes are
+# native LightRAG stores, so retrieval needs LightRAG itself but not the
+# RAG-Anything -> MinerU -> PyTorch/CUDA indexing dependency chain above.
+rag-lightrag-query = [
+    "lightrag-hku>=1.4.0,<1.5.0; python_version < '3.14'",
+]
+
 # Dev/test tooling. Mirrors requirements/dev.txt.
 dev = [
     "deeptutor[server]",

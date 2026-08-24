@@ -109,9 +109,12 @@ class LightRagPipeline:
 
     def _ensure_available(self) -> None:
         if not lr_config.is_lightrag_available():
+            from deeptutor.knowledge.policy import is_kb_query_only
+
+            extra = "rag-lightrag-query" if is_kb_query_only() else "rag-lightrag"
             raise lr_config.LightRagNotAvailableError(
                 "LightRAG is not installed. Install it with "
-                "`pip install 'deeptutor[rag-lightrag]'` to use LightRAG knowledge bases."
+                f"`pip install 'deeptutor[{extra}]'` to use LightRAG knowledge bases."
             )
 
     def _resolve_mode(self, kb_name: str, kwargs: dict[str, Any]) -> str:

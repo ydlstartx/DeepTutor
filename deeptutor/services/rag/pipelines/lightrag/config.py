@@ -147,12 +147,16 @@ async def _run_adapter_with_retry(
 
 
 def is_lightrag_available() -> bool:
-    """True when RAG-Anything (which bundles LightRAG) can be imported.
+    """True when the dependency required by this deployment can be imported.
 
-    Opt-in extra: ``pip install 'deeptutor[rag-lightrag]'``. Until installed the
-    provider is hidden / blocked in the UI.
+    Full/indexing deployments require RAG-Anything. Query-only images load an
+    existing index with native LightRAG and intentionally omit RAG-Anything's
+    MinerU/PyTorch dependency tree.
     """
-    return importlib.util.find_spec("raganything") is not None
+    from deeptutor.knowledge.policy import is_kb_query_only
+
+    package = "lightrag" if is_kb_query_only() else "raganything"
+    return importlib.util.find_spec(package) is not None
 
 
 def normalize_mode(mode: str | None) -> str:

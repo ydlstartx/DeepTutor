@@ -32,7 +32,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push
+      - name: Build and push full image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -41,5 +41,19 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_NAME }}:dev
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=deeptutor-dev-full
+          cache-to: type=gha,mode=max,scope=deeptutor-dev-full
+
+      - name: Build and push query-only image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production-query
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:dev-query
+          cache-from: |
+            type=gha,scope=deeptutor-dev-query
+            type=gha,scope=deeptutor-dev-full
+          cache-to: type=gha,mode=max,scope=deeptutor-dev-query
