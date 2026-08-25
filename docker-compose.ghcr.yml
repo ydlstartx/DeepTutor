@@ -59,6 +59,12 @@ services:
     environment:
       # Explicit deployment policy; defaults to full build + query behavior.
       - DEEPTUTOR_KB_QUERY_ONLY=${DEEPTUTOR_KB_QUERY_ONLY:-false}
+      # Optional dependencies, re-applied on every start (#762). Anything
+      # installed with docker exec is otherwise lost on compose down. These
+      # declarations are idempotent and non-fatal; preview an extra with
+      # `python scripts/install_extras.py --dry-run "<name>"`.
+      # - DEEPTUTOR_EXTRAS=math-animator,partners
+      # - DEEPTUTOR_APT_PACKAGES=ffmpeg
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${DEEPTUTOR_DOCKER_BACKEND_PORT:-8001}/"]

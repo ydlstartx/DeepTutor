@@ -14,6 +14,8 @@ import pytest
 
 from deeptutor.knowledge.manager import KnowledgeBaseManager
 from deeptutor.multi_user.knowledge_access import (
+    list_visible_knowledge_bases,
+    resolve_kb,
     resolve_kb_manifest,
     resolve_kb_manifest_async,
 )
@@ -73,6 +75,43 @@ def test_empty_reference_yields_no_manifest(mu_isolated_root, as_user) -> None:
     with as_user("u_alice", role="user"):
         assert resolve_kb_manifest("") is None
         assert resolve_kb_manifest(None) is None
+
+
+def test_query_only_user_sees_assigned_admin_kb_and_own_ima_only(
+    mu_isolated_root, as_user, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi import HTTPException
+
+    from deeptutor.multi_user import knowledge_access
+    from deeptutor.multi_user.knowledge_access import admin_kb_manager, current_kb_manager
+
+    # Stage a legacy personal local KB before enabling the production policy;
+    # query-only mode must not expose it merely because the directory exists.
+    with as_user("u_alice", role="user"):
+        _make_kb(current_kb_manager(), "legacy-local", "private.pdf")
+        current_kb_manager().register_ima_kb("My IMA", "cid", "key", "ima-1")
+
+    with as_user("u_admin", role="admin"):
+        _make_kb(admin_kb_manager(), "assigned", "lesson.pdf")
+
+    monkeypatch.setattr(
+        knowledge_access,
+        "load_grant",
+        lambda _user_id: {
+            "knowledge_bases": [{"resource_id": "admin:kb:assigned", "name": "assigned"}]
+        },
+    )
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+
+    with as_user("u_alice", role="user"):
+        visible_ids = {item["id"] for item in list_visible_knowledge_bases()}
+        assert visible_ids == {"user:kb:My IMA", "admin:kb:assigned"}
+        assert resolve_kb("user:kb:My IMA").source == "user"
+        assert resolve_kb("admin:kb:assigned").read_only is True
+        with pytest.raises(HTTPException, match="administrator-assigned") as exc_info:
+            resolve_kb("user:kb:legacy-local")
+        assert exc_info.value.status_code == 403
+        assert resolve_kb_manifest("legacy-local") is None
 
 
 @pytest.mark.asyncio

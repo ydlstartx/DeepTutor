@@ -18,6 +18,7 @@ from deeptutor.knowledge.manifest import (
     build_manifest,
     build_remote_manifest,
 )
+from deeptutor.knowledge.policy import is_kb_query_only
 
 from .context import get_current_user
 from .grants import load_grant
@@ -74,6 +75,31 @@ def _assigned_admin_names() -> set[str]:
     return out
 
 
+def _user_owned_kb_allowed(manager: KnowledgeBaseManager, name: str) -> bool:
+    """Whether a regular user's own KB may be exposed by this deployment.
+
+    A query-only server publishes administrator-built indexes and grants them
+    to users. The one user-owned exception is IMA: it is only a pointer to the
+    user's remote IMA library and DeepTutor does not build an index for it.
+    Outside query-only deployments the existing personal-KB behavior remains.
+    """
+    if not is_kb_query_only():
+        return True
+    entry = manager.get_kb_entry(name)
+    return bool(entry and entry.get("type") == IMA_KB_TYPE)
+
+
+def _require_user_owned_kb_allowed(manager: KnowledgeBaseManager, name: str) -> None:
+    if not _user_owned_kb_allowed(manager, name):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This server exposes only administrator-assigned knowledge bases "
+                "and your own Tencent IMA connections."
+            ),
+        )
+
+
 def resolve_kb(kb_ref: str, *, require_write: bool = False) -> KnowledgeResource:
     user = get_current_user()
     requested_source, name = _strip_resource_prefix(kb_ref)
@@ -111,6 +137,7 @@ def resolve_kb(kb_ref: str, *, require_write: bool = False) -> KnowledgeResource
 
     if requested_source == "user":
         resolved = _resolve_default_or_name(user_manager, name)
+        _require_user_owned_kb_allowed(user_manager, resolved)
         return KnowledgeResource(
             id=f"user:kb:{resolved}",
             name=resolved,
@@ -122,6 +149,7 @@ def resolve_kb(kb_ref: str, *, require_write: bool = False) -> KnowledgeResource
 
     if name.lower() in DEFAULT_KB_ALIASES:
         resolved = _resolve_default_or_name(user_manager, name)
+        _require_user_owned_kb_allowed(user_manager, resolved)
         return KnowledgeResource(
             id=f"user:kb:{resolved}",
             name=resolved,
@@ -131,7 +159,11 @@ def resolve_kb(kb_ref: str, *, require_write: bool = False) -> KnowledgeResource
             read_only=False,
         )
 
-    user_names = set(user_manager.list_knowledge_bases())
+    user_names = {
+        candidate
+        for candidate in user_manager.list_knowledge_bases()
+        if _user_owned_kb_allowed(user_manager, candidate)
+    }
     if name in user_names:
         return KnowledgeResource(
             id=f"user:kb:{name}",
@@ -181,6 +213,8 @@ def list_visible_knowledge_bases() -> list[dict[str, Any]]:
     manager = current_kb_manager()
     items: list[dict[str, Any]] = []
     for name in manager.list_knowledge_bases():
+        if not user.is_admin and not _user_owned_kb_allowed(manager, name):
+            continue
         items.append(
             {
                 "id": f"admin:kb:{name}" if user.is_admin else f"user:kb:{name}",

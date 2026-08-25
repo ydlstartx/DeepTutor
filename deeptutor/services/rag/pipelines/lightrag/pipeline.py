@@ -31,8 +31,8 @@ from deeptutor.services.rag.index_versioning import (
 )
 from deeptutor.services.rag.kb_paths import resolve_kb_dir
 
+from . import block_policy, engine, storage
 from . import config as lr_config
-from . import engine, storage
 from .worker import OwnerLoopBridge, run_in_shared_worker_loop
 
 logger = logging.getLogger(__name__)
@@ -203,9 +203,49 @@ class LightRagPipeline:
                     )
                     continue
 
-                content_list = doc.blocks or (
-                    [{"type": "text", "text": doc.markdown, "page_idx": 0}] if doc.markdown else []
-                )
+                accepted_ledger: dict[str, Any] | None = None
+                attempt_id: str | None = None
+                if doc.blocks:
+                    document_id = doc.source_hash or path.stem
+                    decision = block_policy.prepare_content_list(
+                        doc.blocks,
+                        engine=doc.engine,
+                        source_hash=doc.source_hash,
+                        parser_signature=doc.parser_signature,
+                    )
+                    if decision.ledger is not None:
+                        outcome = "unknown_types" if decision.unknown_type_counts else "accepted"
+                        _, attempt_id = block_policy.write_attempt_ledger(
+                            Path(rag.working_dir).parent,
+                            document_id,
+                            decision.ledger,
+                            outcome=outcome,
+                        )
+                        counts = decision.ledger["counts"]
+                        self.logger.info(
+                            "MinerU block policy %s raw=%d filtered=%d eligible=%d unknown=%d",
+                            block_policy.POLICY_ID,
+                            counts["raw_total"],
+                            counts["filtered_total"],
+                            counts["eligible_total"],
+                            counts["unknown_total"],
+                        )
+                        if decision.unknown_type_counts:
+                            self.logger.warning(
+                                "LightRAG: %s has MinerU block types with no policy "
+                                "entry (%s); indexing them unclassified",
+                                path.name,
+                                decision.unknown_summary(),
+                            )
+                    accepted_ledger = decision.ledger
+                    content_list = decision.content_list
+                else:
+                    content_list = (
+                        [{"type": "text", "text": doc.markdown, "page_idx": 0}]
+                        if doc.markdown
+                        else []
+                    )
+
                 if not content_list:
                     self.logger.warning("LightRAG: empty document skipped: %s", path.name)
                     continue
@@ -222,6 +262,13 @@ class LightRagPipeline:
                 )
                 if doc_error:
                     raise RuntimeError(f"{path.name}: {doc_error}")
+                if accepted_ledger is not None:
+                    block_policy.write_decision_ledger(
+                        Path(rag.working_dir),
+                        doc.source_hash or path.stem,
+                        accepted_ledger,
+                        attempt_id=attempt_id,
+                    )
                 inserted += 1
                 self.logger.info("LightRAG: inserted %s", path.name)
                 if progress_callback is not None:
@@ -412,11 +459,13 @@ class LightRagPipeline:
         try:
             self._ensure_available()
 
-            async def job(io_bridge: OwnerLoopBridge) -> str:
+            async def job(
+                io_bridge: OwnerLoopBridge,
+            ) -> tuple[str, list[dict[str, Any]]]:
                 rag = await self._get_rag(root_dir, io_bridge=io_bridge, owner_loop=owner_loop)
-                return await engine.query(rag, query, mode)
+                return await engine.query_with_sources(rag, query, mode)
 
-            answer = await run_in_shared_worker_loop(job)
+            answer, sources = await run_in_shared_worker_loop(job)
         except lr_config.LightRagNotAvailableError as exc:
             return self._error_result(query, exc, error_type="not_configured")
         except Exception as exc:
@@ -428,7 +477,7 @@ class LightRagPipeline:
             "query": query,
             "answer": answer,
             "content": answer,
-            "sources": [],
+            "sources": sources,
             "provider": storage.PROVIDER,
             "mode": mode,
         }

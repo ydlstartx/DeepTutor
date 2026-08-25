@@ -3034,7 +3034,7 @@ async def upload_files(
 async def create_knowledge_base(
     background_tasks: BackgroundTasks,
     name: str = Form(...),
-    files: list[UploadFile] = File(...),
+    files: list[UploadFile] = File(default=[]),
     rag_provider: str = Form(DEFAULT_PROVIDER),
     pageindex_mode: str = Form(""),
     rel_paths: list[str] = Form(None),
@@ -3118,6 +3118,46 @@ async def create_knowledge_base(
             if name not in manager.list_knowledge_bases():
                 logger.warning(f"KB {name} not found in config, registering manually")
                 initializer._register_to_config()
+
+            # Fast path: a local build workspace may create an empty KB before
+            # attaching GitHub/web sources or uploading documents later. The
+            # route-level write guard still rejects this path on query-only
+            # deployments before any directory or task record is created.
+            if not files:
+                progress_tracker.update(
+                    ProgressStage.COMPLETED,
+                    "Knowledge base created (no documents yet).",
+                    current=0,
+                    total=0,
+                )
+                manager.update_kb_status(
+                    name=name,
+                    status="ready",
+                    progress={
+                        "stage": "completed",
+                        "message": "Knowledge base created (no documents yet).",
+                        "percent": 100,
+                        "current": 0,
+                        "total": 0,
+                        "task_id": task_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "indexed_count": 0,
+                        "index_changed": False,
+                        "index_action": "create",
+                    },
+                    only_if_task=_task_owner(task_id),
+                )
+                TaskIDManager.get_instance().update_task_status(task_id, "completed")
+                get_task_stream_manager().emit_complete(
+                    task_id, f"Knowledge base '{name}' created without documents"
+                )
+                logger.info(f"KB '{name}' created (no documents yet)")
+                return {
+                    "message": f"Knowledge base '{name}' created (no documents yet).",
+                    "name": name,
+                    "files": [],
+                    "task_id": None,
+                }
 
             uploaded_files, _ = await _save_uploaded_files_off_loop(
                 files,
@@ -3772,5 +3812,115 @@ async def sync_folder(kb_name: str, folder_id: str, background_tasks: Background
         raise
     except ValueError:
         raise HTTPException(status_code=404, detail=f"Knowledge base '{kb_name}' not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class AddGitHubSourceRequest(BaseModel):
+    repo: str
+    branch: str = "main"
+    path: str = ""
+    glob: str = "*.md"
+
+
+class GitHubSourceInfo(BaseModel):
+    id: str
+    repo: str
+    branch: str
+    path: str
+    glob: str
+    enabled: bool = True
+    last_synced_sha: str = ""
+    last_synced_at: str = ""
+    last_sync_status: str = "pending"
+    last_sync_error: str | None = None
+    files_synced: int = 0
+    added_at: str = ""
+
+
+@router.post(
+    "/{kb_name}/github-source",
+    response_model=GitHubSourceInfo,
+    dependencies=[Depends(require_kb_write_access)],
+)
+async def add_github_source(kb_name: str, request: AddGitHubSourceRequest):
+    try:
+        manager, resolved_name, _ = _writable_kb(kb_name)
+        info = manager.add_github_source(
+            resolved_name, request.repo, request.branch, request.path, request.glob
+        )
+        return GitHubSourceInfo(**info)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400 if "not found" not in str(e).lower() else 404, detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{kb_name}/github-sources", response_model=list[GitHubSourceInfo])
+async def get_github_sources(kb_name: str):
+    try:
+        manager, resolved_name, _ = _writable_kb(kb_name)
+        return [GitHubSourceInfo(**s) for s in manager.get_github_sources(resolved_name)]
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"KB '{kb_name}' not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete(
+    "/{kb_name}/github-source/{source_id}",
+    dependencies=[Depends(require_kb_write_access)],
+)
+async def remove_github_source(kb_name: str, source_id: str):
+    try:
+        manager, resolved_name, _ = _writable_kb(kb_name)
+        if not manager.remove_github_source(resolved_name, source_id):
+            raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found")
+        return {"message": "Removed", "source_id": source_id}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"KB '{kb_name}' not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{kb_name}/sync-github", dependencies=[Depends(require_kb_write_access)])
+async def sync_github_sources(kb_name: str):
+    try:
+        manager, resolved_name, kb_base_dir = _writable_kb(kb_name)
+        sources = manager.get_github_sources(resolved_name)
+        if not sources:
+            return {"message": "No GitHub sources", "results": []}
+        from deeptutor.services.github_source.sync import sync_source
+
+        results = []
+        for src in sources:
+            if not src.get("enabled", True):
+                continue
+            r = await sync_source(kb_name=resolved_name, source=src, base_dir=str(kb_base_dir))
+            results.append(
+                {
+                    "source_id": src.get("id"),
+                    "repo": src.get("repo"),
+                    "ok": r.ok,
+                    "skipped": r.skipped,
+                    "files_added": r.files_added,
+                    "files_updated": r.files_updated,
+                    "files_removed": r.files_removed,
+                    "error": r.error or None,
+                }
+            )
+        return {"message": f"Synced {len(results)} source(s)", "results": results}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail=f"KB '{kb_name}' not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
