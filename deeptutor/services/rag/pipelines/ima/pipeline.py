@@ -75,7 +75,10 @@ class ImaPipeline:
 
     async def search(self, query: str, kb_name: str, **kwargs) -> Dict[str, Any]:
         try:
-            config = resolve_kb_config(load_kb_config_entry(self.kb_base_dir, kb_name))
+            config = resolve_kb_config(
+                load_kb_config_entry(self.kb_base_dir, kb_name),
+                kb_base_dir=self.kb_base_dir,
+            )
         except ImaNotConfiguredError as exc:
             return self._error_result(query, exc, error_type="not_configured")
 

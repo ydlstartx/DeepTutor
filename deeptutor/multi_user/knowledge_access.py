@@ -318,12 +318,9 @@ async def resolve_kb_manifest_async(
 
     try:
         from deeptutor.services.rag.pipelines.ima.client import ImaClient
-        from deeptutor.services.rag.pipelines.ima.config import (
-            config_from_entry,
-            get_account_credentials,
-        )
+        from deeptutor.services.rag.pipelines.ima.config import resolve_kb_config
 
-        config = config_from_entry(entry, fallback=get_account_credentials())
+        config = resolve_kb_config(entry, kb_base_dir=resource.base_dir)
         tree = await ImaClient(config).list_knowledge_tree(max_items=KB_FILES_MAX_LIMIT)
         names = [
             str(item.get("path") or "")

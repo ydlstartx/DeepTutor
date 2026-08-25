@@ -110,3 +110,43 @@ async def test_ima_async_manifest_uses_remote_inventory(
     assert manifest.total == 1
     assert [document.name for document in manifest.documents] == ["books/pmpp.pdf"]
     assert manifest.documents[0].size == -1
+
+
+@pytest.mark.asyncio
+async def test_assigned_admin_ima_manifest_uses_admin_credentials(
+    mu_isolated_root, as_user, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.multi_user import knowledge_access
+    from deeptutor.multi_user.knowledge_access import admin_kb_manager
+    from deeptutor.services.rag.pipelines.ima.config import save_account_settings
+
+    captured = []
+
+    class _RemoteClient:
+        def __init__(self, config) -> None:
+            captured.append(config)
+
+        async def list_knowledge_tree(self, *, max_items: int) -> dict:
+            return {"items": [], "truncated": False}
+
+    monkeypatch.setattr(
+        "deeptutor.services.rag.pipelines.ima.client.ImaClient",
+        _RemoteClient,
+    )
+    monkeypatch.setattr(
+        knowledge_access,
+        "load_grant",
+        lambda _user_id: {"knowledge_bases": [{"resource_id": "admin:kb:shared-ima"}]},
+    )
+
+    with as_user("u_admin", role="admin"):
+        save_account_settings({"client_id": "admin-client", "api_key": "admin-key"})
+        admin_kb_manager().register_ima_kb("shared-ima", "", "", "ima-library")
+
+    with as_user("u_alice", role="user"):
+        save_account_settings({"client_id": "alice-client", "api_key": "alice-key"})
+        manifest = await resolve_kb_manifest_async("admin:kb:shared-ima")
+
+    assert manifest is not None
+    assert manifest.enumerable
+    assert [(item.client_id, item.api_key) for item in captured] == [("admin-client", "admin-key")]

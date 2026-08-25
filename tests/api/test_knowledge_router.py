@@ -9,7 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import deeptutor.services.config as config_module
 from deeptutor.services.config.runtime_settings import RuntimeSettingsService
 from deeptutor.services.rag.pipelines.ima.client import (
     ImaAPIError,
@@ -498,7 +497,11 @@ def test_list_ima_maps_upstream_errors_without_leaking_credentials(
 def ima_account(tmp_path: Path, monkeypatch) -> RuntimeSettingsService:
     """Account-level IMA settings backed by a throwaway directory."""
     service = RuntimeSettingsService(tmp_path / "settings", process_env={})
-    monkeypatch.setattr(config_module, "get_runtime_settings_service", lambda: service)
+    monkeypatch.setattr(
+        ima_config_module,
+        "get_ima_settings_service",
+        lambda **_kwargs: service,
+    )
     return service
 
 

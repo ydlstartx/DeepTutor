@@ -5,9 +5,9 @@ https://ima.qq.com/agent-interface) identify an *account*, and a knowledge base
 id identifies one of that account's libraries. The credentials therefore resolve
 at two levels:
 
-* **account level** — ``settings/ima.json`` (managed by
-  ``RuntimeSettingsService``), edited under Knowledge → the IMA engine page.
-  One pair is shared by every ``ima`` KB, the way PageIndex's key is;
+* **owner level** — ``settings/ima.json`` in the human account owner's
+  workspace, edited under Knowledge → the IMA engine page. One pair is shared
+  by that owner's ``ima`` KBs, but is never shared between users;
 * **per KB** — the same two fields on the KB's ``kb_config.json`` entry. Present
   on knowledge bases connected before the engine page existed, and still the way
   to point one KB at a *different* IMA account.
@@ -23,7 +23,12 @@ holds no global state and imports no HTTP client (the client lives in
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
+
+from deeptutor.multi_user.paths import get_admin_path_service, get_owner_path_service
+from deeptutor.services.config.runtime_settings import RuntimeSettingsService
+from deeptutor.services.path_service import PathService
 
 # IMA exposes exactly one retrieval call (``search_knowledge``) with no mode
 # knob, so a KB bound to this engine has no per-KB search mode to pick. The
@@ -58,16 +63,68 @@ class ImaConfig:
     knowledge_base_id: str
 
 
-def get_account_credentials() -> ImaCredentials:
-    """Load the account-level credential pair, or an empty one.
+def get_ima_settings_service(*, kb_base_dir: str | Path | None = None) -> RuntimeSettingsService:
+    """Return the settings store belonging to the relevant KB owner.
+
+    With no explicit KB path this is the current human account owner and is the
+    store used by the IMA settings page. During retrieval, callers pass the
+    access-checked KB base directory so an assigned admin KB keeps using the
+    administrator's account while a user's own KB uses that user's account.
+    """
+    if kb_base_dir is None:
+        path_service = get_owner_path_service()
+    else:
+        # ``kb_base_dir`` is ``<workspace>/knowledge_bases``. Rebuilding a
+        # PathService from its parent avoids depending on the requester's scope.
+        workspace_root = Path(kb_base_dir).resolve().parent
+        admin_service = get_admin_path_service()
+        try:
+            workspace_root.relative_to(admin_service.workspace_root.resolve() / "partners")
+        except ValueError:
+            path_service = PathService(workspace_root=workspace_root)
+        else:
+            # Partners are synthetic scopes owned by the administrator, not
+            # credential-bearing accounts of their own.
+            path_service = admin_service
+    return RuntimeSettingsService.get_instance(path_service.get_settings_dir())
+
+
+def _may_apply_process_overrides(service: RuntimeSettingsService) -> bool:
+    """Deployment environment credentials belong only to the admin workspace."""
+    try:
+        admin_dir = get_admin_path_service().get_settings_dir().resolve()
+        return service.settings_dir.resolve() == admin_dir
+    except Exception:
+        return False
+
+
+def load_account_settings(
+    *,
+    kb_base_dir: str | Path | None = None,
+    include_process_overrides: bool = True,
+) -> dict[str, Any]:
+    """Load one owner's IMA settings without leaking deployment env to users."""
+    service = get_ima_settings_service(kb_base_dir=kb_base_dir)
+    return service.load_ima(
+        include_process_overrides=(
+            include_process_overrides and _may_apply_process_overrides(service)
+        )
+    )
+
+
+def save_account_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Persist IMA settings for the current human account owner."""
+    return get_ima_settings_service().save_ima(settings)
+
+
+def get_account_credentials(*, kb_base_dir: str | Path | None = None) -> ImaCredentials:
+    """Load the KB owner's credential pair, or an empty one.
 
     Never raises: an unreadable settings file only means "not configured", which
     the callers already handle.
     """
     try:
-        from deeptutor.services.config import get_runtime_settings_service
-
-        settings = get_runtime_settings_service().load_ima()
+        settings = load_account_settings(kb_base_dir=kb_base_dir)
     except Exception:
         return ImaCredentials()
     return ImaCredentials(
@@ -122,9 +179,12 @@ def config_from_entry(
     )
 
 
-def resolve_kb_config(entry: dict[str, Any]) -> ImaConfig:
-    """``config_from_entry`` with the account-level credentials as fallback."""
-    return config_from_entry(entry, fallback=get_account_credentials())
+def resolve_kb_config(entry: dict[str, Any], *, kb_base_dir: str | Path | None = None) -> ImaConfig:
+    """Resolve a KB entry with its owner's account credentials as fallback."""
+    return config_from_entry(
+        entry,
+        fallback=get_account_credentials(kb_base_dir=kb_base_dir),
+    )
 
 
 __all__ = [
@@ -135,6 +195,9 @@ __all__ = [
     "ImaConfig",
     "config_from_entry",
     "get_account_credentials",
+    "get_ima_settings_service",
     "is_ima_configured",
+    "load_account_settings",
     "resolve_kb_config",
+    "save_account_settings",
 ]

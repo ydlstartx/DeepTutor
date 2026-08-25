@@ -902,12 +902,16 @@ class TestPipelineSearch:
         assert stub.limit == 50
 
     def test_kb_without_credentials_uses_the_account_pair(self, tmp_path, monkeypatch) -> None:
-        import deeptutor.services.config as config_module
         from deeptutor.services.config.runtime_settings import RuntimeSettingsService
+        import deeptutor.services.rag.pipelines.ima.config as ima_config_module
 
         service = RuntimeSettingsService(tmp_path / "settings", process_env={})
         service.save_ima({"client_id": "cid", "api_key": "key"})
-        monkeypatch.setattr(config_module, "get_runtime_settings_service", lambda: service)
+        monkeypatch.setattr(
+            ima_config_module,
+            "get_ima_settings_service",
+            lambda **_kwargs: service,
+        )
 
         base = _kb_config(tmp_path, {"type": "ima", "knowledge_base_id": "kb-1"})
         seen: list[ImaConfig] = []

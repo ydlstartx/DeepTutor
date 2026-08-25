@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-import deeptutor.services.config as config_module
 from deeptutor.services.config.runtime_settings import RuntimeSettingsService
+import deeptutor.services.rag.pipelines.ima.config as ima_config_module
 from deeptutor.services.rag.preflight import engine_preflight
 
 
@@ -11,7 +11,11 @@ from deeptutor.services.rag.preflight import engine_preflight
 def ima_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RuntimeSettingsService:
     """Point the account-level IMA credentials at a throwaway settings dir."""
     service = RuntimeSettingsService(tmp_path, process_env={})
-    monkeypatch.setattr(config_module, "get_runtime_settings_service", lambda: service)
+    monkeypatch.setattr(
+        ima_config_module,
+        "get_ima_settings_service",
+        lambda **_kwargs: service,
+    )
     return service
 
 

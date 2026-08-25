@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import threading
 import time
 from typing import Any, Mapping, Optional
@@ -79,6 +80,7 @@ _MISS = object()
 def read_inventory(
     entry: Mapping[str, Any],
     *,
+    kb_base_dir: str | Path | None = None,
     client_factory=None,
     use_cache: bool = True,
 ) -> Optional[ImaInventory]:
@@ -89,7 +91,7 @@ def read_inventory(
     ``client_factory`` (config → client) is the test seam.
     """
     try:
-        config = resolve_kb_config(dict(entry))
+        config = resolve_kb_config(dict(entry), kb_base_dir=kb_base_dir)
     except ImaNotConfiguredError:
         return None
 

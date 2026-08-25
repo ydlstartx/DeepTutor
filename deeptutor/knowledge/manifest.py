@@ -78,14 +78,14 @@ _NON_DOCUMENT_KB_TYPES: dict[str, str] = {
 # The document names a connected KB's own service can list, plus whether that
 # listing is complete. ``None`` means the inventory could not be read at all, so
 # the KB is reported as non-enumerable — the pre-reader behaviour.
-RemoteInventoryReader = Callable[[Mapping[str, Any]], "tuple[list[str], bool] | None"]
+RemoteInventoryReader = Callable[[Mapping[str, Any], Path], "tuple[list[str], bool] | None"]
 
 
-def _ima_inventory(entry: Mapping[str, Any]) -> tuple[list[str], bool] | None:
+def _ima_inventory(entry: Mapping[str, Any], kb_base_dir: Path) -> tuple[list[str], bool] | None:
     """List a connected Tencent IMA library through its own browse API."""
     from deeptutor.services.rag.pipelines.ima.inventory import read_inventory
 
-    inventory = read_inventory(entry)
+    inventory = read_inventory(entry, kb_base_dir=kb_base_dir)
     if inventory is None:
         return None
     return list(inventory.documents), inventory.complete
@@ -217,7 +217,13 @@ def build_manifest(
 
     reader = _REMOTE_INVENTORY_READERS.get(kb_type)
     if reader is not None:
-        return _remote_manifest(manifest_fields, record, reader=reader, limit=limit)
+        return _remote_manifest(
+            manifest_fields,
+            record,
+            kb_base_dir=kb_dir.parent,
+            reader=reader,
+            limit=limit,
+        )
 
     root = document_root(kb_dir, record)
     if root is None:
@@ -266,6 +272,7 @@ def _remote_manifest(
     fields: dict[str, Any],
     entry: Mapping[str, Any],
     *,
+    kb_base_dir: Path,
     reader: RemoteInventoryReader,
     limit: int,
 ) -> KbManifest:
@@ -277,7 +284,7 @@ def _remote_manifest(
     omit the size rather than printing a misleading "0 B".
     """
     try:
-        listing = reader(entry)
+        listing = reader(entry, kb_base_dir)
     except Exception:
         listing = None
     if listing is None:

@@ -88,7 +88,7 @@ def resolve_client(kb_ref: str, *, for_write: bool = False):
 
     resource = resolve_kb(str(kb_ref), require_write=for_write)
     entry = load_kb_config_entry(resource.base_dir, resource.name)
-    return ImaClient(resolve_kb_config(entry))
+    return ImaClient(resolve_kb_config(entry, kb_base_dir=resource.base_dir))
 
 
 def _resolve(context: UnifiedContext) -> tuple[ImaBinding, ...]:

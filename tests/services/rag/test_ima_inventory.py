@@ -264,7 +264,7 @@ def _patch_reader(monkeypatch: pytest.MonkeyPatch, result) -> None:
     monkeypatch.setitem(
         manifest_module._REMOTE_INVENTORY_READERS,
         "ima",
-        lambda _entry: result,
+        lambda _entry, _kb_base_dir: result,
     )
 
 
@@ -330,7 +330,7 @@ class TestManifestEnumeratesIma:
     ) -> None:
         from deeptutor.knowledge import manifest as manifest_module
 
-        def boom(_entry):
+        def boom(_entry, _kb_base_dir):
             raise RuntimeError("offline")
 
         monkeypatch.setitem(manifest_module._REMOTE_INVENTORY_READERS, "ima", boom)

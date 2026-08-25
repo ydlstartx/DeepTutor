@@ -98,8 +98,10 @@ from deeptutor.services.rag.pipelines.ima.config import (
     ImaConfig,
     ImaCredentials,
     ImaNotConfiguredError,
-    config_from_entry,
     get_account_credentials,
+    load_account_settings,
+    resolve_kb_config,
+    save_account_settings,
 )
 from deeptutor.utils.document_extractor import (
     MAX_EXTRACTED_CHARS_PER_DOC,
@@ -1346,9 +1348,7 @@ class ImaConfigUpdate(BaseModel):
 
 def _ima_config_payload() -> dict:
     """Account-level IMA credential state for the UI, with the key redacted."""
-    from deeptutor.services.config import get_runtime_settings_service
-
-    settings = get_runtime_settings_service().load_ima()
+    settings = load_account_settings()
     client_id = str(settings.get("client_id") or "")
     api_key_set = bool(settings.get("api_key"))
     return {
@@ -1372,10 +1372,7 @@ async def get_ima_pipeline_config():
 async def update_ima_pipeline_config(payload: ImaConfigUpdate):
     """Persist the account-level IMA Client ID / API key."""
     try:
-        from deeptutor.services.config import get_runtime_settings_service
-
-        service = get_runtime_settings_service()
-        current = service.load_ima(include_process_overrides=False)
+        current = load_account_settings(include_process_overrides=False)
 
         client_id = current.get("client_id", "")
         if payload.client_id is not None:
@@ -1385,7 +1382,7 @@ async def update_ima_pipeline_config(payload: ImaConfigUpdate):
         if payload.api_key is not None:
             api_key = payload.api_key.strip()
 
-        service.save_ima({"client_id": client_id, "api_key": api_key})
+        save_account_settings({"client_id": client_id, "api_key": api_key})
         return _ima_config_payload()
     except Exception as e:
         logger.error(f"Error updating IMA config: {e}")
@@ -2482,9 +2479,8 @@ def _resolve_kb_raw_dir(kb_name: str, *, allow_unsupported: bool = False) -> Pat
     return kb_path / "raw"
 
 
-def _ima_client_from_entry(kb_entry: dict) -> ImaClient:
-    config = config_from_entry(kb_entry, fallback=get_account_credentials())
-    return ImaClient(config)
+def _ima_client_from_entry(kb_entry: dict, *, kb_base_dir: Path) -> ImaClient:
+    return ImaClient(resolve_kb_config(kb_entry, kb_base_dir=kb_base_dir))
 
 
 def _normalize_remote_file_path(filename: str) -> str:
@@ -2495,9 +2491,11 @@ def _normalize_remote_file_path(filename: str) -> str:
     return path.as_posix()
 
 
-async def _list_ima_tree(kb_entry: dict, *, max_items: int = 500) -> tuple[ImaClient, dict]:
+async def _list_ima_tree(
+    kb_entry: dict, *, kb_base_dir: Path, max_items: int = 500
+) -> tuple[ImaClient, dict]:
     try:
-        client = _ima_client_from_entry(kb_entry)
+        client = _ima_client_from_entry(kb_entry, kb_base_dir=kb_base_dir)
         return client, await client.list_knowledge_tree(max_items=max_items)
     except ImaNotConfiguredError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2506,13 +2504,13 @@ async def _list_ima_tree(kb_entry: dict, *, max_items: int = 500) -> tuple[ImaCl
 
 
 async def _resolve_ima_media(kb_name: str, filename: str) -> tuple[ImaClient, dict]:
-    manager, resolved_name, _ = _readable_kb(kb_name)
+    manager, resolved_name, kb_base_dir = _readable_kb(kb_name)
     kb_entry = _load_kb_entry_or_404(manager, resolved_name)
     if kb_entry.get("type") != IMA_KB_TYPE:
         raise HTTPException(status_code=409, detail="Knowledge base is not hosted by IMA")
 
     requested = _normalize_remote_file_path(filename)
-    client, tree = await _list_ima_tree(kb_entry)
+    client, tree = await _list_ima_tree(kb_entry, kb_base_dir=kb_base_dir)
     for item in tree.get("items", []):
         if item.get("type") == "file" and item.get("path") == requested:
             return client, item
@@ -2568,10 +2566,10 @@ async def list_kb_raw_files(kb_name: str):
     before it holds any files. Folders are purely organizational and have no
     effect on indexing or retrieval.
     """
-    manager, resolved_name, _ = _readable_kb(kb_name)
+    manager, resolved_name, kb_base_dir = _readable_kb(kb_name)
     kb_entry = _load_kb_entry_or_404(manager, resolved_name)
     if kb_entry.get("type") == IMA_KB_TYPE:
-        _, tree = await _list_ima_tree(kb_entry)
+        _, tree = await _list_ima_tree(kb_entry, kb_base_dir=kb_base_dir)
         files = []
         for item in tree.get("items", []):
             path = str(item.get("path") or "")
