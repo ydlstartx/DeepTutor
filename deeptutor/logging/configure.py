@@ -36,9 +36,7 @@ class _ConsoleLevelFilter(logging.Filter):
         self._level = level
 
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= self._level or bool(
-            getattr(record, ALWAYS_CONSOLE_ATTR, False)
-        )
+        return record.levelno >= self._level or bool(getattr(record, ALWAYS_CONSOLE_ATTR, False))
 
 
 def _remove_managed_handlers(root: logging.Logger) -> None:

@@ -19,7 +19,11 @@ def _make_images(tmp_path: Path, names: list[str]) -> list[Path]:
     paths: list[Path] = []
     for name in names:
         p = tmp_path / name
-        p.write_bytes(b"\x89PNG\r\n")
+        # The production cache is content-addressed, so separate test images
+        # must have separate content.  Reusing the same bytes for every name
+        # let a fast image's cached description satisfy a later slow/failed
+        # image, making the timeout tests depend on event-loop scheduling.
+        p.write_bytes(b"\x89PNG\r\n" + name.encode("utf-8"))
         paths.append(p)
     return paths
 
