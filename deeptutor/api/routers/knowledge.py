@@ -57,7 +57,7 @@ from deeptutor.knowledge.policy import (
     is_kb_query_only,
 )
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
-from deeptutor.logging import PROCESS_LOG_PRIVATE_ATTR
+from deeptutor.logging import ALWAYS_CONSOLE_ATTR, PROCESS_LOG_PRIVATE_ATTR
 from deeptutor.multi_user.context import get_current_user
 from deeptutor.multi_user.knowledge_access import (
     assert_writable,
@@ -689,10 +689,14 @@ def _task_log(task_id: str, message: str, level: str = "info") -> None:
     manager.emit_log(task_id, message)
 
     log_method = getattr(logger, level, None)
+    log_extra = {
+        PROCESS_LOG_PRIVATE_ATTR: True,
+        ALWAYS_CONSOLE_ATTR: True,
+    }
     if callable(log_method):
-        log_method(f"[{task_id}] {message}", extra={PROCESS_LOG_PRIVATE_ATTR: True})
+        log_method(f"[{task_id}] {message}", extra=log_extra)
     else:
-        logger.info(f"[{task_id}] {message}", extra={PROCESS_LOG_PRIVATE_ATTR: True})
+        logger.info(f"[{task_id}] {message}", extra=log_extra)
 
 
 def _server_task_trace(task_id: str, trace: str) -> None:

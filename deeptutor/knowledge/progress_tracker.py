@@ -10,6 +10,7 @@ import json
 import logging
 from pathlib import Path
 
+from deeptutor.logging import ALWAYS_CONSOLE_ATTR
 from deeptutor.services.file_io import atomic_write_json
 
 # Use unified logging system
@@ -57,6 +58,31 @@ class ProgressTracker:
         self.progress_file = self.kb_dir / ".progress.json"
         self._callbacks: list = []  # Support multiple callbacks
         self.task_id: str | None = None  # Task ID (for log identification)
+        self._console_progress: dict[tuple[str, str], int] = {}
+
+    def _is_console_milestone(
+        self,
+        *,
+        stage: ProgressStage,
+        message: str,
+        message_key: str | None,
+        current: int,
+        total: int,
+        error: str | None,
+    ) -> bool:
+        """Keep long-running KB tasks observable without flooding stdout."""
+        if error or stage in {ProgressStage.COMPLETED, ProgressStage.ERROR}:
+            return True
+        if total <= 0:
+            return True
+
+        percent = int(current / total * 100)
+        phase = (stage.value, message_key or message)
+        previous = self._console_progress.get(phase)
+        visible = previous is None or current in {0, 1, total} or percent >= previous + 5
+        if visible:
+            self._console_progress[phase] = percent
+        return visible
 
     def set_callback(self, callback: Callable[[dict], None]):
         """Set progress callback function (can be called multiple times to add multiple callbacks)"""
@@ -250,6 +276,15 @@ class ProgressTracker:
         try:
             logger = _logger_instance()
             prefix = f"[{self.task_id}]" if self.task_id else ""
+            always_console = self._is_console_milestone(
+                stage=stage,
+                message=message,
+                message_key=message_key,
+                current=current,
+                total=total,
+                error=error,
+            )
+            log_extra = {ALWAYS_CONSOLE_ATTR: always_console}
 
             if total > 0:
                 percent = progress["progress_percent"]
@@ -262,9 +297,9 @@ class ProgressTracker:
                     progress_msg += f" - File: {file_name}"
 
             if error:
-                logger.error(f"{progress_msg} - Error: {error}")
+                logger.error(f"{progress_msg} - Error: {error}", extra=log_extra)
             else:
-                logger.info(progress_msg)
+                logger.info(progress_msg, extra=log_extra)
         except Exception:
             # If unified logging fails unexpectedly, use stdlib logger as fallback.
             fallback_logger = logging.getLogger("deeptutor.ProgressTracker")

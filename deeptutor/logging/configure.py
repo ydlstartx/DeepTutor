@@ -10,6 +10,7 @@ import sys
 from .config import LoggingConfig, load_logging_config
 from .formatters import ConsoleFormatter, ContextFilter, JsonlFormatter
 from .loguru_bridge import install_loguru_bridge
+from .process_stream import ALWAYS_CONSOLE_ATTR
 
 _CONFIGURED = False
 _MANAGED_ATTR = "_deeptutor_managed"
@@ -25,6 +26,19 @@ def _managed(handler: logging.Handler) -> logging.Handler:
     setattr(handler, _MANAGED_ATTR, True)
     handler.addFilter(ContextFilter())
     return handler
+
+
+class _ConsoleLevelFilter(logging.Filter):
+    """Apply the configured threshold while retaining marked task milestones."""
+
+    def __init__(self, level: int) -> None:
+        super().__init__()
+        self._level = level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= self._level or bool(
+            getattr(record, ALWAYS_CONSOLE_ATTR, False)
+        )
 
 
 def _remove_managed_handlers(root: logging.Logger) -> None:
@@ -51,7 +65,12 @@ def configure_logging(force: bool = False) -> LoggingConfig:
 
     if config.console_output:
         console = _managed(logging.StreamHandler(sys.stdout))
-        console.setLevel(level)
+        # Handler-level filtering happens before logging.Filter, so keep the
+        # handler open and enforce the configured threshold in our filter.  A
+        # small set of explicitly marked, user-facing task milestones can then
+        # remain visible at WARNING without enabling every INFO dependency log.
+        console.setLevel(logging.DEBUG)
+        console.addFilter(_ConsoleLevelFilter(level))
         console.setFormatter(ConsoleFormatter())
         root.addHandler(console)
 

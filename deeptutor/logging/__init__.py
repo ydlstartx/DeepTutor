@@ -3,7 +3,12 @@
 from .config import LoggingConfig, get_default_log_dir, get_global_log_level, load_logging_config
 from .configure import configure_logging
 from .context import LOG_CONTEXT_FIELDS, bind_log_context, current_log_context
-from .process_stream import PROCESS_LOG_PRIVATE_ATTR, ProcessLogEvent, capture_process_logs
+from .process_stream import (
+    ALWAYS_CONSOLE_ATTR,
+    PROCESS_LOG_PRIVATE_ATTR,
+    ProcessLogEvent,
+    capture_process_logs,
+)
 from .stats import MODEL_PRICING, LLMCall, LLMStats, estimate_tokens, get_pricing
 
 __all__ = [
@@ -12,6 +17,7 @@ __all__ = [
     "configure_logging",
     "bind_log_context",
     "current_log_context",
+    "ALWAYS_CONSOLE_ATTR",
     "PROCESS_LOG_PRIVATE_ATTR",
     "capture_process_logs",
     "ProcessLogEvent",

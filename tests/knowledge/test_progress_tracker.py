@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from deeptutor.knowledge.manager import KnowledgeBaseManager
 from deeptutor.knowledge.progress_tracker import ProgressStage, ProgressTracker
@@ -119,3 +120,29 @@ def test_update_keeps_an_explicit_message_verbatim(tmp_path) -> None:
 
     assert seen[-1]["message"] == "already rendered"
     assert "message_key" not in seen[-1]
+
+
+def test_progress_tracker_marks_console_milestones_without_flooding(tmp_path, caplog) -> None:
+    from deeptutor.logging import ALWAYS_CONSOLE_ATTR
+
+    tracker = ProgressTracker("kb", tmp_path)
+    tracker.task_id = "task-1"
+
+    with caplog.at_level(logging.INFO, logger="deeptutor.knowledge.progress_tracker"):
+        for current in (1, 2, 6, 7, 100):
+            tracker.update(
+                ProgressStage.PROCESSING_DOCUMENTS,
+                message_key="Embedding batches: {{current}}/{{total}} complete",
+                message_params={"current": current, "total": 100},
+                current=current,
+                total=100,
+            )
+
+    records = [record for record in caplog.records if record.name.endswith("progress_tracker")]
+    assert [bool(getattr(record, ALWAYS_CONSOLE_ATTR, False)) for record in records] == [
+        True,
+        False,
+        True,
+        False,
+        True,
+    ]

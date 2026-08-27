@@ -14,6 +14,11 @@ from .context import LOG_CONTEXT_FIELDS
 from .formatters import ContextFilter
 
 PROCESS_LOG_PRIVATE_ATTR = "deeptutor_process_log_private"
+# Operational milestones carrying this attribute remain visible on the local
+# console even when the configured application log level is WARNING.  This is
+# intentionally record-scoped: lowering the whole console to INFO would bring
+# back noisy dependency logs just to make a long-running task observable.
+ALWAYS_CONSOLE_ATTR = "deeptutor_always_console"
 
 
 @dataclass(frozen=True)

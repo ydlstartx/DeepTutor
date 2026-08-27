@@ -75,3 +75,31 @@ def test_configure_logging_uses_rotation_settings(monkeypatch, tmp_path: Path):
 
     assert (tmp_path / "deeptutor.jsonl").exists()
     assert (tmp_path / "deeptutor.jsonl.1").exists()
+
+
+def test_console_keeps_marked_task_milestones_at_warning(monkeypatch, capsys):
+    configure_module = importlib.import_module("deeptutor.logging.configure")
+    monkeypatch.setattr(
+        configure_module,
+        "load_logging_config",
+        lambda: LoggingConfig(
+            level="WARNING",
+            console_output=True,
+            file_output=False,
+        ),
+    )
+
+    configure_module.configure_logging(force=True)
+    logger = logging.getLogger("deeptutor.tests.console")
+    logger.info("ordinary info")
+    logger.info(
+        "knowledge task reached 50%",
+        extra={configure_module.ALWAYS_CONSOLE_ATTR: True},
+    )
+    logger.warning("ordinary warning")
+    _flush_root_handlers()
+
+    output = capsys.readouterr().out
+    assert "ordinary info" not in output
+    assert "knowledge task reached 50%" in output
+    assert "ordinary warning" in output
