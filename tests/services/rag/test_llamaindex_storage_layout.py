@@ -175,8 +175,9 @@ def test_bm25_retriever_overrides_persisted_top_k(
             self.similarity_top_k = 99
 
         @classmethod
-        def from_persist_dir(cls, path: str):
+        def from_persist_dir(cls, path: str, **kwargs):
             assert path == str(persist_dir)
+            assert kwargs == {"show_progress": False, "leave_progress": False}
             return cls()
 
     monkeypatch.setattr(retriever_module, "_import_bm25_retriever", lambda: _FakeBM25)
@@ -204,6 +205,33 @@ def test_bm25_persistence_drops_stale_sidecar_on_rebuild_failure(
 
     assert retriever_module.persist_bm25_retriever(object(), tmp_path, top_k=6) is False
     assert not persist_dir.exists()
+
+
+def test_bm25_persistence_disables_dependency_progress_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from deeptutor.services.rag.pipelines.llamaindex import retrievers as retriever_module
+
+    captured: dict[str, object] = {}
+
+    class _FakeRetriever:
+        @classmethod
+        def from_defaults(cls, index, similarity_top_k: int):
+            captured["top_k"] = similarity_top_k
+            return cls()
+
+        def persist(self, path: str, **kwargs) -> None:
+            captured["path"] = path
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(retriever_module, "_import_bm25_retriever", lambda: _FakeRetriever)
+
+    assert retriever_module.persist_bm25_retriever(object(), tmp_path, top_k=6) is True
+    assert captured == {
+        "top_k": 6,
+        "path": str(tmp_path / retriever_module.BM25_PERSIST_DIRNAME),
+        "kwargs": {"show_progress": False, "leave_progress": False},
+    }
 
 
 def test_retrieval_config_reads_profile_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

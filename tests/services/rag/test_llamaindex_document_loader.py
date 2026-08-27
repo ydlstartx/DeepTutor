@@ -217,7 +217,11 @@ def test_loader_indexes_images_extracted_from_parsed_document(
     monkeypatch.setattr(loader_module, "get_embedding_client", lambda: _MultimodalEmbeddingClient())
     monkeypatch.setattr(loader_module, "get_llm_client", lambda: _VisionClient())
 
-    documents = asyncio.run(loader_module.LlamaIndexDocumentLoader().load([str(pdf_path)]))
+    documents = asyncio.run(
+        loader_module.LlamaIndexDocumentLoader(
+            image_description_cache_root=tmp_path / "description-cache"
+        ).load([str(pdf_path)])
+    )
 
     text_docs = [doc for doc in documents if not isinstance(doc, ImageNode)]
     image_nodes = [doc for doc in documents if isinstance(doc, ImageNode)]
@@ -275,9 +279,10 @@ def test_loader_describes_images_with_bounded_concurrency(
     monkeypatch.setattr(loader_module, "get_llm_client", lambda: _VisionClient())
 
     documents = asyncio.run(
-        loader_module.LlamaIndexDocumentLoader(image_description_concurrency=2).load(
-            [str(path) for path in paths]
-        )
+        loader_module.LlamaIndexDocumentLoader(
+            image_description_concurrency=2,
+            image_description_cache_root=tmp_path / "description-cache",
+        ).load([str(path) for path in paths])
     )
 
     assert peak == 2
@@ -306,7 +311,11 @@ def test_loader_skips_images_when_embedding_provider_is_text_only(
 
     monkeypatch.setattr(loader_module, "get_llm_client", _unexpected_llm_client)
 
-    documents = asyncio.run(loader_module.LlamaIndexDocumentLoader().load([str(image_path)]))
+    documents = asyncio.run(
+        loader_module.LlamaIndexDocumentLoader(
+            image_description_cache_root=tmp_path / "description-cache"
+        ).load([str(image_path)])
+    )
 
     assert documents == []
 
@@ -354,7 +363,11 @@ def test_loader_embeds_images_with_qwen38_max_vision_capability(
     monkeypatch.setattr(loader_module, "get_embedding_client", lambda: _MultimodalClient())
     monkeypatch.setattr(loader_module, "get_llm_client", lambda: vision_client)
 
-    documents = asyncio.run(loader_module.LlamaIndexDocumentLoader().load([str(image_path)]))
+    documents = asyncio.run(
+        loader_module.LlamaIndexDocumentLoader(
+            image_description_cache_root=tmp_path / "description-cache"
+        ).load([str(image_path)])
+    )
 
     assert len(documents) == 1
     assert isinstance(documents[0], ImageNode)

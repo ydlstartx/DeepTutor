@@ -71,7 +71,13 @@ def build_bm25_retriever(index: Any, storage_dir: Path, *, top_k: int) -> Any | 
     persist_dir = _bm25_persist_dir(storage_dir)
     if persist_dir.exists():
         try:
-            retriever = bm25_cls.from_persist_dir(str(persist_dir))
+            # bm25s otherwise emits its own byte-level tqdm while rebuilding a
+            # missing corpus.mmindex. In the Web backend that carriage-return
+            # output is captured as a permanent-looking "0%" line even after
+            # loading completes. DeepTutor owns user-visible task progress.
+            retriever = bm25_cls.from_persist_dir(
+                str(persist_dir), show_progress=False, leave_progress=False
+            )
             return _set_similarity_top_k(retriever, top_k)
         except Exception as exc:
             logger.warning("Failed to load persisted BM25 retriever from %s: %s", persist_dir, exc)
@@ -109,7 +115,9 @@ def persist_bm25_retriever(index: Any, storage_dir: Path, *, top_k: int) -> bool
 
     persist_dir.mkdir(parents=True, exist_ok=True)
     try:
-        retriever.persist(str(persist_dir))
+        # BM25Retriever forwards these flags to bm25s.BM25.save(), including
+        # the corpus newline/mmindex pass that produced the misleading 0% bar.
+        retriever.persist(str(persist_dir), show_progress=False, leave_progress=False)
         return True
     except Exception as exc:
         logger.warning("Failed to persist BM25 retriever to %s: %s", persist_dir, exc)

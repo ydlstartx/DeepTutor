@@ -65,6 +65,8 @@ export interface LlamaIndexConfig {
   parse_concurrency: number;
   image_description_concurrency: number;
   image_description_timeout_seconds: number;
+  /** Retries after the initial per-image timeout. */
+  image_description_max_retries: number;
 }
 
 export interface GraphRagConfig {

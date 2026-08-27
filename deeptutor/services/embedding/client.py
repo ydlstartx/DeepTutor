@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 import logging
+import re
 from typing import Any, Dict, Iterator, List, Optional
 
 from deeptutor.services.config.embedding_endpoint import (
@@ -22,6 +23,45 @@ from .validation import validate_embedding_batch
 # Reusable executor for sync embedding calls made from inside a running event
 # loop (embed_sync submits asyncio.run to a worker thread).
 _sync_embed_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+_BATCH_RANGE_PATTERN = re.compile(
+    r"(?:image\s+)?batch(?:[_\s-]*size)?[^\n]{0,80}?"
+    r"\[\s*\d+\s*,\s*(\d+)\s*\]",
+    re.IGNORECASE,
+)
+_BATCH_MAX_PATTERN = re.compile(
+    r"(?:image\s+)?batch(?:[_\s-]*size)?[^\n]{0,80}?"
+    r"(?:max(?:imum)?|at\s+most|no\s+more\s+than)\D{0,16}(\d+)",
+    re.IGNORECASE,
+)
+_HTTP_413_PATTERN = re.compile(
+    r"(?:status(?:[_\s-]*code)?\s*[:=]\s*413\b|http(?:\s+status)?\s+413\b)",
+    re.IGNORECASE,
+)
+
+
+def _batch_limit_from_error(exc: Exception) -> int | None:
+    """Extract an explicit provider batch limit without adapting unrelated 4xx errors."""
+    message = str(exc)
+    for pattern in (_BATCH_RANGE_PATTERN, _BATCH_MAX_PATTERN):
+        match = pattern.search(message)
+        if match:
+            limit = int(match.group(1))
+            return limit if limit > 0 else None
+    return None
+
+
+def _is_adaptable_batch_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if _batch_limit_from_error(exc) is not None:
+        return True
+    return (
+        _HTTP_413_PATTERN.search(message) is not None
+        or "payload too large" in message
+        or "too many" in message
+        and ("batch" in message or "input" in message)
+    )
 
 
 @contextmanager
@@ -78,6 +118,9 @@ class EmbeddingClient:
     def __init__(self, config: Optional[EmbeddingConfig] = None):
         self.config = config or get_embedding_config()
         self.logger = logging.getLogger(__name__)
+        # The client is recreated when its immutable model config changes, so
+        # an instance-local learned cap is automatically model-specific.
+        self._learned_multimodal_batch_size: int | None = None
         endpoint = self.config.effective_url or self.config.base_url
         problem = embedding_endpoint_validation_error(self.config.binding, endpoint)
         if problem:
@@ -257,11 +300,43 @@ class EmbeddingClient:
 
         spec = EMBEDDING_PROVIDERS.get(self.config.binding)
         provider_max = spec.max_batch_items if spec else 256
-        batch_size = max(1, min(self.config.batch_size, provider_max))
+        model_max: int | None = None
+        try:
+            raw_model_max = self.adapter.get_model_info().get("max_multimodal_batch_items")
+            if raw_model_max is not None:
+                model_max = max(1, int(raw_model_max))
+        except (AttributeError, TypeError, ValueError):
+            model_max = None
+        batch_size = max(
+            1,
+            min(
+                self.config.batch_size,
+                provider_max,
+                model_max if model_max is not None else provider_max,
+                self._learned_multimodal_batch_size
+                if self._learned_multimodal_batch_size is not None
+                else provider_max,
+            ),
+        )
+        if batch_size < self.config.batch_size:
+            self.logger.info(
+                "Clamped multimodal batch_size %d -> %d "
+                "(binding=%s, model=%s, provider_max=%d, model_max=%s)",
+                self.config.batch_size,
+                batch_size,
+                self.config.binding,
+                self.config.model,
+                provider_max,
+                model_max,
+            )
         all_embeddings: List[List[float]] = []
-        total_batches = (len(contents) + batch_size - 1) // batch_size
+        start = 0
+        completed_batches = 0
+        expected_dim: int | None = None
 
-        for i, start in enumerate(range(0, len(contents), batch_size)):
+        # A cursor loop lets a provider correct an outdated/unknown model cap.
+        # Only the failed slice is retried; vectors from prior batches remain.
+        while start < len(contents):
             batch = contents[start : start + batch_size]
             request = EmbeddingRequest(
                 texts=[],
@@ -270,25 +345,74 @@ class EmbeddingClient:
                 contents=batch,
                 enable_fusion=False,
             )
-            response = await self.adapter.embed(request)
+            try:
+                response = await self.adapter.embed(request)
+            except Exception as exc:
+                explicit_limit = _batch_limit_from_error(exc)
+                if not _is_adaptable_batch_error(exc) or len(batch) <= 1:
+                    self.logger.error(
+                        "Multimodal embedding batch failed "
+                        "(binding=%s, model=%s, start_index=%d, batch_items=%d): %s",
+                        self.config.binding,
+                        self.config.model,
+                        start,
+                        len(batch),
+                        exc,
+                    )
+                    raise
+
+                if explicit_limit is not None and explicit_limit < len(batch):
+                    smaller_batch_size = min(batch_size, explicit_limit)
+                else:
+                    smaller_batch_size = max(1, len(batch) // 2)
+                if smaller_batch_size >= batch_size:
+                    raise
+                self.logger.warning(
+                    "Multimodal embedding provider rejected batch_items=%d; "
+                    "retrying the same slice with batch_size=%d "
+                    "(binding=%s, model=%s): %s",
+                    len(batch),
+                    smaller_batch_size,
+                    self.config.binding,
+                    self.config.model,
+                    exc,
+                )
+                batch_size = smaller_batch_size
+                self._learned_multimodal_batch_size = smaller_batch_size
+                continue
+
+            total_batches = completed_batches + (
+                (len(contents) - start + batch_size - 1) // batch_size
+            )
             validated = validate_embedding_batch(
                 response.embeddings,
                 expected_count=len(batch),
                 binding=self.config.binding,
                 model=self.config.model,
-                batch_index=i + 1,
+                batch_index=completed_batches + 1,
                 total_batches=total_batches,
                 start_index=start,
             )
+            batch_dim = len(validated[0]) if validated else 0
+            if expected_dim is None:
+                expected_dim = batch_dim
+            elif batch_dim != expected_dim:
+                raise ValueError(
+                    "Embedding provider returned inconsistent vector dimensions "
+                    f"across multimodal batches (binding={self.config.binding}, "
+                    f"model={self.config.model}): expected {expected_dim}, got {batch_dim}."
+                )
             all_embeddings.extend(validated)
+            start += len(batch)
+            completed_batches += 1
 
             if progress_callback:
                 try:
-                    progress_callback(i + 1, total_batches)
+                    progress_callback(completed_batches, total_batches)
                 except Exception:
                     pass
 
-            if i < total_batches - 1 and self.config.batch_delay > 0:
+            if start < len(contents) and self.config.batch_delay > 0:
                 await asyncio.sleep(self.config.batch_delay)
 
         return all_embeddings

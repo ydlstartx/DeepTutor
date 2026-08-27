@@ -185,6 +185,7 @@ def test_get_model_info_reports_multimodal_capability() -> None:
     assert info["multimodal"] is True
     assert info["provider"] == "aliyun"
     assert 2560 in info["supported_dimensions"]
+    assert info["max_multimodal_batch_items"] == 10
 
 
 @pytest.mark.parametrize(

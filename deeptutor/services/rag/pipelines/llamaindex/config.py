@@ -132,6 +132,15 @@ def image_description_limits() -> tuple[int, float]:
         return 8, 60.0
 
 
+def image_description_retry_limit() -> int:
+    """Return retries after the first per-image timeout (zero disables)."""
+    try:
+        retries = int(_load_runtime_settings().get("image_description_max_retries", 1) or 0)
+        return min(3, max(0, retries))
+    except Exception:
+        return 1
+
+
 __all__ = [
     "HYBRID_PROFILE",
     "RetrievalConfig",
@@ -141,6 +150,7 @@ __all__ = [
     "default_top_k",
     "indexing_concurrency",
     "image_description_limits",
+    "image_description_retry_limit",
     "normalize_retrieval_profile",
     "retrieval_config_from_env",
     "retrieval_config_from_settings",

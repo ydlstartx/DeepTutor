@@ -401,6 +401,7 @@ function LlamaIndexForm({
         image_description_concurrency: form.image_description_concurrency,
         image_description_timeout_seconds:
           form.image_description_timeout_seconds,
+        image_description_max_retries: form.image_description_max_retries,
       });
       setLoaded(next);
       setForm(next);
@@ -560,7 +561,7 @@ function LlamaIndexForm({
             {t("Applies on the next image indexing run")}
           </span>
         </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <NumberField
             label={t("Concurrent image descriptions")}
             value={form.image_description_concurrency}
@@ -574,6 +575,13 @@ function LlamaIndexForm({
             min={5}
             max={600}
             onChange={(v) => set({ image_description_timeout_seconds: v })}
+          />
+          <NumberField
+            label={t("Timeout retries")}
+            value={form.image_description_max_retries}
+            min={0}
+            max={3}
+            onChange={(v) => set({ image_description_max_retries: v })}
           />
         </div>
       </div>

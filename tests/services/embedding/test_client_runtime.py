@@ -43,6 +43,7 @@ def _build_config(
     model: str = "text-embedding-3-small",
     base_url: str = "https://api.openai.com/v1/embeddings",
     send_dimensions: bool | None = None,
+    batch_size: int = 2,
 ) -> EmbeddingConfig:
     return EmbeddingConfig(
         model=model,
@@ -54,7 +55,7 @@ def _build_config(
         provider_mode="standard",
         dim=8,
         send_dimensions=send_dimensions,
-        batch_size=2,
+        batch_size=batch_size,
         request_timeout=30,
     )
 
@@ -73,6 +74,106 @@ async def test_embedding_client_batches_requests(monkeypatch) -> None:
     assert len(adapter.calls[0].texts) == 2
     assert len(adapter.calls[1].texts) == 1
     assert adapter.config["dimensions"] == 8
+
+
+@pytest.mark.asyncio
+async def test_multimodal_embedding_uses_model_batch_cap_before_first_request(
+    monkeypatch,
+) -> None:
+    class _CappedMultimodalAdapter(_FakeAdapter):
+        def get_model_info(self):
+            return {"multimodal": True, "max_multimodal_batch_items": 10}
+
+        async def embed(self, request):
+            self.calls.append(request)
+            return type(
+                "Resp",
+                (),
+                {"embeddings": [[float(i), 0.0] for i, _ in enumerate(request.contents or [])]},
+            )()
+
+    _FakeAdapter.instances = []
+    monkeypatch.setattr(
+        "deeptutor.services.embedding.client._resolve_adapter_class",
+        lambda _b: _CappedMultimodalAdapter,
+    )
+    client = EmbeddingClient(_build_config("aliyun", model="qwen3-vl-embedding", batch_size=20))
+
+    vectors = await client.embed_contents([{"image": f"image-{i}"} for i in range(25)])
+
+    assert len(vectors) == 25
+    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [10, 10, 5]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_embedding_learns_explicit_provider_limit_and_retries_failed_slice(
+    monkeypatch,
+) -> None:
+    class _AdaptiveMultimodalAdapter(_FakeAdapter):
+        def get_model_info(self):
+            return {"multimodal": True}
+
+        async def embed(self, request):
+            self.calls.append(request)
+            items = request.contents or []
+            if len(items) > 10:
+                raise RuntimeError(
+                    "status=400, code=InvalidParameter, "
+                    "message=image batch size can should be [1, 10]"
+                )
+            return type(
+                "Resp",
+                (),
+                {"embeddings": [[float(i), 0.0] for i, _ in enumerate(items)]},
+            )()
+
+    _FakeAdapter.instances = []
+    monkeypatch.setattr(
+        "deeptutor.services.embedding.client._resolve_adapter_class",
+        lambda _b: _AdaptiveMultimodalAdapter,
+    )
+    client = EmbeddingClient(_build_config("aliyun", model="future-vl-embedding", batch_size=20))
+
+    vectors = await client.embed_contents([{"image": f"image-{i}"} for i in range(25)])
+    second_vectors = await client.embed_contents([{"image": f"next-{i}"} for i in range(12)])
+
+    assert len(vectors) == 25
+    assert len(second_vectors) == 12
+    # The first request discovers the cap. Only that slice is retried, and the
+    # next call on the same model starts at the learned size instead of failing.
+    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [
+        20,
+        10,
+        10,
+        5,
+        10,
+        2,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_embedding_does_not_shrink_unrelated_provider_errors(
+    monkeypatch,
+) -> None:
+    class _AuthFailureAdapter(_FakeAdapter):
+        def get_model_info(self):
+            return {"multimodal": True}
+
+        async def embed(self, request):
+            self.calls.append(request)
+            raise RuntimeError("status=401, code=InvalidApiKey")
+
+    _FakeAdapter.instances = []
+    monkeypatch.setattr(
+        "deeptutor.services.embedding.client._resolve_adapter_class",
+        lambda _b: _AuthFailureAdapter,
+    )
+    client = EmbeddingClient(_build_config("aliyun", model="future-vl-embedding", batch_size=20))
+
+    with pytest.raises(RuntimeError, match="InvalidApiKey"):
+        await client.embed_contents([{"image": f"image-{i}"} for i in range(20)])
+
+    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [20]
 
 
 @pytest.mark.asyncio

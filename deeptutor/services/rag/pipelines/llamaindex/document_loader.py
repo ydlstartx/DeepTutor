@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
+import hashlib
 import logging
 import mimetypes
 from pathlib import Path
@@ -24,10 +25,16 @@ from llama_index.core.schema import ImageNode
 
 from deeptutor.services.embedding import get_embedding_client
 from deeptutor.services.llm.client import get_llm_client
+from deeptutor.services.path_service import get_path_service
 from deeptutor.services.rag.file_routing import FileTypeRouter
 from deeptutor.utils.document_validator import DocumentValidator
 
-from .config import image_description_limits, indexing_concurrency
+from .config import (
+    image_description_limits,
+    image_description_retry_limit,
+    indexing_concurrency,
+)
+from .image_description_cache import ImageDescriptionCache, description_signature
 
 IMAGE_DESCRIPTION_SYSTEM_PROMPT = (
     "You describe images for a retrieval-augmented knowledge base. "
@@ -40,6 +47,12 @@ IMAGE_DESCRIPTION_PROMPT = (
     "and cite it later. Include visible text/OCR if present, the main subject, "
     "and any educational or technical meaning. Keep the answer under 180 words."
 )
+
+IMAGE_PIPELINE_CHUNK_SIZE = 64
+
+
+class ImageIndexingError(RuntimeError):
+    """Raised when configured image indexing starts but cannot produce vectors."""
 
 
 @dataclass(frozen=True)
@@ -65,10 +78,12 @@ class LlamaIndexDocumentLoader:
         *,
         parse_concurrency: int | None = None,
         image_description_concurrency: int | None = None,
+        image_description_cache_root: Path | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
         self._parse_concurrency_override = parse_concurrency
         self._image_description_concurrency_override = image_description_concurrency
+        self._image_description_cache_root = image_description_cache_root
 
     async def load(
         self,
@@ -224,13 +239,21 @@ class LlamaIndexDocumentLoader:
             )
             return []
 
-        embedded: list[_ImageSource] = []
-        descriptions: list[str] = []
-        contents: list[dict[str, str]] = []
         completed = 0
         total = len(sources)
         _, timeout_seconds = image_description_limits()
+        timeout_retries = image_description_retry_limit()
         semaphore = asyncio.Semaphore(concurrency)
+        cache_root = self._image_description_cache_root
+        if cache_root is None:
+            cache_root = get_path_service().get_parse_cache_root() / "image_descriptions"
+        description_cache = ImageDescriptionCache(cache_root)
+        signature = description_signature(
+            binding=str(llm_client.config.binding),
+            model=str(llm_client.config.model),
+            system_prompt=IMAGE_DESCRIPTION_SYSTEM_PROMPT,
+            prompt=IMAGE_DESCRIPTION_PROMPT,
+        )
 
         async def _describe_one(
             source: _ImageSource,
@@ -241,25 +264,46 @@ class LlamaIndexDocumentLoader:
                 try:
                     async with semaphore:
                         image_payload = self._load_image_payload(source.path)
-                        description = await asyncio.wait_for(
-                            self._describe_image(
+                        description = description_cache.get(
+                            image_hash=image_payload["sha256"], signature=signature
+                        )
+                        if description is None:
+                            description = await self._describe_image_with_timeout_retry(
                                 llm_client,
                                 source.path,
                                 image_payload["base64"],
                                 image_payload["mimetype"],
-                            ),
-                            timeout=timeout_seconds,
-                        )
+                                timeout_seconds=timeout_seconds,
+                                max_retries=timeout_retries,
+                            )
+                            if description:
+                                try:
+                                    description_cache.put(
+                                        image_hash=image_payload["sha256"],
+                                        signature=signature,
+                                        binding=str(llm_client.config.binding),
+                                        model=str(llm_client.config.model),
+                                        description=description,
+                                    )
+                                except OSError as exc:
+                                    # A cache write problem must not discard a
+                                    # description the provider already returned.
+                                    self.logger.warning(
+                                        "Could not persist image description cache for %s: %s",
+                                        source.path.name,
+                                        exc,
+                                    )
                 except asyncio.TimeoutError:
-                    self.logger.error(
-                        "Image description timed out after %ss: %s",
+                    self.logger.warning(
+                        "Image description timed out after %d attempt(s) of %ss each: %s",
+                        timeout_retries + 1,
                         timeout_seconds,
                         source.path.name,
                     )
                 except OSError as exc:
-                    self.logger.error(f"Failed to read image {source.path.name}: {exc}")
+                    self.logger.warning(f"Failed to read image {source.path.name}: {exc}")
                 except Exception as exc:
-                    self.logger.error(
+                    self.logger.warning(
                         "Failed to describe image %s with configured multimodal LLM "
                         "(binding=%s, model=%s): %s",
                         source.path.name,
@@ -288,48 +332,65 @@ class LlamaIndexDocumentLoader:
                         pass
             return result
 
-        # gather preserves input order, so embedded/descriptions/contents stay
-        # aligned regardless of completion order.
-        results = await asyncio.gather(*(_describe_one(source) for source in sources))
-        for result in results:
-            if result is None:
-                continue
-            embedded.append(result[0])
-            descriptions.append(result[1])
-            contents.append(result[2])
-
-        if not contents:
-            return []
-
-        try:
-            embeddings = await embedding_client.embed_contents(contents)
-        except Exception as exc:
-            self.logger.error(
-                "Failed to embed image contents with configured multimodal embedding "
-                "provider/model (binding=%s, model=%s): %s",
-                embedding_client.config.binding,
-                embedding_client.config.model,
-                exc,
-            )
-            return []
         nodes: list[ImageNode] = []
-        for source, description, embedding in zip(embedded, descriptions, embeddings):
-            mimetype = mimetypes.guess_type(source.path.name)[0] or "application/octet-stream"
-            nodes.append(
-                ImageNode(
-                    text=f"[Image] {source.origin.name}\n\n{description}",
-                    image_path=str(source.path),
-                    image_mimetype=mimetype,
-                    metadata={
-                        "file_name": source.origin.name,
-                        "file_path": str(source.origin),
-                        "content_type": "image",
-                        "image_description": description,
-                    },
-                    embedding=embedding,
+        for chunk_start in range(0, len(sources), IMAGE_PIPELINE_CHUNK_SIZE):
+            source_chunk = sources[chunk_start : chunk_start + IMAGE_PIPELINE_CHUNK_SIZE]
+            # gather preserves input order regardless of completion order.
+            results = await asyncio.gather(*(_describe_one(source) for source in source_chunk))
+            described = [result for result in results if result is not None]
+            if not described:
+                continue
+            contents = [result[2] for result in described]
+            try:
+                embeddings = await embedding_client.embed_contents(contents)
+            except Exception as exc:
+                message = (
+                    "Failed to embed image contents with configured multimodal embedding "
+                    "provider/model "
+                    f"(binding={embedding_client.config.binding}, "
+                    f"model={embedding_client.config.model}, "
+                    f"image_range={chunk_start + 1}-"
+                    f"{chunk_start + len(source_chunk)}): {exc}"
                 )
+                self.logger.error(message)
+                # Do not silently publish a text-only KB as fully ready after
+                # image indexing was explicitly configured and started.
+                raise ImageIndexingError(message) from exc
+
+            for (source, description, _content), embedding in zip(described, embeddings):
+                mimetype = mimetypes.guess_type(source.path.name)[0] or "application/octet-stream"
+                nodes.append(
+                    ImageNode(
+                        text=f"[Image] {source.origin.name}\n\n{description}",
+                        image_path=str(source.path),
+                        image_mimetype=mimetype,
+                        metadata={
+                            "file_name": source.origin.name,
+                            "file_path": str(source.origin),
+                            "content_type": "image",
+                            "image_description": description,
+                        },
+                        embedding=embedding,
+                    )
+                )
+                self.logger.info(f"Loaded image: {source.path.name} ({len(embedding)}D vector)")
+        if not nodes:
+            message = (
+                "Image indexing was enabled but no image could be described and embedded "
+                f"(image_count={len(sources)}, llm_binding={llm_client.config.binding}, "
+                f"llm_model={llm_client.config.model}, "
+                f"embedding_binding={embedding_client.config.binding}, "
+                f"embedding_model={embedding_client.config.model})"
             )
-            self.logger.info(f"Loaded image: {source.path.name} ({len(embedding)}D vector)")
+            self.logger.error(message)
+            raise ImageIndexingError(message)
+        if len(nodes) < len(sources):
+            self.logger.warning(
+                "Image indexing completed partially: indexed=%d, skipped=%d, total=%d",
+                len(nodes),
+                len(sources) - len(nodes),
+                len(sources),
+            )
         return nodes
 
     def _log_skipped_images(self, sources: list[_ImageSource], reason: str) -> None:
@@ -351,6 +412,45 @@ class LlamaIndexDocumentLoader:
         )
         return response.strip()
 
+    async def _describe_image_with_timeout_retry(
+        self,
+        llm_client: Any,
+        file_path: Path,
+        image_base64: str,
+        mimetype: str,
+        *,
+        timeout_seconds: float,
+        max_retries: int,
+    ) -> str:
+        """Retry only caller-level wall-clock timeouts with bounded backoff."""
+        for attempt in range(max_retries + 1):
+            try:
+                return await asyncio.wait_for(
+                    self._describe_image(
+                        llm_client,
+                        file_path,
+                        image_base64,
+                        mimetype,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                if attempt >= max_retries:
+                    raise
+                delay = min(2**attempt, 8)
+                self.logger.warning(
+                    "Image description attempt timed out after %ss; retrying in %ss "
+                    "(retry %d/%d): %s",
+                    timeout_seconds,
+                    delay,
+                    attempt + 1,
+                    max_retries,
+                    file_path.name,
+                )
+                await asyncio.sleep(delay)
+
+        raise AssertionError("unreachable")
+
     def _load_image_payload(self, file_path: Path) -> dict[str, str]:
         size = file_path.stat().st_size
         if size > DocumentValidator.MAX_FILE_SIZE:
@@ -359,11 +459,13 @@ class LlamaIndexDocumentLoader:
                 f"maximum allowed: {DocumentValidator.MAX_FILE_SIZE} bytes"
             )
         mimetype = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        encoded = base64.b64encode(file_path.read_bytes()).decode("ascii")
+        image_bytes = file_path.read_bytes()
+        encoded = base64.b64encode(image_bytes).decode("ascii")
         return {
             "base64": encoded,
             "data_uri": f"data:{mimetype};base64,{encoded}",
             "mimetype": mimetype,
+            "sha256": hashlib.sha256(image_bytes).hexdigest(),
         }
 
     def _append_if_nonempty(self, documents: list[Any], file_path: Path, text: str) -> None:

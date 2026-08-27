@@ -257,8 +257,9 @@ DEFAULT_IMA_SETTINGS: dict[str, Any] = {
 #   candidates each child retriever fetches before fusion re-ranks to ``top_k``.
 # * ``chunk_size`` / ``chunk_overlap`` — indexing chunk geometry; changes apply
 #   on the next (re-)index, not retroactively.
-# * ``image_description_concurrency`` / ``image_description_timeout_seconds`` —
-#   bounded multimodal LLM work while indexing image-heavy documents.
+# * ``image_description_concurrency`` / ``image_description_timeout_seconds`` /
+#   ``image_description_max_retries`` — bounded multimodal LLM work while
+#   indexing image-heavy documents.
 #
 # ``fusion_num_queries`` is intentionally NOT exposed: query generation needs a
 # real LLM, but the fusion retriever runs on a MockLLM, so any value > 1 would
@@ -281,6 +282,9 @@ DEFAULT_LLAMAINDEX_SETTINGS: dict[str, Any] = {
     "parse_concurrency": 2,
     "image_description_concurrency": 8,
     "image_description_timeout_seconds": 60,
+    # Retries after the initial timed-out call. Kept conservative because a
+    # cancelled provider request may still have consumed billable work.
+    "image_description_max_retries": 1,
 }
 
 # GraphRAG retrieval knobs (microsoft/graphrag). Only query-time params that the
@@ -882,6 +886,9 @@ class RuntimeSettingsService:
             ),
             "image_description_timeout_seconds": _coerce_clamped_int(
                 settings.get("image_description_timeout_seconds"), 60, 5, 600
+            ),
+            "image_description_max_retries": _coerce_clamped_int(
+                settings.get("image_description_max_retries"), 1, 0, 3
             ),
         }
 

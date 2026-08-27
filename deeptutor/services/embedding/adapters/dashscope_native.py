@@ -41,6 +41,9 @@ class DashScopeMultiModalEmbeddingAdapter(BaseEmbeddingAdapter):
             "default": 2560,
             "dimensions": [256, 512, 768, 1024, 1536, 2048, 2560],
             "multimodal": True,
+            # DashScope rejects image batches above 10 even though its text
+            # embedding endpoint accepts a larger provider-level batch.
+            "max_multimodal_batch_items": 10,
         },
         "multimodal-embedding-v1": {
             "default": 1536,
@@ -302,5 +305,6 @@ class DashScopeMultiModalEmbeddingAdapter(BaseEmbeddingAdapter):
             "supported_dimensions": info.get("dimensions", []),
             "supports_variable_dimensions": bool(info.get("dimensions")),
             "multimodal": bool(info.get("multimodal", False)),
+            "max_multimodal_batch_items": info.get("max_multimodal_batch_items"),
             "provider": "aliyun",
         }

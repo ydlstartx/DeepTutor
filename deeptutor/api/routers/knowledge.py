@@ -1401,6 +1401,7 @@ class LlamaIndexConfigUpdate(BaseModel):
     parse_concurrency: int | None = None
     image_description_concurrency: int | None = None
     image_description_timeout_seconds: int | None = None
+    image_description_max_retries: int | None = None
 
 
 @router.get("/rag-pipelines/llamaindex/config")

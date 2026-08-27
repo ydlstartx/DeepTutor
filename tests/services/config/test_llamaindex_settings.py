@@ -19,6 +19,7 @@ def test_llamaindex_defaults_when_absent(tmp_path: Path) -> None:
     assert loaded["parse_concurrency"] == 2
     assert loaded["image_description_concurrency"] == 8
     assert loaded["image_description_timeout_seconds"] == 60
+    assert loaded["image_description_max_retries"] == 1
 
 
 def test_llamaindex_roundtrip(tmp_path: Path) -> None:
@@ -31,6 +32,7 @@ def test_llamaindex_roundtrip(tmp_path: Path) -> None:
             "chunk_overlap": 0,
             "image_description_concurrency": 8,
             "image_description_timeout_seconds": 120,
+            "image_description_max_retries": 2,
         }
     )
 
@@ -41,6 +43,7 @@ def test_llamaindex_roundtrip(tmp_path: Path) -> None:
     assert loaded["chunk_overlap"] == 0
     assert loaded["image_description_concurrency"] == 8
     assert loaded["image_description_timeout_seconds"] == 120
+    assert loaded["image_description_max_retries"] == 2
     # Its own file beside the other per-feature settings.
     assert (tmp_path / "llamaindex.json").exists()
 
@@ -57,6 +60,7 @@ def test_llamaindex_clamps_out_of_range(tmp_path: Path) -> None:
             "parse_concurrency": 99,
             "image_description_concurrency": 999,
             "image_description_timeout_seconds": 0,
+            "image_description_max_retries": 99,
         }
     )
     loaded = svc.load_llamaindex(include_process_overrides=False)
@@ -70,6 +74,7 @@ def test_llamaindex_clamps_out_of_range(tmp_path: Path) -> None:
     assert loaded["parse_concurrency"] == 8
     assert loaded["image_description_concurrency"] == 16
     assert loaded["image_description_timeout_seconds"] == 5
+    assert loaded["image_description_max_retries"] == 3
 
 
 def test_llamaindex_profile_env_override(tmp_path: Path) -> None:
@@ -118,3 +123,15 @@ def test_image_description_limits_use_runtime_settings(monkeypatch) -> None:
     )
 
     assert config.image_description_limits() == (7, 90.0)
+
+
+def test_image_description_retry_limit_uses_runtime_settings(monkeypatch) -> None:
+    from deeptutor.services.rag.pipelines.llamaindex import config
+
+    monkeypatch.setattr(
+        config,
+        "_load_runtime_settings",
+        lambda: {"image_description_max_retries": 2},
+    )
+
+    assert config.image_description_retry_limit() == 2

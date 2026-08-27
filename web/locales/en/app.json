@@ -2647,6 +2647,7 @@
   "Applies on the next image indexing run": "Applies on the next image indexing run",
   "Concurrent image descriptions": "Concurrent image descriptions",
   "Per-image timeout (seconds)": "Per-image timeout (seconds)",
+  "Timeout retries": "Timeout retries",
   "Retrieval & chunking": "Retrieval & chunking",
   "No knowledge bases use this engine yet.": "No knowledge bases use this engine yet.",
   "This engine uses your active chat and embedding models. Manage them in the model catalog.": "This engine uses your active chat and embedding models. Manage them in the model catalog.",
