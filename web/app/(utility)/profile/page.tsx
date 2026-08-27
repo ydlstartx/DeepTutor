@@ -4,10 +4,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createElement } from "react";
-import { ArrowLeft, ImageUp, LogOut, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  ImageUp,
+  KeyRound,
+  LogOut,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { fetchAuthStatus, logout } from "@/lib/auth";
 import {
+  changePassword,
   getProfile,
   removeAvatarImage,
   setAvatarMarker,
@@ -101,6 +109,12 @@ export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSaved, setPasswordSaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -182,6 +196,41 @@ export default function ProfilePage() {
     router.replace("/login");
   }, [router]);
 
+  const handlePasswordChange = useCallback(
+    async (event: React.FormEvent) => {
+      event.preventDefault();
+      if (passwordBusy) return;
+      setPasswordError(null);
+      setPasswordSaved(false);
+      if (newPassword.length < 8) {
+        setPasswordError(t("Password must be at least 8 characters."));
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        setPasswordError(t("Passwords do not match"));
+        return;
+      }
+      if (currentPassword === newPassword) {
+        setPasswordError(
+          t("New password must be different from the current password."),
+        );
+        return;
+      }
+      setPasswordBusy(true);
+      try {
+        await changePassword(currentPassword, newPassword);
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setPasswordSaved(true);
+      } catch (err) {
+        setPasswordError(err instanceof Error ? t(err.message) : String(err));
+      } finally {
+        setPasswordBusy(false);
+      }
+    }, [confirmPassword, currentPassword, newPassword, passwordBusy, t],
+  );
+
   const descriptor = parseAvatarMarker(profile?.avatar);
   const hasImage = descriptor.kind === "image";
   const fallback = fallbackAvatarFor(profile?.username ?? "");
@@ -222,7 +271,7 @@ export default function ProfilePage() {
               {t("My profile")}
             </h1>
             <p className="mt-0.5 text-sm text-[var(--muted-foreground)]">
-              {t("View your account and personalize your avatar")}
+              {t("Manage your account, password, and avatar")}
             </p>
           </div>
         </div>
@@ -377,6 +426,88 @@ export default function ProfilePage() {
                 </div>
               </div>
             </div>
+
+            {/* Password card */}
+            <form
+              onSubmit={handlePasswordChange}
+              className="mt-4 rounded-2xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm"
+            >
+              <div className="flex items-start gap-3">
+                <KeyRound
+                  size={18}
+                  className="mt-0.5 shrink-0 text-[var(--muted-foreground)]"
+                />
+                <div>
+                  <h2 className="text-sm font-semibold text-[var(--foreground)]">
+                    {t("Change password")}
+                  </h2>
+                  <p className="mt-0.5 text-sm text-[var(--muted-foreground)]">
+                    {t("Use at least 8 characters for your new password.")}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                <label className="block text-xs text-[var(--muted-foreground)]">
+                  {t("Current password")}
+                  <input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.target.value)}
+                    disabled={passwordBusy}
+                    autoComplete="current-password"
+                    required
+                    className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)] disabled:opacity-50"
+                  />
+                </label>
+                <label className="block text-xs text-[var(--muted-foreground)]">
+                  {t("New password")}
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    disabled={passwordBusy}
+                    autoComplete="new-password"
+                    minLength={8}
+                    required
+                    className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)] disabled:opacity-50"
+                  />
+                </label>
+                <label className="block text-xs text-[var(--muted-foreground)]">
+                  {t("Confirm new password")}
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    disabled={passwordBusy}
+                    autoComplete="new-password"
+                    minLength={8}
+                    required
+                    className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)] disabled:opacity-50"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-4 flex min-h-8 items-center justify-between gap-3">
+                <div className="text-xs">
+                  {passwordError && (
+                    <span className="text-red-500">{passwordError}</span>
+                  )}
+                  {passwordSaved && (
+                    <span className="text-emerald-600 dark:text-emerald-400">
+                      {t("Password changed successfully.")}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="submit"
+                  disabled={passwordBusy}
+                  className="shrink-0 rounded-lg bg-[var(--foreground)] px-3 py-1.5 text-sm font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40"
+                >
+                  {passwordBusy ? t("Changing…") : t("Change password")}
+                </button>
+              </div>
+            </form>
 
             {/* Sign out card */}
             <div className="mt-4 flex items-center justify-between rounded-2xl border border-[var(--border)] bg-[var(--card)] p-6 shadow-sm">

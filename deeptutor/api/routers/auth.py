@@ -48,6 +48,8 @@ from deeptutor.services.auth import (
     register_pb,
     set_avatar,
     set_role,
+    set_user_password,
+    verify_user_password,
 )
 from deeptutor.services.codex_auth.contracts import CodexAuthError
 from deeptutor.services.codex_auth.service import deliver_codex_oauth_callback
@@ -115,6 +117,33 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_valid(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class ChangePasswordRequest(BaseModel):
+    """Payload for changing the signed-in user's own password."""
+
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_valid(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class ResetPasswordRequest(BaseModel):
+    """Admin payload for replacing another local user's password."""
+
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def new_password_valid(cls, v: str) -> str:
         if len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
         return v
@@ -646,6 +675,41 @@ async def update_profile(
     return {"ok": True, "avatar": body.avatar}
 
 
+@router.put("/profile/password")
+async def change_own_password(
+    body: ChangePasswordRequest,
+    response: Response,
+    payload: TokenPayload | None = Depends(require_auth),
+) -> dict:
+    """Change the signed-in local user's password and rotate their session."""
+    current = _require_profile_identity(payload)
+    if POCKETBASE_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password changes for PocketBase accounts must be managed in PocketBase.",
+        )
+    if not verify_user_password(current.username, body.current_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect",
+        )
+    if body.current_password == body.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password",
+        )
+    if not set_user_password(current.username, body.new_password):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    info = get_user_info(current.username) or {}
+    role = str(info.get("role") or current.role)
+    user_id = str(info.get("id") or current.user_id)
+    token = create_token(current.username, role, user_id)
+    response.set_cookie(value=token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+    logger.info("User '%s' changed their password", current.username)
+    return {"ok": True}
+
+
 @router.put("/profile/avatar")
 async def upload_avatar(
     file: UploadFile = File(...),
@@ -869,3 +933,27 @@ async def update_user_role(
         f"Admin '{current.username if current else 'local'}' set '{username}' role to {body.role!r}"
     )
     return {"ok": True, "username": username, "role": body.role}
+
+
+@router.put("/users/{username}/password", status_code=status.HTTP_200_OK)
+async def reset_user_password(
+    username: str,
+    body: ResetPasswordRequest,
+    current: TokenPayload = Depends(require_admin),
+) -> dict:
+    """Admin-only: reset another local user's password and revoke their sessions."""
+    if username == current.username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use your profile to change your own password",
+        )
+    if POCKETBASE_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password resets for PocketBase accounts must be managed in PocketBase.",
+        )
+    if not set_user_password(username, body.new_password):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    logger.info("Admin '%s' reset the password for '%s'", current.username, username)
+    return {"ok": True, "username": username}

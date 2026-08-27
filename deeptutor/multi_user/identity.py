@@ -38,6 +38,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _auth_version(value: Any) -> int:
+    """Return a non-negative session-generation counter from stored data."""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _canonical_record(
     username: str,
     value: Any,
@@ -52,6 +60,7 @@ def _canonical_record(
             "created_at": utc_now(),
             "disabled": False,
             "avatar": "",
+            "auth_version": 0,
         }
     if not isinstance(value, dict):
         return None
@@ -68,6 +77,7 @@ def _canonical_record(
         "created_at": str(value.get("created_at") or utc_now()),
         "disabled": bool(value.get("disabled", False)),
         "avatar": str(value.get("avatar") or ""),
+        "auth_version": _auth_version(value.get("auth_version")),
     }
 
 
@@ -156,6 +166,7 @@ def _env_admin_record(password_hash: str) -> dict[str, Any]:
         "created_at": "",
         "disabled": False,
         "avatar": "",
+        "auth_version": 0,
     }
 
 
@@ -230,6 +241,7 @@ def save_user(username: str, hashed_password: str, role: Role = "user") -> dict[
             "created_at": str(existing.get("created_at") or utc_now()),
             "disabled": bool(existing.get("disabled", False)),
             "avatar": str(existing.get("avatar") or ""),
+            "auth_version": _auth_version(existing.get("auth_version")),
         }
         users[username] = record
         _write_users(users)
@@ -284,6 +296,34 @@ def set_avatar(username: str, avatar: str) -> bool:
         if username not in users:
             return False
         users[username]["avatar"] = avatar
+        _write_users(users)
+    return True
+
+
+def set_password_hash(username: str, hashed_password: str) -> bool:
+    """Replace a password hash and revoke previously issued local JWTs.
+
+    The auth-version increment is stored in the same locked write as the new
+    hash. A configured ``auth.json`` bootstrap admin is adopted into the
+    canonical user store on first password change so future logins use the
+    user-selected password instead of the read-only bootstrap hash.
+    """
+    if not hashed_password:
+        raise ValueError("hashed_password cannot be empty")
+
+    with _USERS_WRITE_LOCK:
+        users = load_users()
+        existing = users.get(username)
+        if existing is None:
+            env_username, env_password_hash = _env_bootstrap_admin()
+            if username != env_username or not env_password_hash:
+                return False
+            existing = _env_admin_record(env_password_hash)
+
+        record = dict(existing)
+        record["hash"] = hashed_password
+        record["auth_version"] = _auth_version(existing.get("auth_version")) + 1
+        users[username] = record
         _write_users(users)
     return True
 

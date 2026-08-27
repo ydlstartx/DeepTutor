@@ -152,6 +152,24 @@ def add_user(username: str, plain_password: str, role: str = "user") -> None:
     logger.info("User '%s' saved with role=%r", username, record.get("role", "user"))
 
 
+def verify_user_password(username: str, plain_password: str) -> bool:
+    """Verify credentials for a known local user without auth-mode shortcuts."""
+    record = _load_users().get(username)
+    if not isinstance(record, dict):
+        return False
+    return verify_password(plain_password, str(record.get("hash") or ""))
+
+
+def set_user_password(username: str, plain_password: str) -> bool:
+    """Hash and store a local user's password, revoking their older JWTs."""
+    from deeptutor.multi_user.identity import set_password_hash
+
+    updated = set_password_hash(username, hash_password(plain_password))
+    if updated:
+        logger.info("Password updated for user '%s'", username)
+    return updated
+
+
 def list_users() -> list[dict]:
     """Return a list of user info dicts (username, role, created_at) — no hashes."""
     from deeptutor.multi_user.identity import list_user_info
@@ -221,8 +239,8 @@ def create_token(username: str, role: str = "user", user_id: str | None = None) 
     """Create a signed JWT for the given username and role."""
     from jose import jwt
 
+    record = _load_users().get(username) or {}
     if not user_id:
-        record = _load_users().get(username) or {}
         user_id = str(record.get("id") or "")
 
     payload = {
@@ -232,6 +250,14 @@ def create_token(username: str, role: str = "user", user_id: str | None = None) 
         "exp": datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRE_HOURS),
         "iat": datetime.now(timezone.utc),
     }
+    # Tokens for real local accounts carry a generation counter. Keeping the
+    # claim absent for synthetic/test identities preserves backwards
+    # compatibility while password changes can revoke every issued session.
+    if record:
+        try:
+            payload["ver"] = max(0, int(record.get("auth_version") or 0))
+        except (TypeError, ValueError):
+            payload["ver"] = 0
     return jwt.encode(payload, AUTH_SECRET, algorithm=_ALGORITHM)
 
 
@@ -271,11 +297,30 @@ def decode_token(token: str) -> TokenPayload | None:
         username = payload.get("sub")
         if not username:
             return None
-        user_id = str(payload.get("uid") or "")
-        if not user_id:
-            record = _load_users().get(str(username)) or {}
-            user_id = str(record.get("id") or "")
-        return TokenPayload(username=username, role=payload.get("role", "user"), user_id=user_id)
+        record = _load_users().get(str(username))
+        if record:
+            try:
+                token_version = max(0, int(payload.get("ver") or 0))
+                current_version = max(0, int(record.get("auth_version") or 0))
+            except (TypeError, ValueError):
+                return None
+            if token_version != current_version:
+                return None
+            return TokenPayload(
+                username=str(username),
+                role=str(record.get("role") or "user"),
+                user_id=str(record.get("id") or payload.get("uid") or ""),
+            )
+        # A versioned token represented a persisted account. If that account
+        # has since been deleted, the session must be rejected. Unversioned
+        # tokens remain accepted for legacy and synthetic integrations.
+        if "ver" in payload:
+            return None
+        return TokenPayload(
+            username=str(username),
+            role=str(payload.get("role") or "user"),
+            user_id=str(payload.get("uid") or ""),
+        )
     except JWTError:
         return None
 

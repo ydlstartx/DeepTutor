@@ -25,6 +25,25 @@ export async function getProfile(): Promise<ProfileInfo> {
   return res.json();
 }
 
+/** Change the signed-in user's password after verifying the current one. */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await apiFetch(apiUrl("/api/v1/auth/profile/password"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(extractDetail(data, "Failed to change password"));
+  }
+}
+
 /**
  * Persist an icon-based avatar choice ("icon:<name>:<color>") or reset to the
  * deterministic fallback (""). Uploaded-image markers are managed by

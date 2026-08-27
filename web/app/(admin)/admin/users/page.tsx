@@ -9,6 +9,7 @@ import {
   deleteUser,
   setUserRole,
   createUser,
+  resetUserPassword,
   type UserRecord,
 } from "@/lib/admin-api";
 import { GrantEditor } from "@/features/multi-user/components/GrantEditor";
@@ -26,6 +27,7 @@ import {
   SlidersHorizontal,
   UserPlus,
   Users,
+  KeyRound,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -52,6 +54,7 @@ export default function AdminUsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [query, setQuery] = useState("");
@@ -64,10 +67,16 @@ export default function AdminUsersPage() {
   const [createPassword, setCreatePassword] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [createError, setCreateError] = useState("");
+  const [resetTarget, setResetTarget] = useState<UserRecord | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetConfirmation, setResetConfirmation] = useState("");
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+  const [resetError, setResetError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
+    setActionNotice("");
     try {
       const data = await listUsers();
       setUsers(data);
@@ -132,11 +141,54 @@ export default function AdminUsersPage() {
     }
   }
 
+  function openResetDialog(user: UserRecord) {
+    setResetTarget(user);
+    setResetPassword("");
+    setResetConfirmation("");
+    setResetError("");
+  }
+
+  function closeResetDialog() {
+    if (resetSubmitting) return;
+    setResetTarget(null);
+  }
+
+  async function handleResetSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!resetTarget || resetSubmitting) return;
+    setResetError("");
+    if (resetPassword.length < 8) {
+      setResetError(t("Password must be at least 8 characters."));
+      return;
+    }
+    if (resetPassword !== resetConfirmation) {
+      setResetError(t("Passwords do not match"));
+      return;
+    }
+    setResetSubmitting(true);
+    try {
+      await resetUserPassword(resetTarget.username, resetPassword);
+      setActionNotice(
+        t("Password reset for {{username}}.", {
+          username: resetTarget.username,
+        }),
+      );
+      setResetTarget(null);
+    } catch (e) {
+      setResetError(
+        e instanceof Error ? t(e.message) : t("Failed to reset password"),
+      );
+    } finally {
+      setResetSubmitting(false);
+    }
+  }
+
   async function handleConfirmAction() {
     if (!confirmTarget || confirmBusy) return;
     const { kind, user } = confirmTarget;
     setConfirmBusy(true);
     setActionError("");
+    setActionNotice("");
     try {
       if (kind === "delete") {
         await deleteUser(user.username);
@@ -233,6 +285,11 @@ export default function AdminUsersPage() {
         {actionError && (
           <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-400">
             {actionError}
+          </div>
+        )}
+        {actionNotice && (
+          <div className="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-400">
+            {actionNotice}
           </div>
         )}
 
@@ -404,6 +461,29 @@ export default function AdminUsersPage() {
                                 <SlidersHorizontal size={15} />
                               </button>
                             )}
+                            <button
+                              onClick={() => openResetDialog(user)}
+                              disabled={isSelf}
+                              title={
+                                isSelf
+                                  ? t("Change your own password from your profile")
+                                  : t("Reset password for {{username}}", {
+                                      username: user.username,
+                                    })
+                              }
+                              aria-label={
+                                isSelf
+                                  ? t("Change your own password from your profile")
+                                  : t("Reset password for {{username}}", {
+                                      username: user.username,
+                                    })
+                              }
+                              className="rounded-lg p-1.5 text-[var(--muted-foreground)]
+                                       hover:bg-[var(--background)] hover:text-[var(--foreground)]
+                                       disabled:cursor-not-allowed disabled:opacity-30 transition-colors"
+                            >
+                              <KeyRound size={15} />
+                            </button>
                             <button
                               onClick={() =>
                                 setConfirmTarget({
@@ -611,6 +691,102 @@ export default function AdminUsersPage() {
                 className="rounded-lg bg-[var(--foreground)] px-3 py-1.5 text-sm font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40"
               >
                 {createSubmitting ? t("Creating…") : t("Create")}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {resetTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay)] px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reset-password-title"
+          onClick={closeResetDialog}
+        >
+          <form
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleResetSubmit}
+            className="w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 shadow-xl"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2
+                  id="reset-password-title"
+                  className="text-base font-semibold text-[var(--foreground)]"
+                >
+                  {t("Reset password")}
+                </h2>
+                <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
+                  {t("Set a new password for {{username}}", {
+                    username: resetTarget.username,
+                  })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeResetDialog}
+                disabled={resetSubmitting}
+                className="rounded-md p-1 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)] disabled:opacity-40"
+                aria-label={t("Close")}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <label className="mb-3 block text-xs text-[var(--muted-foreground)]">
+              {t("New password")}
+              <input
+                type="password"
+                value={resetPassword}
+                onChange={(e) => setResetPassword(e.target.value)}
+                disabled={resetSubmitting}
+                autoComplete="new-password"
+                minLength={8}
+                required
+                autoFocus
+                className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
+              />
+            </label>
+
+            <label className="mb-4 block text-xs text-[var(--muted-foreground)]">
+              {t("Confirm new password")}
+              <input
+                type="password"
+                value={resetConfirmation}
+                onChange={(e) => setResetConfirmation(e.target.value)}
+                disabled={resetSubmitting}
+                autoComplete="new-password"
+                minLength={8}
+                required
+                className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
+              />
+            </label>
+
+            {resetError && (
+              <p className="mb-3 text-xs text-red-500">{resetError}</p>
+            )}
+
+            <p className="mb-4 text-xs text-[var(--muted-foreground)]">
+              {t("This signs the user out of their existing sessions.")}
+            </p>
+
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeResetDialog}
+                disabled={resetSubmitting}
+                className="rounded-lg px-3 py-1.5 text-sm text-[var(--muted-foreground)] hover:text-[var(--foreground)] disabled:opacity-40"
+              >
+                {t("Cancel")}
+              </button>
+              <button
+                type="submit"
+                disabled={resetSubmitting}
+                className="rounded-lg bg-[var(--foreground)] px-3 py-1.5 text-sm font-medium text-[var(--background)] hover:opacity-90 disabled:opacity-40"
+              >
+                {resetSubmitting ? t("Resetting…") : t("Reset password")}
               </button>
             </div>
           </form>

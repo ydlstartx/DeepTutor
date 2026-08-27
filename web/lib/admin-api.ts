@@ -47,6 +47,24 @@ export async function setUserRole(
   }
 }
 
+export async function resetUserPassword(
+  username: string,
+  newPassword: string,
+): Promise<void> {
+  const res = await apiFetch(
+    apiUrl(`/api/v1/auth/users/${encodeURIComponent(username)}/password`),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ new_password: newPassword }),
+    },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail ?? "Failed to reset password");
+  }
+}
+
 export interface CreatedUser {
   user_id: string;
   username: string;
