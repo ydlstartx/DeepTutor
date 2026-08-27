@@ -21,6 +21,7 @@ export type UserActivitySort = "last_used" | "username";
 
 type ActivityFields = {
   username: string;
+  last_activity_at?: string | null;
   last_used_at?: string | null;
 };
 
@@ -38,9 +39,13 @@ export function filterUsersByActivity<T extends ActivityFields>(
   if (filter === "all") return users;
   const cutoff = now - (filter === "active_7d" ? 7 : 30) * 24 * 60 * 60 * 1000;
   if (filter === "active_7d") {
-    return users.filter((user) => activityTimestamp(user.last_used_at) >= cutoff);
+    return users.filter(
+      (user) => activityTimestamp(user.last_activity_at) >= cutoff,
+    );
   }
-  return users.filter((user) => activityTimestamp(user.last_used_at) < cutoff);
+  return users.filter(
+    (user) => activityTimestamp(user.last_activity_at) < cutoff,
+  );
 }
 
 export function sortUsersByActivity<T extends ActivityFields>(

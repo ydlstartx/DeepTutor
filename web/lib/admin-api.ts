@@ -21,6 +21,8 @@ export interface UserUsageSummary {
   turns: number;
   completed_turns: number;
   failed_turns: number;
+  running_turns: number;
+  cancelled_turns: number;
   kb_queries: number;
   llm_calls: number;
   prompt_tokens: number;
@@ -29,10 +31,12 @@ export interface UserUsageSummary {
   estimated_cost_usd: number;
   usage_complete: boolean;
   usage_reported_turns: number;
+  history_complete: boolean;
 }
 
 export interface UserActivityRecord extends UserRecord {
   activity_status: UserActivityStatus;
+  last_activity_at: string | null;
   last_login_at: string | null;
   last_seen_at: string | null;
   last_used_at: string | null;

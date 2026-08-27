@@ -119,8 +119,19 @@ async def test_subscribe_turn_does_not_synthesize_done_for_running_turn(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_subscribe_turn_marks_orphan_running_turn_failed(tmp_path) -> None:
+async def test_subscribe_turn_marks_orphan_running_turn_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     """A DB-running turn with no in-process execution is stale after restart."""
+
+    finalized: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "deeptutor.multi_user.activity.record_turn_finished",
+        lambda turn_id, _session_id, _capability, status, _events: finalized.append(
+            (turn_id, status)
+        ),
+    )
 
     store = SQLiteSessionStore(tmp_path / "chat_history.db")
     runtime = TurnRuntimeManager(store)
@@ -137,6 +148,31 @@ async def test_subscribe_turn_marks_orphan_running_turn_failed(tmp_path) -> None
     assert "restart" in persisted["error"].lower()
     assert [event["type"] for event in events] == ["error", "done"]
     assert events[-1]["metadata"]["status"] == "failed"
+    assert finalized == [(turn["id"], "failed")]
+
+
+@pytest.mark.asyncio
+async def test_cancel_persisted_turn_without_live_task_syncs_activity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    finalized: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "deeptutor.multi_user.activity.record_turn_finished",
+        lambda turn_id, _session_id, _capability, status, _events: finalized.append(
+            (turn_id, status)
+        ),
+    )
+    store = SQLiteSessionStore(tmp_path / "chat_history.db")
+    runtime = TurnRuntimeManager(store)
+    session = await store.ensure_session(None)
+    turn = await store.create_turn(session["id"], capability="chat")
+
+    assert await runtime.cancel_turn(turn["id"]) is True
+    persisted = await store.get_turn(turn["id"])
+    assert persisted is not None
+    assert persisted["status"] == "cancelled"
+    assert finalized == [(turn["id"], "cancelled")]
 
 
 @pytest.mark.asyncio

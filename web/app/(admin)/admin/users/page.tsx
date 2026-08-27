@@ -100,6 +100,8 @@ function UsagePeriod({
     [t("Conversations"), usage.conversations],
     [t("Completed turns"), usage.completed_turns],
     [t("Failed turns"), usage.failed_turns],
+    [t("Running turns"), usage.running_turns],
+    [t("Cancelled turns"), usage.cancelled_turns],
     [t("Knowledge base queries"), usage.kb_queries],
     [t("LLM calls"), usage.llm_calls],
     [t("Tokens"), usage.total_tokens],
@@ -110,7 +112,9 @@ function UsagePeriod({
         <h4 className="text-sm font-medium text-[var(--foreground)]">{label}</h4>
         {!usage.usage_complete && (
           <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
-            {t("Partial usage data")}
+            {usage.history_complete
+              ? t("Partial usage data")
+              : t("Historical activity is incomplete")}
           </span>
         )}
       </div>

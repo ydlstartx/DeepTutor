@@ -712,6 +712,32 @@ class TurnRuntimeManager:
             # not falsely fail a turn that is still owned by this process.
             return execution.task is None or not execution.task.done()
 
+    async def _sync_terminal_activity(self, turn: dict[str, Any] | None) -> None:
+        """Best-effort mirror of a canonical terminal turn into activity."""
+        if turn is None:
+            return
+        turn_id = str(turn.get("id") or turn.get("turn_id") or "").strip()
+        if not turn_id:
+            return
+        with contextlib.suppress(Exception):
+            events = await self.store.get_turn_events(turn_id)
+            from deeptutor.multi_user.activity import record_turn_finished
+
+            record_turn_finished(
+                turn_id,
+                str(turn.get("session_id") or ""),
+                str(turn.get("capability") or ""),
+                str(turn.get("status") or "failed"),
+                events,
+            )
+
+    async def recover_orphan_running_turn(
+        self,
+        turn: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Public transport hook for canonical orphan recovery."""
+        return await self._fail_orphan_running_turn(turn)
+
     async def _fail_orphan_running_turn(self, turn: dict[str, Any] | None) -> dict[str, Any] | None:
         """Finalize a persisted running turn that has no local execution.
 
@@ -726,7 +752,9 @@ class TurnRuntimeManager:
         if not turn_id or await self._has_live_execution(turn_id):
             return turn
         await self.store.update_turn_status(turn_id, "failed", _INTERRUPTED_TURN_ERROR)
-        return await self.store.get_turn(turn_id)
+        updated = await self.store.get_turn(turn_id)
+        await self._sync_terminal_activity(updated)
+        return updated
 
     async def _recover_orphan_running_turns_for_session(self, session_id: str) -> None:
         """Clear stale active turns before creating a fresh turn."""
@@ -1213,6 +1241,8 @@ class TurnRuntimeManager:
             if turn is None or turn.get("status") != "running":
                 return False
             await self.store.update_turn_status(turn_id, "cancelled", "Turn cancelled")
+            updated = await self.store.get_turn(turn_id)
+            await self._sync_terminal_activity(updated)
             return True
         execution.task.cancel()
         # Wait for the task to finish so its finally block (including save)

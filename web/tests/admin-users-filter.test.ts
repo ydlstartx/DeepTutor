@@ -48,18 +48,35 @@ test("no match yields an empty list, not an error", () => {
   assert.deepEqual(filterUsersByQuery([], "alice"), []);
 });
 
-test("activity filters use meaningful last-use time", () => {
+test("activity filters use the unified last-activity time", () => {
   const now = Date.parse("2026-08-27T12:00:00Z");
   const users = [
-    { username: "today", last_used_at: "2026-08-27T11:00:00Z" },
-    { username: "week", last_used_at: "2026-08-22T12:00:00Z" },
-    { username: "old", last_used_at: "2026-07-01T12:00:00Z" },
-    { username: "never", last_used_at: null },
+    {
+      username: "today",
+      last_activity_at: "2026-08-27T11:00:00Z",
+      last_used_at: "2026-08-27T11:00:00Z",
+    },
+    {
+      username: "seen-only",
+      last_activity_at: "2026-08-27T10:00:00Z",
+      last_used_at: null,
+    },
+    {
+      username: "week",
+      last_activity_at: "2026-08-22T12:00:00Z",
+      last_used_at: "2026-08-22T12:00:00Z",
+    },
+    {
+      username: "old",
+      last_activity_at: "2026-07-01T12:00:00Z",
+      last_used_at: "2026-07-01T12:00:00Z",
+    },
+    { username: "never", last_activity_at: null, last_used_at: null },
   ];
 
   assert.deepEqual(
     filterUsersByActivity(users, "active_7d", now).map((u) => u.username),
-    ["today", "week"],
+    ["today", "seen-only", "week"],
   );
   assert.deepEqual(
     filterUsersByActivity(users, "inactive_30d", now).map((u) => u.username),
