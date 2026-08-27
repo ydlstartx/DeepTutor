@@ -117,6 +117,29 @@ def test_admin_resets_another_users_password_and_revokes_their_sessions(password
     assert auth_service.decode_token(tokens["alice"]) is not None
 
 
+def test_successful_login_is_visible_only_in_admin_activity_report(password_client):
+    client, tokens = password_client
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "bob", "password": "bob-password-1234"},
+    )
+    regular = client.get(
+        "/api/v1/auth/users/activity",
+        headers=_auth(tokens["bob"]),
+    )
+    admin = client.get(
+        "/api/v1/auth/users/activity",
+        headers=_auth(tokens["alice"]),
+    )
+
+    assert login.status_code == 200
+    assert regular.status_code == 403
+    assert admin.status_code == 200
+    bob = next(item for item in admin.json()["users"] if item["username"] == "bob")
+    assert bob["last_login_at"] is not None
+    assert "content" not in bob
+
+
 def test_admin_password_reset_enforces_auth_ownership_and_existence(password_client):
     client, tokens = password_client
     anonymous = client.put(

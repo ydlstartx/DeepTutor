@@ -4,6 +4,7 @@ Root conftest — shared fixtures for the entire test suite.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -86,6 +87,17 @@ def _guard_legacy_multi_user_migration(monkeypatch):
         paths, "LEGACY_MULTI_USER_ROOT", Path("/nonexistent/deeptutor-legacy-multi-user")
     )
     monkeypatch.setattr(paths, "_legacy_migration_done", False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_activity_store(request, tmp_path_factory, monkeypatch):
+    """Activity hooks exercised by auth/turn tests must never touch live data."""
+    from deeptutor.multi_user import activity
+
+    test_id = hashlib.sha256(request.node.nodeid.encode("utf-8")).hexdigest()[:16]
+    activity_db = tmp_path_factory.getbasetemp() / "activity" / test_id / "activity.db"
+    monkeypatch.setattr(activity, "_db_path", lambda: activity_db)
     yield
 
 

@@ -1,5 +1,6 @@
 """Auth router — login, logout, status, registration, profile, and user-management endpoints."""
 
+import asyncio
 from contextvars import Token as _CtxToken
 import logging
 import re
@@ -310,6 +311,9 @@ async def require_auth(
         )
 
     _install_current_user(payload)
+    from deeptutor.multi_user.activity import record_seen
+
+    record_seen()
     return payload
 
 
@@ -350,7 +354,11 @@ async def ws_require_auth(ws: WebSocket) -> _CtxToken | _WsAuthFailed:
         await ws.close(code=4001)
         return ws_auth_failed
 
-    return _install_current_user(payload)
+    user_token = _install_current_user(payload)
+    from deeptutor.multi_user.activity import record_seen
+
+    record_seen()
+    return user_token
 
 
 async def require_admin(
@@ -479,6 +487,9 @@ async def login(body: LoginRequest, response: Response) -> dict:
             )
         payload, pb_token = pb_result
         response.set_cookie(value=pb_token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+        from deeptutor.multi_user.activity import record_login
+
+        record_login(payload.user_id, payload.username)
         logger.info(f"User '{payload.username}' logged in via PocketBase (role={payload.role!r})")
         return {
             "ok": True,
@@ -498,6 +509,9 @@ async def login(body: LoginRequest, response: Response) -> dict:
 
     token = create_token(result.username, result.role, result.user_id)
     response.set_cookie(value=token, max_age=_COOKIE_MAX_AGE, **_cookie_attrs())
+    from deeptutor.multi_user.activity import record_login
+
+    record_login(result.user_id, result.username)
 
     logger.info(f"User '{result.username}' logged in (role={result.role!r})")
     return {
@@ -819,6 +833,15 @@ async def get_users(_: TokenPayload = Depends(require_admin)) -> list[UserInfo]:
     return [UserInfo(**u) for u in list_users()]
 
 
+@router.get("/users/activity")
+async def get_user_activity(_: TokenPayload = Depends(require_admin)) -> dict:
+    """Return privacy-preserving per-user activity aggregates for admins."""
+    from deeptutor.multi_user.activity import get_activity_report
+
+    users = list_users()
+    return await asyncio.to_thread(get_activity_report, users)
+
+
 @router.post("/users", status_code=status.HTTP_201_CREATED)
 async def admin_create_user(
     body: RegisterRequest,
@@ -907,6 +930,9 @@ async def remove_user(
         from deeptutor.multi_user.identity import delete_avatar_file
 
         delete_avatar_file(user_id)
+        from deeptutor.multi_user.activity import delete_user_activity
+
+        delete_user_activity(user_id)
 
     logger.info(f"Admin '{current.username if current else 'local'}' deleted user '{username}'")
     return {"ok": True}

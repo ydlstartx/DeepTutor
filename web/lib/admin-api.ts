@@ -10,9 +10,57 @@ export interface UserRecord {
   avatar?: string;
 }
 
+export type UserActivityStatus =
+  | "recent"
+  | "today"
+  | "recent_7d"
+  | "inactive";
+
+export interface UserUsageSummary {
+  conversations: number;
+  turns: number;
+  completed_turns: number;
+  failed_turns: number;
+  kb_queries: number;
+  llm_calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  estimated_cost_usd: number;
+  usage_complete: boolean;
+  usage_reported_turns: number;
+}
+
+export interface UserActivityRecord extends UserRecord {
+  activity_status: UserActivityStatus;
+  last_login_at: string | null;
+  last_seen_at: string | null;
+  last_used_at: string | null;
+  usage_7d: UserUsageSummary;
+  usage_30d: UserUsageSummary;
+}
+
+export interface UserActivityReport {
+  summary: {
+    total_users: number;
+    active_today: number;
+    active_7d: number;
+    inactive_30d: number;
+  };
+  users: UserActivityRecord[];
+  generated_at: string | null;
+  retention_days: number;
+}
+
 export async function listUsers(): Promise<UserRecord[]> {
   const res = await apiFetch(apiUrl("/api/v1/auth/users"));
   if (!res.ok) throw new Error("Failed to fetch users");
+  return res.json();
+}
+
+export async function listUserActivity(): Promise<UserActivityReport> {
+  const res = await apiFetch(apiUrl("/api/v1/auth/users/activity"));
+  if (!res.ok) throw new Error("Failed to fetch user activity");
   return res.json();
 }
 

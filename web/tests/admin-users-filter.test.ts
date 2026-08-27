@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { filterUsersByQuery } from "../lib/admin-users";
+import {
+  filterUsersByActivity,
+  filterUsersByQuery,
+  sortUsersByActivity,
+} from "../lib/admin-users";
 
 function user(username: string): { id: string; username: string } {
   return { id: `u_${username}`, username };
@@ -42,4 +46,35 @@ test("non-latin usernames are searchable", () => {
 test("no match yields an empty list, not an error", () => {
   assert.deepEqual(filterUsersByQuery(USERS, "zzz"), []);
   assert.deepEqual(filterUsersByQuery([], "alice"), []);
+});
+
+test("activity filters use meaningful last-use time", () => {
+  const now = Date.parse("2026-08-27T12:00:00Z");
+  const users = [
+    { username: "today", last_used_at: "2026-08-27T11:00:00Z" },
+    { username: "week", last_used_at: "2026-08-22T12:00:00Z" },
+    { username: "old", last_used_at: "2026-07-01T12:00:00Z" },
+    { username: "never", last_used_at: null },
+  ];
+
+  assert.deepEqual(
+    filterUsersByActivity(users, "active_7d", now).map((u) => u.username),
+    ["today", "week"],
+  );
+  assert.deepEqual(
+    filterUsersByActivity(users, "inactive_30d", now).map((u) => u.username),
+    ["old", "never"],
+  );
+});
+
+test("activity sort keeps users without usage last", () => {
+  const users = [
+    { username: "never", last_used_at: null },
+    { username: "older", last_used_at: "2026-08-20T00:00:00Z" },
+    { username: "latest", last_used_at: "2026-08-27T00:00:00Z" },
+  ];
+  assert.deepEqual(
+    sortUsersByActivity(users, "last_used").map((u) => u.username),
+    ["latest", "older", "never"],
+  );
 });

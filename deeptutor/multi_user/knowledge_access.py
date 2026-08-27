@@ -266,6 +266,9 @@ def resolve_for_rag(kb_ref: str | None) -> KnowledgeResource | None:
     if not kb_ref:
         return None
     resource = resolve_kb(kb_ref, require_write=False)
+    from .activity import record_kb_query
+
+    record_kb_query()
     if resource.assigned:
         from .audit import log_usage
 

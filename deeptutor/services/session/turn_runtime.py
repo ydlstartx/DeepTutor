@@ -978,6 +978,9 @@ class TurnRuntimeManager:
             preference_update["mastery_path_id"] = mastery_path_id
         await self.store.update_session_preferences(session["id"], preference_update)
         turn = await self.store.create_turn(session["id"], capability=capability)
+        from deeptutor.multi_user.activity import record_turn_started
+
+        record_turn_started(turn["id"], session["id"], capability)
         execution = _TurnExecution(
             turn_id=turn["id"],
             session_id=session["id"],
@@ -1005,6 +1008,9 @@ class TurnRuntimeManager:
                     self._executions.pop(turn["id"], None)
                 with contextlib.suppress(Exception):
                     await self.store.update_turn_status(turn["id"], "rejected", str(exc))
+                from deeptutor.multi_user.activity import record_turn_finished
+
+                record_turn_finished(turn["id"], session["id"], capability, "rejected", [])
                 raise
             persisted_turn = await self.store.get_turn(turn["id"])
             if persisted_turn is None or persisted_turn.get("status") != "running":
@@ -1021,6 +1027,15 @@ class TurnRuntimeManager:
                         mastery_binding.path_id,
                         turn_id=turn["id"],
                     )
+                from deeptutor.multi_user.activity import record_turn_finished
+
+                record_turn_finished(
+                    turn["id"],
+                    session["id"],
+                    capability,
+                    str((persisted_turn or {}).get("status") or "cancelled"),
+                    [],
+                )
                 raise RuntimeError("Mastery turn was cancelled while starting")
         session_metadata: dict[str, Any] = {
             "session_id": session["id"],
@@ -1059,6 +1074,9 @@ class TurnRuntimeManager:
                     )
             with contextlib.suppress(Exception):
                 await self.store.update_turn_status(turn["id"], "failed", str(exc))
+            from deeptutor.multi_user.activity import record_turn_finished
+
+            record_turn_finished(turn["id"], session["id"], capability, "failed", [])
             raise
         return session, turn
 
@@ -2135,6 +2153,18 @@ class TurnRuntimeManager:
                     await self._flush_buffered_events(execution)
                 await self.store.update_turn_status(turn_id, "failed", str(exc))
         finally:
+            with contextlib.suppress(Exception):
+                persisted_turn = await self.store.get_turn(turn_id)
+                activity_status = str((persisted_turn or {}).get("status") or "failed")
+                from deeptutor.multi_user.activity import record_turn_finished
+
+                record_turn_finished(
+                    turn_id,
+                    session_id,
+                    capability_name,
+                    activity_status,
+                    assistant_events,
+                )
             if llm_scope_token is not None and reset_active_llm_selection is not None:
                 reset_active_llm_selection(llm_scope_token)
             # Drop the reply queue first — any in-flight ``submit_user_reply``

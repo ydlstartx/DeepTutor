@@ -5,18 +5,28 @@ import { useRouter } from "next/navigation";
 import { useTranslation } from "react-i18next";
 import { fetchAuthStatus } from "@/lib/auth";
 import {
-  listUsers,
+  listUserActivity,
   deleteUser,
   setUserRole,
   createUser,
   resetUserPassword,
   type UserRecord,
+  type UserActivityRecord,
+  type UserActivityStatus,
+  type UserUsageSummary,
 } from "@/lib/admin-api";
 import { GrantEditor } from "@/features/multi-user/components/GrantEditor";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { filterUsersByQuery } from "@/lib/admin-users";
 import {
+  filterUsersByActivity,
+  filterUsersByQuery,
+  sortUsersByActivity,
+  type UserActivityFilter,
+  type UserActivitySort,
+} from "@/lib/admin-users";
+import {
+  Activity,
   Search,
   Shield,
   ShieldCheck,
@@ -28,6 +38,9 @@ import {
   UserPlus,
   Users,
   KeyRound,
+  ChevronDown,
+  Clock3,
+  MessageSquareText,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,17 +58,144 @@ function formatDate(iso: string, lang: Language): string {
   }
 }
 
+function formatOptionalDate(iso: string | null, lang: Language): string {
+  if (!iso) return "—";
+  try {
+    return formatLocaleDate(new Date(iso), lang, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "—";
+  }
+}
+
+function formatNumber(value: number, lang: Language): string {
+  return new Intl.NumberFormat(lang === "zh" ? "zh-CN" : "en-US").format(
+    value,
+  );
+}
+
+const STATUS_STYLES: Record<UserActivityStatus, string> = {
+  recent: "bg-emerald-500",
+  today: "bg-sky-500",
+  recent_7d: "bg-amber-500",
+  inactive: "bg-[var(--muted-foreground)]/45",
+};
+
+function UsagePeriod({
+  label,
+  usage,
+  lang,
+}: {
+  label: string;
+  usage: UserUsageSummary;
+  lang: Language;
+}) {
+  const { t } = useTranslation();
+  const metrics = [
+    [t("Conversations"), usage.conversations],
+    [t("Completed turns"), usage.completed_turns],
+    [t("Failed turns"), usage.failed_turns],
+    [t("Knowledge base queries"), usage.kb_queries],
+    [t("LLM calls"), usage.llm_calls],
+    [t("Tokens"), usage.total_tokens],
+  ] as const;
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h4 className="text-sm font-medium text-[var(--foreground)]">{label}</h4>
+        {!usage.usage_complete && (
+          <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">
+            {t("Partial usage data")}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-x-5 gap-y-3 sm:grid-cols-3">
+        {metrics.map(([name, value]) => (
+          <div key={name}>
+            <p className="text-[11px] text-[var(--muted-foreground)]">{name}</p>
+            <p className="mt-0.5 text-sm font-semibold tabular-nums text-[var(--foreground)]">
+              {formatNumber(value, lang)}
+            </p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 border-t border-[var(--border)] pt-3 text-xs text-[var(--muted-foreground)]">
+        {t("Estimated cost")}: {`$${usage.estimated_cost_usd.toFixed(6)}`}
+      </div>
+    </div>
+  );
+}
+
+function UserActivityDetails({
+  user,
+  lang,
+}: {
+  user: UserActivityRecord;
+  lang: Language;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="bg-[var(--background)]/45 px-5 py-4">
+      <div className="mb-4 grid gap-3 text-xs text-[var(--muted-foreground)] sm:grid-cols-3">
+        <div>
+          <p>{t("Last login")}</p>
+          <p className="mt-1 font-medium text-[var(--foreground)]">
+            {formatOptionalDate(user.last_login_at, lang)}
+          </p>
+        </div>
+        <div>
+          <p>{t("Last online")}</p>
+          <p className="mt-1 font-medium text-[var(--foreground)]">
+            {formatOptionalDate(user.last_seen_at, lang)}
+          </p>
+        </div>
+        <div>
+          <p>{t("Joined")}</p>
+          <p className="mt-1 font-medium text-[var(--foreground)]">
+            {formatDate(user.created_at, lang)}
+          </p>
+        </div>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <UsagePeriod label={t("Last 7 days")} usage={user.usage_7d} lang={lang} />
+        <UsagePeriod label={t("Last 30 days")} usage={user.usage_30d} lang={lang} />
+      </div>
+      <p className="mt-3 text-[11px] text-[var(--muted-foreground)]">
+        {t("Usage totals contain metadata only. Conversation content is never shown here.")}
+      </p>
+    </div>
+  );
+}
+
 export default function AdminUsersPage() {
   const router = useRouter();
   const { t, i18n } = useTranslation();
   const lang: Language = i18n.language?.startsWith("zh") ? "zh" : "en";
   const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [users, setUsers] = useState<UserRecord[]>([]);
+  const [users, setUsers] = useState<UserActivityRecord[]>([]);
+  const [summary, setSummary] = useState({
+    total_users: 0,
+    active_today: 0,
+    active_7d: 0,
+    inactive_30d: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
   const [actionNotice, setActionNotice] = useState("");
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+  const [activityExpandedUserId, setActivityExpandedUserId] = useState<
+    string | null
+  >(null);
+  const [activityFilter, setActivityFilter] =
+    useState<UserActivityFilter>("all");
+  const [activitySort, setActivitySort] =
+    useState<UserActivitySort>("last_used");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [query, setQuery] = useState("");
   const [confirmTarget, setConfirmTarget] = useState<{
@@ -78,8 +218,9 @@ export default function AdminUsersPage() {
     setError("");
     setActionNotice("");
     try {
-      const data = await listUsers();
-      setUsers(data);
+      const data = await listUserActivity();
+      setUsers(data.users);
+      setSummary(data.summary);
     } catch (e) {
       setError(e instanceof Error ? e.message : t("Failed to load users"));
     } finally {
@@ -192,21 +333,16 @@ export default function AdminUsersPage() {
     try {
       if (kind === "delete") {
         await deleteUser(user.username);
-        setUsers((prev) => prev.filter((u) => u.username !== user.username));
       } else {
         const newRole = kind === "promote" ? "admin" : "user";
         await setUserRole(user.username, newRole);
-        setUsers((prev) =>
-          prev.map((u) =>
-            u.username === user.username ? { ...u, role: newRole } : u,
-          ),
-        );
         if (newRole === "admin") {
           setExpandedUserId((current) =>
             current === user.id ? null : current,
           );
         }
       }
+      await load();
       setConfirmTarget(null);
     } catch (e) {
       setConfirmTarget(null);
@@ -230,12 +366,24 @@ export default function AdminUsersPage() {
     }
   }, [expandedUserId, users]);
 
+  useEffect(() => {
+    if (
+      activityExpandedUserId &&
+      !users.some((user) => user.id === activityExpandedUserId)
+    ) {
+      setActivityExpandedUserId(null);
+    }
+  }, [activityExpandedUserId, users]);
+
   const normalizedQuery = query.trim().toLowerCase();
-  const filteredUsers = filterUsersByQuery(users, query);
+  const filteredUsers = sortUsersByActivity(
+    filterUsersByActivity(filterUsersByQuery(users, query), activityFilter),
+    activitySort,
+  );
 
   return (
     <div className="h-screen overflow-y-auto bg-[var(--background)] px-4 py-10 [scrollbar-gutter:stable]">
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-6xl">
         {/* Header */}
         <div className="mb-8">
           <Link
@@ -251,7 +399,7 @@ export default function AdminUsersPage() {
                 {t("User Management")}
               </h1>
               <p className="mt-0.5 text-sm text-[var(--muted-foreground)]">
-                {t("Manage registered accounts")}
+                {t("Manage accounts, assignments, and privacy-safe activity")}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -293,8 +441,48 @@ export default function AdminUsersPage() {
           </div>
         )}
 
+        {!loading && !error && (
+          <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {[
+              {
+                label: t("Total users"),
+                value: summary.total_users,
+                icon: Users,
+              },
+              {
+                label: t("Active today"),
+                value: summary.active_today,
+                icon: Activity,
+              },
+              {
+                label: t("Active in 7 days"),
+                value: summary.active_7d,
+                icon: MessageSquareText,
+              },
+              {
+                label: t("Inactive for 30 days"),
+                value: summary.inactive_30d,
+                icon: Clock3,
+              },
+            ].map((card) => (
+              <div
+                key={card.label}
+                className="rounded-xl border border-[var(--border)] bg-[var(--card)] px-4 py-3 shadow-sm"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-[var(--muted-foreground)]">{card.label}</p>
+                  <card.icon size={15} className="text-[var(--muted-foreground)]" />
+                </div>
+                <p className="mt-2 text-2xl font-semibold tabular-nums text-[var(--foreground)]">
+                  {formatNumber(card.value, lang)}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+
         {!loading && !error && users.length > 0 && (
-          <div className="mb-4 flex items-center gap-3">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
             <div className="relative flex-1">
               <Search
                 size={14}
@@ -311,8 +499,31 @@ export default function AdminUsersPage() {
                            outline-none focus:border-[var(--ring)] transition-colors"
               />
             </div>
+            <select
+              value={activityFilter}
+              onChange={(event) =>
+                setActivityFilter(event.target.value as UserActivityFilter)
+              }
+              aria-label={t("Filter by activity")}
+              className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
+            >
+              <option value="all">{t("All activity")}</option>
+              <option value="active_7d">{t("Active in 7 days")}</option>
+              <option value="inactive_30d">{t("Inactive for 30 days")}</option>
+            </select>
+            <select
+              value={activitySort}
+              onChange={(event) =>
+                setActivitySort(event.target.value as UserActivitySort)
+              }
+              aria-label={t("Sort users")}
+              className="rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-sm text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
+            >
+              <option value="last_used">{t("Recently used")}</option>
+              <option value="username">{t("Username")}</option>
+            </select>
             <span className="shrink-0 text-xs text-[var(--muted-foreground)]">
-              {normalizedQuery
+              {normalizedQuery || activityFilter !== "all"
                 ? t("{{filtered}} of {{total}}", {
                     filtered: filteredUsers.length,
                     total: users.length,
@@ -324,7 +535,7 @@ export default function AdminUsersPage() {
           </div>
         )}
 
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-hidden shadow-sm">
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)] overflow-x-auto shadow-sm">
           {loading ? (
             <div className="divide-y divide-[var(--border)]" aria-hidden>
               {[0, 1, 2].map((row) => (
@@ -376,24 +587,32 @@ export default function AdminUsersPage() {
                 className="text-[var(--muted-foreground)]/50"
               />
               <p className="mt-3 text-sm font-medium text-[var(--foreground)]">
-                {t("No users match “{{query}}”", { query: query.trim() })}
+                {normalizedQuery
+                  ? t("No users match “{{query}}”", { query: query.trim() })
+                  : t("No users match the selected activity filter")}
               </p>
               <button
-                onClick={() => setQuery("")}
+                onClick={() => {
+                  setQuery("");
+                  setActivityFilter("all");
+                }}
                 className="mt-4 rounded-lg px-3 py-1.5 text-sm border border-[var(--border)]
                            text-[var(--muted-foreground)] hover:text-[var(--foreground)]
                            hover:bg-[var(--background)]/60 transition-colors"
               >
-                {t("Clear search")}
+                {normalizedQuery ? t("Clear search") : t("Clear filters")}
               </button>
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <table className="w-full min-w-[1050px] text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] text-left text-xs text-[var(--muted-foreground)] uppercase tracking-wider">
                   <th className="px-5 py-3 font-medium">{t("Username")}</th>
                   <th className="px-5 py-3 font-medium">{t("Role")}</th>
-                  <th className="px-5 py-3 font-medium">{t("Joined")}</th>
+                  <th className="px-5 py-3 font-medium">{t("Activity")}</th>
+                  <th className="px-5 py-3 font-medium">{t("Last login")}</th>
+                  <th className="px-5 py-3 font-medium">{t("Last used")}</th>
+                  <th className="px-5 py-3 font-medium">{t("Last 7 days")}</th>
                   <th className="px-5 py-3 font-medium text-right">
                     {t("Actions")}
                   </th>
@@ -404,6 +623,14 @@ export default function AdminUsersPage() {
                   const isSelf = user.username === currentUser;
                   const isAdmin = user.role === "admin";
                   const canManageAssignments = !isAdmin && Boolean(user.id);
+                  const activityLabel =
+                    user.activity_status === "recent"
+                      ? t("Just active")
+                      : user.activity_status === "today"
+                        ? t("Active today")
+                        : user.activity_status === "recent_7d"
+                          ? t("Active in 7 days")
+                          : t("Inactive");
                   return (
                     <Fragment key={user.username}>
                       <tr className="group hover:bg-[var(--background)]/50 transition-colors">
@@ -441,8 +668,39 @@ export default function AdminUsersPage() {
                             {isAdmin ? t("Admin") : t("User")}
                           </span>
                         </td>
-                        <td className="px-5 py-3.5 text-[var(--muted-foreground)]">
-                          {formatDate(user.created_at, lang)}
+                        <td className="px-5 py-3.5">
+                          <button
+                            onClick={() =>
+                              setActivityExpandedUserId((current) =>
+                                current === user.id ? null : user.id,
+                              )
+                            }
+                            title={t("View activity details")}
+                            className="inline-flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
+                          >
+                            <span
+                              className={`h-2 w-2 rounded-full ${STATUS_STYLES[user.activity_status]}`}
+                            />
+                            {activityLabel}
+                            <ChevronDown
+                              size={13}
+                              className={`transition-transform ${
+                                activityExpandedUserId === user.id ? "rotate-180" : ""
+                              }`}
+                            />
+                          </button>
+                        </td>
+                        <td className="whitespace-nowrap px-5 py-3.5 text-xs text-[var(--muted-foreground)]">
+                          {formatOptionalDate(user.last_login_at, lang)}
+                        </td>
+                        <td className="whitespace-nowrap px-5 py-3.5 text-xs text-[var(--muted-foreground)]">
+                          {formatOptionalDate(user.last_used_at, lang)}
+                        </td>
+                        <td className="whitespace-nowrap px-5 py-3.5 text-xs text-[var(--muted-foreground)]">
+                          {t("{{turns}} turns · {{queries}} KB", {
+                            turns: formatNumber(user.usage_7d.turns, lang),
+                            queries: formatNumber(user.usage_7d.kb_queries, lang),
+                          })}
                         </td>
                         <td className="px-5 py-3.5">
                           <div className="flex items-center justify-end gap-1.5">
@@ -530,9 +788,16 @@ export default function AdminUsersPage() {
                           </div>
                         </td>
                       </tr>
+                      {activityExpandedUserId === user.id && (
+                        <tr>
+                          <td colSpan={7} className="p-0">
+                            <UserActivityDetails user={user} lang={lang} />
+                          </td>
+                        </tr>
+                      )}
                       {canManageAssignments && expandedUserId === user.id && (
                         <tr>
-                          <td colSpan={4} className="p-0">
+                          <td colSpan={7} className="p-0">
                             <GrantEditor key={user.id} userId={user.id} />
                           </td>
                         </tr>
