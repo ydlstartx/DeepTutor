@@ -1,4 +1,9 @@
-import type { SessionSummary } from "@/lib/session-api";
+import type { SessionFolder, SessionSummary } from "@/lib/session-api";
+
+export interface SessionFolderGroup {
+  folder: SessionFolder | null;
+  sessions: SessionSummary[];
+}
 
 function byPriority(a: SessionSummary, b: SessionSummary): number {
   const pinned =
@@ -49,4 +54,33 @@ export function organizeSessionTree(
   roots.sort(byPriority);
   for (const children of childrenByParent.values()) children.sort(byPriority);
   return { roots, childrenByParent };
+}
+
+/** Group a bounded session list into known one-level folders plus Uncategorized. */
+export function groupSessionsByFolder(
+  sessions: SessionSummary[],
+  folders: SessionFolder[],
+): SessionFolderGroup[] {
+  const knownFolderIds = new Set(folders.map((folder) => folder.id));
+  const sessionsByFolder = new Map<string, SessionSummary[]>();
+  const uncategorized: SessionSummary[] = [];
+
+  for (const session of sessions) {
+    const folderId = session.folder_id || "";
+    if (!folderId || !knownFolderIds.has(folderId)) {
+      uncategorized.push(session);
+      continue;
+    }
+    const grouped = sessionsByFolder.get(folderId) ?? [];
+    grouped.push(session);
+    sessionsByFolder.set(folderId, grouped);
+  }
+
+  return [
+    ...folders.map((folder) => ({
+      folder,
+      sessions: sessionsByFolder.get(folder.id) ?? [],
+    })),
+    { folder: null, sessions: uncategorized },
+  ];
 }

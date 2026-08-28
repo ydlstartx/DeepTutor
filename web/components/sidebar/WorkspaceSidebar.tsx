@@ -9,10 +9,14 @@ import { AdminLink } from "@/components/auth/AdminLink";
 import { ProfileLink } from "@/components/auth/ProfileLink";
 import { useUnifiedChat } from "@/context/UnifiedChatContext";
 import {
+  createSessionFolder,
   deleteSession,
+  listSessionFolders,
   listSessions,
+  moveSessionToFolder,
   updateSessionOrganization,
   updateSessionTitle,
+  type SessionFolder,
   type SessionOrganizationPatch,
   type SessionSummary,
 } from "@/lib/session-api";
@@ -30,6 +34,7 @@ function WorkspaceSidebarImpl() {
   } = useUnifiedChat();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [courses, setCourses] = useState<StudyCourse[]>([]);
+  const [folders, setFolders] = useState<SessionFolder[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const hasLoadedSessionsRef = useRef(false);
 
@@ -38,12 +43,14 @@ function WorkspaceSidebarImpl() {
       setLoadingSessions(true);
     }
     try {
-      const [nextSessions, nextCourses] = await Promise.all([
+      const [nextSessions, nextCourses, nextFolders] = await Promise.all([
         listSessions(50, 0, { force: true }),
         listCourses({ force: true }),
+        listSessionFolders({ force: true }),
       ]);
       setSessions(nextSessions);
       setCourses(nextCourses);
+      setFolders(nextFolders);
       hasLoadedSessionsRef.current = true;
     } catch (error) {
       console.error("Failed to load sessions", error);
@@ -153,11 +160,27 @@ function WorkspaceSidebarImpl() {
     [],
   );
 
+  const handleCreateFolder = useCallback(async (name: string) => {
+    const folder = await createSessionFolder(name);
+    setFolders((previous) => [...previous, folder]);
+  }, []);
+
+  const handleMoveSessionToFolder = useCallback(
+    async (sessionId: string, folderId: string | null) => {
+      await moveSessionToFolder(sessionId, folderId);
+      // The backend also moves direct Little Tutor children. Refresh the
+      // bounded sidebar snapshot and folder counts as one consistent view.
+      await refreshSessions();
+    },
+    [refreshSessions],
+  );
+
   return (
     <SidebarShell
       showSessions
       sessions={orderedSessions}
       courses={courses}
+      folders={folders}
       activeSessionId={selectedSessionId}
       loadingSessions={loadingSessions}
       onNewChat={handleNewChat}
@@ -165,6 +188,8 @@ function WorkspaceSidebarImpl() {
       onRenameSession={handleRenameSession}
       onDeleteSession={handleDeleteSession}
       onOrganizeSession={handleOrganizeSession}
+      onCreateFolder={handleCreateFolder}
+      onMoveSessionToFolder={handleMoveSessionToFolder}
       footerSlot={(collapsed) => (
         <>
           <ProfileLink collapsed={collapsed} />

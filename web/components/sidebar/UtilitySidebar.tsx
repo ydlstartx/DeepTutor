@@ -9,10 +9,14 @@ import { AdminLink } from "@/components/auth/AdminLink";
 import { ProfileLink } from "@/components/auth/ProfileLink";
 import { useAppShell } from "@/context/AppShellContext";
 import {
+  createSessionFolder,
   deleteSession,
+  listSessionFolders,
   listSessions,
+  moveSessionToFolder,
   updateSessionOrganization,
   updateSessionTitle,
+  type SessionFolder,
   type SessionOrganizationPatch,
   type SessionSummary,
 } from "@/lib/session-api";
@@ -24,6 +28,7 @@ export default function UtilitySidebar() {
   const { activeSessionId, setActiveSessionId } = useAppShell();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [courses, setCourses] = useState<StudyCourse[]>([]);
+  const [folders, setFolders] = useState<SessionFolder[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const hasLoadedSessionsRef = useRef(false);
 
@@ -32,12 +37,14 @@ export default function UtilitySidebar() {
       setLoadingSessions(true);
     }
     try {
-      const [nextSessions, nextCourses] = await Promise.all([
+      const [nextSessions, nextCourses, nextFolders] = await Promise.all([
         listSessions(50, 0, { force: true }),
         listCourses({ force: true }),
+        listSessionFolders({ force: true }),
       ]);
       setSessions(nextSessions);
       setCourses(nextCourses);
+      setFolders(nextFolders);
       hasLoadedSessionsRef.current = true;
     } catch (error) {
       console.error("Failed to load sessions", error);
@@ -108,11 +115,25 @@ export default function UtilitySidebar() {
     [],
   );
 
+  const handleCreateFolder = useCallback(async (name: string) => {
+    const folder = await createSessionFolder(name);
+    setFolders((previous) => [...previous, folder]);
+  }, []);
+
+  const handleMoveSessionToFolder = useCallback(
+    async (sessionId: string, folderId: string | null) => {
+      await moveSessionToFolder(sessionId, folderId);
+      await refreshSessions();
+    },
+    [refreshSessions],
+  );
+
   return (
     <SidebarShell
       showSessions
       sessions={sessions}
       courses={courses}
+      folders={folders}
       activeSessionId={activeSessionId}
       loadingSessions={loadingSessions}
       onNewChat={() => setActiveSessionId(null)}
@@ -120,6 +141,8 @@ export default function UtilitySidebar() {
       onRenameSession={handleRenameSession}
       onDeleteSession={handleDeleteSession}
       onOrganizeSession={handleOrganizeSession}
+      onCreateFolder={handleCreateFolder}
+      onMoveSessionToFolder={handleMoveSessionToFolder}
       footerSlot={(collapsed) => (
         <>
           <ProfileLink collapsed={collapsed} />

@@ -282,7 +282,7 @@ export default function ChatHistorySection({
               className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)]/50 px-3 py-1.5 text-[12px] font-medium text-[var(--muted-foreground)] transition-colors hover:border-[var(--border)] hover:text-[var(--foreground)]"
             >
               <FolderPlus className="h-3.5 w-3.5" />
-              {t("New folder")}
+              {t("New chat folder")}
             </button>
             <button
               type="button"
@@ -324,7 +324,7 @@ export default function ChatHistorySection({
                   if (event.key === "Enter") void handleCreateFolder();
                   if (event.key === "Escape") setCreatingFolder(false);
                 }}
-                placeholder={t("Folder name")}
+                placeholder={t("Chat folder name")}
                 className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-[13px] outline-none focus:border-[var(--ring)]"
               />
               <button

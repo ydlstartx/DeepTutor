@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { listAllSessions, updateSessionOrganization } from "../lib/session-api";
-import { organizeSessionTree } from "../lib/session-organization";
-import type { SessionSummary } from "../lib/session-api";
+import {
+  groupSessionsByFolder,
+  organizeSessionTree,
+} from "../lib/session-organization";
+import type { SessionFolder, SessionSummary } from "../lib/session-api";
 
 function session(
   id: string,
@@ -98,4 +101,43 @@ test("cyclic legacy parents remain renderable instead of recursing", () => {
     ["a", "b", "child"],
   );
   assert.equal(organized.childrenByParent.size, 0);
+});
+
+test("sidebar folder groups retain empty folders and recover unknown assignments", () => {
+  const folders: SessionFolder[] = [
+    {
+      id: "folder-a",
+      name: "Analog",
+      created_at: 1,
+      updated_at: 1,
+      session_count: 1,
+    },
+    {
+      id: "folder-empty",
+      name: "Empty",
+      created_at: 2,
+      updated_at: 2,
+      session_count: 0,
+    },
+  ];
+  const assigned = { ...session("assigned"), folder_id: "folder-a" };
+  const legacy = { ...session("legacy"), folder_id: "missing-folder" };
+  const unassigned = session("unassigned");
+
+  const groups = groupSessionsByFolder(
+    [assigned, legacy, unassigned],
+    folders,
+  );
+
+  assert.deepEqual(
+    groups.map((group) => ({
+      id: group.folder?.id ?? null,
+      sessions: group.sessions.map((row) => row.session_id),
+    })),
+    [
+      { id: "folder-a", sessions: ["assigned"] },
+      { id: "folder-empty", sessions: [] },
+      { id: null, sessions: ["legacy", "unassigned"] },
+    ],
+  );
 });
