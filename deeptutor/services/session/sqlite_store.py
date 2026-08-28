@@ -183,7 +183,15 @@ class SQLiteSessionStore:
                     updated_at REAL NOT NULL,
                     compressed_summary TEXT DEFAULT '',
                     summary_up_to_msg_id INTEGER DEFAULT 0,
-                    preferences_json TEXT DEFAULT '{}'
+                    preferences_json TEXT DEFAULT '{}',
+                    folder_id TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS session_folders (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS messages (
@@ -291,6 +299,9 @@ class SQLiteSessionStore:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
             if "preferences_json" not in columns:
                 conn.execute("ALTER TABLE sessions ADD COLUMN preferences_json TEXT DEFAULT '{}'")
+            if "folder_id" not in columns:
+                conn.execute("ALTER TABLE sessions ADD COLUMN folder_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_folder_id ON sessions(folder_id)")
             if "kind" in columns:
                 try:
                     conn.execute("ALTER TABLE sessions DROP COLUMN kind")
@@ -521,6 +532,7 @@ class SQLiteSessionStore:
             "updated_at": now,
             "compressed_summary": "",
             "summary_up_to_msg_id": 0,
+            "folder_id": None,
         }
 
     async def create_session(
@@ -542,6 +554,7 @@ class SQLiteSessionStore:
                     s.compressed_summary,
                     s.summary_up_to_msg_id,
                     s.preferences_json,
+                    s.folder_id,
                     COALESCE(
                         (
                             SELECT t.status
@@ -1442,6 +1455,7 @@ class SQLiteSessionStore:
             s.compressed_summary,
             s.summary_up_to_msg_id,
             s.preferences_json,
+            s.folder_id,
             COUNT(m.id) AS message_count,
             COALESCE(
                 (SELECT t.status FROM turns t WHERE t.session_id = s.id
@@ -1515,6 +1529,148 @@ class SQLiteSessionStore:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         return await self._run(self._list_sessions_sync, limit, offset)
+
+    @staticmethod
+    def _normalize_session_folder_name(name: str) -> str:
+        normalized = (name or "").strip()
+        if not normalized:
+            raise ValueError("Folder name is required")
+        if len(normalized) > 50:
+            raise ValueError("Folder name must be at most 50 characters")
+        return normalized
+
+    @staticmethod
+    def _serialize_session_folder(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "session_count": int(row["session_count"] or 0),
+        }
+
+    def _list_session_folders_sync(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                r"""
+                SELECT
+                    f.id,
+                    f.name,
+                    f.created_at,
+                    f.updated_at,
+                    COUNT(s.id) AS session_count
+                FROM session_folders f
+                LEFT JOIN sessions s
+                    ON s.folder_id = f.id
+                    AND s.id NOT LIKE 'imported\_%' ESCAPE '\'
+                GROUP BY f.id
+                ORDER BY f.created_at ASC, f.id ASC
+                """
+            ).fetchall()
+        return [self._serialize_session_folder(row) for row in rows]
+
+    async def list_session_folders(self) -> list[dict[str, Any]]:
+        return await self._run(self._list_session_folders_sync)
+
+    def _create_session_folder_sync(self, name: str) -> dict[str, Any]:
+        normalized = self._normalize_session_folder_name(name)
+        now = time.time()
+        folder_id = f"folder_{uuid.uuid4().hex}"
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO session_folders (id, name, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (folder_id, normalized, now, now),
+                )
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Folder name already exists") from exc
+        return {
+            "id": folder_id,
+            "name": normalized,
+            "created_at": now,
+            "updated_at": now,
+            "session_count": 0,
+        }
+
+    async def create_session_folder(self, name: str) -> dict[str, Any]:
+        return await self._run(self._create_session_folder_sync, name)
+
+    def _rename_session_folder_sync(self, folder_id: str, name: str) -> dict[str, Any] | None:
+        normalized = self._normalize_session_folder_name(name)
+        now = time.time()
+        try:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "UPDATE session_folders SET name = ?, updated_at = ? WHERE id = ?",
+                    (normalized, now, folder_id),
+                )
+                if cur.rowcount == 0:
+                    return None
+                row = conn.execute(
+                    """
+                    SELECT f.id, f.name, f.created_at, f.updated_at,
+                           COUNT(s.id) AS session_count
+                    FROM session_folders f
+                    LEFT JOIN sessions s ON s.folder_id = f.id
+                    WHERE f.id = ?
+                    GROUP BY f.id
+                    """,
+                    (folder_id,),
+                ).fetchone()
+                conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("Folder name already exists") from exc
+        return self._serialize_session_folder(row) if row is not None else None
+
+    async def rename_session_folder(self, folder_id: str, name: str) -> dict[str, Any] | None:
+        return await self._run(self._rename_session_folder_sync, folder_id, name)
+
+    def _delete_session_folder_sync(self, folder_id: str) -> bool:
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM session_folders WHERE id = ?", (folder_id,)
+            ).fetchone()
+            if exists is None:
+                return False
+            conn.execute(
+                "UPDATE sessions SET folder_id = NULL WHERE folder_id = ?",
+                (folder_id,),
+            )
+            conn.execute("DELETE FROM session_folders WHERE id = ?", (folder_id,))
+            conn.commit()
+        return True
+
+    async def delete_session_folder(self, folder_id: str) -> bool:
+        return await self._run(self._delete_session_folder_sync, folder_id)
+
+    def _move_session_to_folder_sync(self, session_id: str, folder_id: str | None) -> bool:
+        with self._connect() as conn:
+            session = conn.execute(
+                r"SELECT 1 FROM sessions WHERE id = ? "
+                r"AND id NOT LIKE 'imported\_%' ESCAPE '\'",
+                (session_id,),
+            ).fetchone()
+            if session is None:
+                return False
+            if folder_id is not None:
+                folder = conn.execute(
+                    "SELECT 1 FROM session_folders WHERE id = ?", (folder_id,)
+                ).fetchone()
+                if folder is None:
+                    raise ValueError("Folder not found")
+            # Deliberately leave updated_at unchanged: organizing history is
+            # not usage and must not move a conversation to the top of Recents.
+            conn.execute(
+                "UPDATE sessions SET folder_id = ? WHERE id = ?",
+                (folder_id, session_id),
+            )
+            conn.commit()
+        return True
+
+    async def move_session_to_folder(self, session_id: str, folder_id: str | None) -> bool:
+        return await self._run(self._move_session_to_folder_sync, session_id, folder_id)
 
     async def list_imported_sessions(
         self,

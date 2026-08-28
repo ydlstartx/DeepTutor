@@ -23,6 +23,7 @@ storage.  The key performance design:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 import re
@@ -63,7 +64,21 @@ def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value) if value is not None else default
     except (TypeError, ValueError):
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
         return default
+
+
+def _session_activity_timestamp(record: Any) -> float:
+    """Stable activity time, including records created before the new field."""
+    return (
+        _to_float(getattr(record, "session_activity_at", None))
+        or _to_float(getattr(record, "updated", None))
+        or time.time()
+    )
 
 
 def _current_user_id() -> str:
@@ -96,6 +111,14 @@ def _find_session_record(pb: Any, session_id: str, user_id: str) -> Any | None:
     """
     records = pb.collection("sessions").get_full_list(
         query_params={"filter": f'session_id="{session_id}" && user_id="{user_id}"'}
+    )
+    return records[0] if records else None
+
+
+def _find_session_folder_record(pb: Any, folder_id: str, user_id: str) -> Any | None:
+    """Return an owned folder; never accept another user's folder id."""
+    records = pb.collection("session_folders").get_full_list(
+        query_params={"filter": f'folder_id="{folder_id}" && user_id="{user_id}"'}
     )
     return records[0] if records else None
 
@@ -136,6 +159,8 @@ class PocketBaseSessionStore:
                         "compressed_summary": "",
                         "summary_up_to_msg_id": 0,
                         "preferences_json": {},
+                        "folder_id": "",
+                        "session_activity_at": now,
                         "capability": "",
                         "status": "idle",
                     }
@@ -180,7 +205,7 @@ class PocketBaseSessionStore:
         sid = session_id or getattr(record, "session_id", getattr(record, "id", ""))
         t = title or getattr(record, "title", "New conversation") or "New conversation"
         created = _to_float(getattr(record, "created", None)) or now or time.time()
-        updated = _to_float(getattr(record, "updated", None)) or now or time.time()
+        updated = _session_activity_timestamp(record) if now is None else now
         preferences_raw = getattr(record, "preferences_json", None)
         return {
             "id": sid,
@@ -191,6 +216,7 @@ class PocketBaseSessionStore:
             "compressed_summary": getattr(record, "compressed_summary", "") or "",
             "summary_up_to_msg_id": int(getattr(record, "summary_up_to_msg_id", 0) or 0),
             "preferences": _json_loads(preferences_raw, {}),
+            "folder_id": getattr(record, "folder_id", "") or None,
             "capability": getattr(record, "capability", "") or "",
             "status": getattr(record, "status", "idle") or "idle",
             "active_turn_id": "",
@@ -205,7 +231,11 @@ class PocketBaseSessionStore:
             if record is None:
                 return False
             _pb().collection("sessions").update(
-                record.id, {"title": (title.strip() or "New conversation")[:100]}
+                record.id,
+                {
+                    "title": (title.strip() or "New conversation")[:100],
+                    "session_activity_at": _session_activity_timestamp(record),
+                },
             )
             return True
 
@@ -241,8 +271,24 @@ class PocketBaseSessionStore:
         uid = _current_user_id()
 
         def _list():
-            query_params: dict[str, Any] = {"sort": "-updated", "filter": f'user_id="{uid}"'}
-            return _pb().collection("sessions").get_list(page, limit, query_params=query_params)
+            collection = _pb().collection("sessions")
+            try:
+                return collection.get_list(
+                    page,
+                    limit,
+                    query_params={
+                        "sort": "-session_activity_at,-updated",
+                        "filter": f'user_id="{uid}"',
+                    },
+                )
+            except Exception:
+                # Rolling deployments can briefly run this code before the
+                # operator reruns pb_setup.py. Keep history readable.
+                return collection.get_list(
+                    page,
+                    limit,
+                    query_params={"sort": "-updated", "filter": f'user_id="{uid}"'},
+                )
 
         try:
             result = await asyncio.to_thread(_list)
@@ -250,6 +296,167 @@ class PocketBaseSessionStore:
         except Exception as exc:
             logger.warning(f"list_sessions failed: {exc}")
             return []
+
+    @staticmethod
+    def _normalize_session_folder_name(name: str) -> str:
+        normalized = (name or "").strip()
+        if not normalized:
+            raise ValueError("Folder name is required")
+        if len(normalized) > 50:
+            raise ValueError("Folder name must be at most 50 characters")
+        return normalized
+
+    @staticmethod
+    def _session_folder_record_to_dict(record: Any, session_count: int = 0) -> dict[str, Any]:
+        return {
+            "id": getattr(record, "folder_id", getattr(record, "id", "")),
+            "name": getattr(record, "name", "") or "",
+            "created_at": _to_float(getattr(record, "folder_created_at", None)),
+            "updated_at": _to_float(getattr(record, "folder_updated_at", None)),
+            "session_count": session_count,
+        }
+
+    async def list_session_folders(self) -> list[dict[str, Any]]:
+        uid = _current_user_id()
+
+        def _list():
+            pb = _pb()
+            folders = pb.collection("session_folders").get_full_list(
+                query_params={
+                    "filter": f'user_id="{uid}"',
+                    "sort": "folder_created_at,folder_id",
+                }
+            )
+            sessions = pb.collection("sessions").get_full_list(
+                query_params={"filter": f'user_id="{uid}"'}
+            )
+            counts: dict[str, int] = {}
+            for session in sessions:
+                folder_id = getattr(session, "folder_id", "") or ""
+                if folder_id:
+                    counts[folder_id] = counts.get(folder_id, 0) + 1
+            return [
+                self._session_folder_record_to_dict(
+                    folder, counts.get(getattr(folder, "folder_id", ""), 0)
+                )
+                for folder in folders
+            ]
+
+        try:
+            return await asyncio.to_thread(_list)
+        except Exception as exc:
+            logger.warning(f"list_session_folders failed: {exc}")
+            return []
+
+    async def create_session_folder(self, name: str) -> dict[str, Any]:
+        normalized = self._normalize_session_folder_name(name)
+        uid = _current_user_id()
+        now = time.time()
+        folder_id = f"folder_{uuid.uuid4().hex}"
+
+        def _create():
+            pb = _pb()
+            existing = pb.collection("session_folders").get_full_list(
+                query_params={"filter": f'user_id="{uid}"'}
+            )
+            if any(
+                (getattr(item, "name", "") or "").strip().casefold() == normalized.casefold()
+                for item in existing
+            ):
+                raise ValueError("Folder name already exists")
+            return pb.collection("session_folders").create(
+                {
+                    "folder_id": folder_id,
+                    "user_id": uid,
+                    "name": normalized,
+                    "folder_created_at": now,
+                    "folder_updated_at": now,
+                }
+            )
+
+        record = await asyncio.to_thread(_create)
+        return self._session_folder_record_to_dict(record)
+
+    async def rename_session_folder(self, folder_id: str, name: str) -> dict[str, Any] | None:
+        fid = _validate_id(folder_id, "folder_id")
+        normalized = self._normalize_session_folder_name(name)
+        uid = _current_user_id()
+        now = time.time()
+
+        def _rename():
+            pb = _pb()
+            record = _find_session_folder_record(pb, fid, uid)
+            if record is None:
+                return None
+            folders = pb.collection("session_folders").get_full_list(
+                query_params={"filter": f'user_id="{uid}"'}
+            )
+            if any(
+                getattr(item, "id", None) != getattr(record, "id", None)
+                and (getattr(item, "name", "") or "").strip().casefold() == normalized.casefold()
+                for item in folders
+            ):
+                raise ValueError("Folder name already exists")
+            updated = pb.collection("session_folders").update(
+                record.id,
+                {"name": normalized, "folder_updated_at": now},
+            )
+            sessions = pb.collection("sessions").get_full_list(
+                query_params={"filter": f'user_id="{uid}" && folder_id="{fid}"'}
+            )
+            return self._session_folder_record_to_dict(updated, len(sessions))
+
+        return await asyncio.to_thread(_rename)
+
+    async def delete_session_folder(self, folder_id: str) -> bool:
+        fid = _validate_id(folder_id, "folder_id")
+        uid = _current_user_id()
+
+        def _delete():
+            pb = _pb()
+            folder = _find_session_folder_record(pb, fid, uid)
+            if folder is None:
+                return False
+            sessions = pb.collection("sessions").get_full_list(
+                query_params={"filter": f'user_id="{uid}" && folder_id="{fid}"'}
+            )
+            for session in sessions:
+                pb.collection("sessions").update(
+                    session.id,
+                    {
+                        "folder_id": "",
+                        "session_activity_at": _session_activity_timestamp(session),
+                    },
+                )
+            pb.collection("session_folders").delete(folder.id)
+            return True
+
+        return await asyncio.to_thread(_delete)
+
+    async def move_session_to_folder(self, session_id: str, folder_id: str | None) -> bool:
+        sid = _validate_id(session_id, "session_id")
+        fid = _validate_id(folder_id, "folder_id") if folder_id else None
+        uid = _current_user_id()
+
+        def _move():
+            pb = _pb()
+            session = _find_session_record(pb, sid, uid)
+            if session is None:
+                return False
+            if fid is not None and _find_session_folder_record(pb, fid, uid) is None:
+                raise ValueError("Folder not found")
+            # ``session_activity_at`` is deliberately untouched: organizing
+            # history must not make an old conversation look recently used.
+            pb.collection("sessions").update(
+                session.id,
+                {
+                    "folder_id": fid or "",
+                    "session_activity_at": _session_activity_timestamp(session),
+                },
+            )
+            return True
+
+        return await asyncio.to_thread(_move)
 
     async def update_summary(self, session_id: str, summary: str, up_to_msg_id: int) -> bool:
         sid = _validate_id(session_id, "session_id")
@@ -264,6 +471,7 @@ class PocketBaseSessionStore:
                 {
                     "compressed_summary": summary,
                     "summary_up_to_msg_id": max(0, int(up_to_msg_id)),
+                    "session_activity_at": _session_activity_timestamp(record),
                 },
             )
             return True
@@ -290,7 +498,13 @@ class PocketBaseSessionStore:
                 record = _find_session_record(_pb(), sid, uid)
                 if record is None:
                     return False
-                _pb().collection("sessions").update(record.id, {"preferences_json": merged})
+                _pb().collection("sessions").update(
+                    record.id,
+                    {
+                        "preferences_json": merged,
+                        "session_activity_at": _session_activity_timestamp(record),
+                    },
+                )
                 return True
 
             return await asyncio.to_thread(_update)
@@ -339,6 +553,7 @@ class PocketBaseSessionStore:
         now = time.time()
 
         def _add():
+            pb = _pb()
             payload = {
                 "session_id": sid,
                 "role": role,
@@ -349,7 +564,17 @@ class PocketBaseSessionStore:
                 "metadata_json": metadata or {},
                 "msg_created_at": now,
             }
-            record = _pb().collection("messages").create(payload)
+            record = pb.collection("messages").create(payload)
+            try:
+                owner_id = _current_user_id()
+                session = _find_session_record(pb, sid, owner_id)
+                if session is not None:
+                    pb.collection("sessions").update(session.id, {"session_activity_at": now})
+            except Exception as exc:
+                # Old PocketBase schemas may not have the field until the
+                # operator reruns pb_setup.py. Message durability must not be
+                # coupled to that optional recency update.
+                logger.warning(f"session activity timestamp update failed: {exc}")
             # Title generation is owned by the turn runtime (LLM-driven
             # after the first user+assistant pair). Until that runs the
             # session keeps the ``New conversation`` sentinel.

@@ -24,6 +24,22 @@ class SessionRenameRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=100)
 
 
+class SessionFolderNameRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Folder name is required")
+        return normalized
+
+
+class SessionFolderMoveRequest(BaseModel):
+    folder_id: str | None = None
+
+
 class BranchSelectionRequest(BaseModel):
     """Edit-branch picker state: `{parent_message_id: chosen_child_id}`.
 
@@ -87,6 +103,42 @@ async def list_sessions(
     store = get_session_store()
     sessions = await store.list_sessions(limit=limit, offset=offset)
     return {"sessions": sessions}
+
+
+@router.get("/folders")
+async def list_session_folders():
+    store = get_session_store()
+    return {"folders": await store.list_session_folders()}
+
+
+@router.post("/folders", status_code=201)
+async def create_session_folder(payload: SessionFolderNameRequest):
+    store = get_session_store()
+    try:
+        folder = await store.create_session_folder(payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"folder": folder}
+
+
+@router.patch("/folders/{folder_id}")
+async def rename_session_folder(folder_id: str, payload: SessionFolderNameRequest):
+    store = get_session_store()
+    try:
+        folder = await store.rename_session_folder(folder_id, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if folder is None:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return {"folder": folder}
+
+
+@router.delete("/folders/{folder_id}")
+async def delete_session_folder(folder_id: str):
+    store = get_session_store()
+    if not await store.delete_session_folder(folder_id):
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return {"deleted": True, "folder_id": folder_id}
 
 
 # Cap (in characters) for a single event payload returned to the UI. RAG
@@ -174,6 +226,18 @@ async def delete_session(session_id: str):
     except Exception:
         logger.exception("failed to clean up attachments for session %s", session_id)
     return {"deleted": True, "session_id": session_id}
+
+
+@router.put("/{session_id}/folder")
+async def move_session_to_folder(session_id: str, payload: SessionFolderMoveRequest):
+    store = get_session_store()
+    try:
+        moved = await store.move_session_to_folder(session_id, payload.folder_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if not moved:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"moved": True, "session_id": session_id, "folder_id": payload.folder_id}
 
 
 @router.put("/{session_id}/branch-selection")

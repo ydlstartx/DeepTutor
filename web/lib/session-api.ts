@@ -59,7 +59,16 @@ export interface SessionSummary {
     | "cancelled"
     | "rejected";
   active_turn_id?: string;
+  folder_id: string | null;
   preferences?: SessionPreferences;
+}
+
+export interface SessionFolder {
+  id: string;
+  name: string;
+  created_at: number;
+  updated_at: number;
+  session_count: number;
 }
 
 export interface ActiveTurnSummary {
@@ -89,6 +98,7 @@ export interface SessionDetail {
     | "cancelled"
     | "rejected";
   active_turn_id?: string;
+  folder_id: string | null;
   compressed_summary?: string;
   summary_up_to_msg_id?: number;
   preferences?: SessionPreferences;
@@ -115,7 +125,16 @@ async function expectJson<T>(response: Response): Promise<T> {
     return new Promise(() => {});
   }
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    let detail = `Request failed: ${response.status}`;
+    try {
+      const payload = (await response.json()) as { detail?: unknown };
+      if (typeof payload.detail === "string" && payload.detail.trim()) {
+        detail = payload.detail;
+      }
+    } catch {
+      // Keep the status-based fallback for non-JSON error responses.
+    }
+    throw new Error(detail);
   }
   return response.json() as Promise<T>;
 }
@@ -178,6 +197,79 @@ export async function deleteSession(sessionId: string): Promise<void> {
     method: "DELETE",
   });
   await expectJson<{ deleted: boolean }>(response);
+  invalidateClientCache("sessions:");
+}
+
+export async function listSessionFolders(options?: {
+  force?: boolean;
+}): Promise<SessionFolder[]> {
+  return withClientCache<SessionFolder[]>(
+    "session-folders",
+    async () => {
+      const response = await apiFetch(apiUrl("/api/v1/sessions/folders"), {
+        cache: "no-store",
+      });
+      const data = await expectJson<{ folders: SessionFolder[] }>(response);
+      return data.folders ?? [];
+    },
+    { force: options?.force, ttlMs: 15_000 },
+  );
+}
+
+export async function createSessionFolder(
+  name: string,
+): Promise<SessionFolder> {
+  const response = await apiFetch(apiUrl("/api/v1/sessions/folders"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const data = await expectJson<{ folder: SessionFolder }>(response);
+  invalidateClientCache("session-folders");
+  return data.folder;
+}
+
+export async function renameSessionFolder(
+  folderId: string,
+  name: string,
+): Promise<SessionFolder> {
+  const response = await apiFetch(
+    apiUrl(`/api/v1/sessions/folders/${folderId}`),
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+  const data = await expectJson<{ folder: SessionFolder }>(response);
+  invalidateClientCache("session-folders");
+  return data.folder;
+}
+
+export async function deleteSessionFolder(folderId: string): Promise<void> {
+  const response = await apiFetch(
+    apiUrl(`/api/v1/sessions/folders/${folderId}`),
+    { method: "DELETE" },
+  );
+  await expectJson<{ deleted: boolean }>(response);
+  invalidateClientCache("session-folders");
+  invalidateClientCache("sessions:");
+}
+
+export async function moveSessionToFolder(
+  sessionId: string,
+  folderId: string | null,
+): Promise<void> {
+  const response = await apiFetch(
+    apiUrl(`/api/v1/sessions/${sessionId}/folder`),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_id: folderId }),
+    },
+  );
+  await expectJson<{ moved: boolean }>(response);
+  invalidateClientCache("session-folders");
   invalidateClientCache("sessions:");
 }
 

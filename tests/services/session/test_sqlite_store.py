@@ -76,6 +76,78 @@ def _make_items(*specs):
     return items
 
 
+# ── Session folders ───────────────────────────────────────────────
+
+
+def test_session_folder_crud_move_and_delete_to_uncategorized(
+    store: SQLiteSessionStore,
+) -> None:
+    session = asyncio.run(store.create_session(title="Organize me"))
+    original_updated_at = session["updated_at"]
+    folder = asyncio.run(store.create_session_folder("Research"))
+
+    assert asyncio.run(store.move_session_to_folder(session["id"], folder["id"])) is True
+    moved = asyncio.run(store.get_session(session["id"]))
+    assert moved is not None
+    assert moved["folder_id"] == folder["id"]
+    assert moved["updated_at"] == original_updated_at
+
+    [listed] = asyncio.run(store.list_session_folders())
+    assert listed["name"] == "Research"
+    assert listed["session_count"] == 1
+
+    renamed = asyncio.run(store.rename_session_folder(folder["id"], "References"))
+    assert renamed is not None and renamed["name"] == "References"
+
+    assert asyncio.run(store.delete_session_folder(folder["id"])) is True
+    unclassified = asyncio.run(store.get_session(session["id"]))
+    assert unclassified is not None and unclassified["folder_id"] is None
+    assert asyncio.run(store.list_session_folders()) == []
+
+
+def test_session_folder_names_are_unique_case_insensitively(
+    store: SQLiteSessionStore,
+) -> None:
+    asyncio.run(store.create_session_folder("Projects"))
+    with pytest.raises(ValueError, match="already exists"):
+        asyncio.run(store.create_session_folder(" projects "))
+
+
+def test_move_session_rejects_unknown_folder(store: SQLiteSessionStore) -> None:
+    session = asyncio.run(store.create_session())
+    with pytest.raises(ValueError, match="Folder not found"):
+        asyncio.run(store.move_session_to_folder(session["id"], "folder_missing"))
+
+
+def test_existing_database_migrates_session_folder_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT 'New conversation',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                compressed_summary TEXT DEFAULT '',
+                summary_up_to_msg_id INTEGER DEFAULT 0,
+                preferences_json TEXT DEFAULT '{}'
+            )
+            """
+        )
+        conn.commit()
+
+    SQLiteSessionStore(db_path=db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+        folder_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_folders'"
+        ).fetchone()
+    assert "folder_id" in columns
+    assert folder_table is not None
+
+
 # ── Notebook entries ──────────────────────────────────────────────
 
 

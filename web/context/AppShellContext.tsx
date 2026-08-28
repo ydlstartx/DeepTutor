@@ -28,10 +28,13 @@ import {
   hasStoredLanguage,
   SIDEBAR_COLLAPSED_EVENT,
   SIDEBAR_COLLAPSED_STORAGE_KEY,
+  SIDEBAR_WIDTH_EVENT,
+  SIDEBAR_WIDTH_STORAGE_KEY,
   normalizeCodeBlockShowLineNumbers,
   normalizeCodeBlockTheme,
   normalizeCodeBlockWrapLongLines,
   normalizeLanguage,
+  normalizeSidebarWidth,
   resolveResponseLanguage,
   readStoredActiveSessionId,
   readStoredCodeBlockShowLineNumbers,
@@ -40,12 +43,14 @@ import {
   readStoredLanguage,
   writeStoredResponseLanguage,
   readStoredSidebarCollapsed,
+  readStoredSidebarWidth,
   writeStoredActiveSessionId,
   writeStoredCodeBlockShowLineNumbers,
   writeStoredCodeBlockTheme,
   writeStoredCodeBlockWrapLongLines,
   writeStoredLanguage,
   writeStoredSidebarCollapsed,
+  writeStoredSidebarWidth,
   type AppLanguage,
 } from "@/context/app-shell-storage";
 
@@ -58,6 +63,8 @@ interface AppShellContextValue {
   setActiveSessionId: (sessionId: string | null) => void;
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
+  sidebarWidth: number;
+  setSidebarWidth: (width: number) => void;
   codeBlockTheme: string;
   setCodeBlockTheme: (theme: string) => void;
   codeBlockShowLineNumbers: boolean;
@@ -79,6 +86,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
   );
   // Always start expanded to match SSR; hydrate from localStorage after mount
   const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(false);
+  const [sidebarWidth, setSidebarWidthState] = useState<number>(220);
   // Code block settings - start with defaults, hydrate from localStorage after mount
   const [codeBlockTheme, setCodeBlockThemeState] = useState<string>(() =>
     readStoredCodeBlockTheme(),
@@ -93,6 +101,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLanguageState(readStoredLanguage());
     setSidebarCollapsedState(readStoredSidebarCollapsed());
+    setSidebarWidthState(readStoredSidebarWidth());
     setCodeBlockThemeState(readStoredCodeBlockTheme());
     setCodeBlockShowLineNumbersState(readStoredCodeBlockShowLineNumbers());
     setCodeBlockWrapLongLinesState(readStoredCodeBlockWrapLongLines());
@@ -162,6 +171,9 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       if (event.key === SIDEBAR_COLLAPSED_STORAGE_KEY) {
         setSidebarCollapsedState(event.newValue === "1");
       }
+      if (event.key === SIDEBAR_WIDTH_STORAGE_KEY) {
+        setSidebarWidthState(normalizeSidebarWidth(event.newValue));
+      }
       if (event.key === CODE_BLOCK_THEME_STORAGE_KEY) {
         setCodeBlockThemeState(normalizeCodeBlockTheme(event.newValue));
       }
@@ -193,6 +205,11 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       setSidebarCollapsedState(Boolean(detail?.collapsed));
     };
 
+    const onSidebarWidth = (event: Event) => {
+      const detail = (event as CustomEvent<{ width?: number }>).detail;
+      setSidebarWidthState(normalizeSidebarWidth(detail?.width));
+    };
+
     const onCodeBlockSettings = (event: Event) => {
       const detail = (
         event as CustomEvent<{
@@ -219,6 +236,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener(LANGUAGE_EVENT, onLanguage);
     window.addEventListener(ACTIVE_SESSION_EVENT, onActiveSession);
     window.addEventListener(SIDEBAR_COLLAPSED_EVENT, onSidebarCollapsed);
+    window.addEventListener(SIDEBAR_WIDTH_EVENT, onSidebarWidth);
     window.addEventListener(CODE_BLOCK_SETTINGS_EVENT, onCodeBlockSettings);
 
     return () => {
@@ -226,6 +244,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       window.removeEventListener(LANGUAGE_EVENT, onLanguage);
       window.removeEventListener(ACTIVE_SESSION_EVENT, onActiveSession);
       window.removeEventListener(SIDEBAR_COLLAPSED_EVENT, onSidebarCollapsed);
+      window.removeEventListener(SIDEBAR_WIDTH_EVENT, onSidebarWidth);
       window.removeEventListener(
         CODE_BLOCK_SETTINGS_EVENT,
         onCodeBlockSettings,
@@ -251,6 +270,12 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
   const setSidebarCollapsed = useCallback((collapsed: boolean) => {
     writeStoredSidebarCollapsed(collapsed);
     setSidebarCollapsedState(collapsed);
+  }, []);
+
+  const setSidebarWidth = useCallback((width: number) => {
+    const normalized = normalizeSidebarWidth(width);
+    writeStoredSidebarWidth(normalized);
+    setSidebarWidthState(normalized);
   }, []);
 
   const setCodeBlockTheme = useCallback((nextTheme: string) => {
@@ -279,6 +304,8 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       setActiveSessionId,
       sidebarCollapsed,
       setSidebarCollapsed,
+      sidebarWidth,
+      setSidebarWidth,
       codeBlockTheme,
       setCodeBlockTheme,
       codeBlockShowLineNumbers,
@@ -298,8 +325,10 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       setCodeBlockWrapLongLines,
       setLanguage,
       setSidebarCollapsed,
+      setSidebarWidth,
       setTheme,
       sidebarCollapsed,
+      sidebarWidth,
       theme,
     ],
   );

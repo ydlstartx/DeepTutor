@@ -6,6 +6,7 @@ export const ACTIVE_SESSION_STORAGE_KEY = "deeptutor.activeSessionId.tab";
 export const LANGUAGE_STORAGE_KEY = "deeptutor-language";
 export const RESPONSE_LANGUAGE_STORAGE_KEY = "deeptutor-response-language";
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "deeptutor.sidebarCollapsed";
+export const SIDEBAR_WIDTH_STORAGE_KEY = "deeptutor.sidebarWidth";
 export const CHAT_RESPONSE_TIMEOUT_STORAGE_KEY =
   "deeptutor.chatResponseTimeout";
 export const CODE_BLOCK_THEME_STORAGE_KEY = "deeptutor.code-block-theme";
@@ -59,6 +60,7 @@ export const ACTIVE_SESSION_EVENT = "deeptutor:active-session";
 export const LANGUAGE_EVENT = "deeptutor:language";
 export const RESPONSE_LANGUAGE_EVENT = "deeptutor:response-language";
 export const SIDEBAR_COLLAPSED_EVENT = "deeptutor:sidebar-collapsed";
+export const SIDEBAR_WIDTH_EVENT = "deeptutor:sidebar-width";
 export const CODE_BLOCK_SETTINGS_EVENT = "deeptutor:code-block-settings";
 
 export function normalizeLanguage(
@@ -187,6 +189,47 @@ export function writeStoredSidebarCollapsed(collapsed: boolean): void {
     window.dispatchEvent(
       new CustomEvent(SIDEBAR_COLLAPSED_EVENT, {
         detail: { collapsed },
+      }),
+    );
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
+export const DEFAULT_SIDEBAR_WIDTH = 220;
+export const MIN_SIDEBAR_WIDTH = 200;
+export const MAX_SIDEBAR_WIDTH = 420;
+
+export function normalizeSidebarWidth(
+  value: number | string | null | undefined,
+): number {
+  const parsed = typeof value === "number" ? value : Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_SIDEBAR_WIDTH;
+  return Math.min(
+    MAX_SIDEBAR_WIDTH,
+    Math.max(MIN_SIDEBAR_WIDTH, Math.round(parsed)),
+  );
+}
+
+export function readStoredSidebarWidth(): number {
+  if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH;
+  try {
+    return normalizeSidebarWidth(
+      window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY),
+    );
+  } catch {
+    return DEFAULT_SIDEBAR_WIDTH;
+  }
+}
+
+export function writeStoredSidebarWidth(width: number): void {
+  if (typeof window === "undefined") return;
+  try {
+    const normalized = normalizeSidebarWidth(width);
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(normalized));
+    window.dispatchEvent(
+      new CustomEvent(SIDEBAR_WIDTH_EVENT, {
+        detail: { width: normalized },
       }),
     );
   } catch {

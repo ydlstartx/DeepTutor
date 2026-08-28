@@ -18,11 +18,15 @@ import pytest
 
 from deeptutor.multi_user.context import reset_current_user, set_current_user
 from deeptutor.multi_user.models import CurrentUser, UserScope
-from deeptutor.services.session.pocketbase_store import PocketBaseSessionStore
+from deeptutor.services.session.pocketbase_store import PocketBaseSessionStore, _to_float
 
 pytestmark = pytest.mark.asyncio
 
 _CLAUSE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+
+
+async def test_pocketbase_timestamp_parser_accepts_iso_values() -> None:
+    assert _to_float("2026-08-28T10:00:00Z") == 1787911200.0
 
 
 @contextmanager
@@ -172,3 +176,30 @@ async def test_create_turn_rejects_foreign_session(fake_pb) -> None:
     with as_user("alice"):
         turn = await store.create_turn("s_t")
     assert turn["session_id"] == "s_t"
+
+
+async def test_session_folders_are_user_scoped(fake_pb) -> None:
+    store = PocketBaseSessionStore()
+    with as_user("alice"):
+        alice_session = await store.create_session(session_id="s_alice")
+        alice_folder = await store.create_session_folder("Projects")
+        assert await store.move_session_to_folder(alice_session["id"], alice_folder["id"])
+
+    with as_user("bob"):
+        bob_session = await store.create_session(session_id="s_bob")
+        # Names are unique per user, not globally.
+        bob_folder = await store.create_session_folder("Projects")
+        assert bob_folder["id"] != alice_folder["id"]
+        assert [folder["id"] for folder in await store.list_session_folders()] == [bob_folder["id"]]
+        with pytest.raises(ValueError, match="Folder not found"):
+            await store.move_session_to_folder(bob_session["id"], alice_folder["id"])
+        assert await store.rename_session_folder(alice_folder["id"], "Stolen") is None
+        assert await store.delete_session_folder(alice_folder["id"]) is False
+
+    with as_user("alice"):
+        [folder] = await store.list_session_folders()
+        assert folder["id"] == alice_folder["id"]
+        assert folder["session_count"] == 1
+        assert await store.delete_session_folder(folder["id"]) is True
+        session = await store.get_session(alice_session["id"])
+        assert session is not None and session["folder_id"] is None

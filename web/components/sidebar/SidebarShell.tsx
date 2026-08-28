@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAppShell } from "@/context/AppShellContext";
 import {
   BookOpen,
@@ -32,6 +32,12 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { useCapabilityAccess } from "@/components/access/CapabilityAccessContext";
 import type { Capability } from "@/lib/capability-routes";
 import { PUBLIC_PRODUCT_NAME } from "@/lib/public-brand";
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  normalizeSidebarWidth,
+} from "@/context/app-shell-storage";
 
 interface NavEntry {
   href: string;
@@ -147,7 +153,12 @@ export function SidebarShell({
   const router = useRouter();
   const { t } = useTranslation();
   const { has } = useCapabilityAccess();
-  const { sidebarCollapsed, setSidebarCollapsed: setCollapsed } = useAppShell();
+  const {
+    sidebarCollapsed,
+    setSidebarCollapsed: setCollapsed,
+    sidebarWidth,
+    setSidebarWidth,
+  } = useAppShell();
   const { isMobile } = useDevice();
   const drawer = useSidebarDrawer();
 
@@ -169,6 +180,27 @@ export function SidebarShell({
   const renderedFooter =
     typeof footerSlot === "function" ? footerSlot(collapsed) : footerSlot;
   const [recentsCollapsed, setRecentsCollapsed] = useState(false);
+  const [draftSidebarWidth, setDraftSidebarWidth] = useState(sidebarWidth);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
+  const resizeAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!resizingSidebar) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDraftSidebarWidth(sidebarWidth);
+    }
+  }, [resizingSidebar, sidebarWidth]);
+
+  useEffect(
+    () => () => {
+      resizeAbortRef.current?.abort();
+      if (typeof document !== "undefined") {
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+    },
+    [],
+  );
 
   // Hydrate Recents collapse from localStorage after first render to stay SSR-safe.
   useEffect(() => {
@@ -199,6 +231,60 @@ export function SidebarShell({
     drawer?.close();
     onNewChat?.();
     router.push("/home");
+  };
+
+  const startSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.button !== 0) return;
+    event.preventDefault();
+    resizeAbortRef.current?.abort();
+    const controller = new AbortController();
+    resizeAbortRef.current = controller;
+    const startX = event.clientX;
+    const startWidth = draftSidebarWidth;
+    let latestWidth = startWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    setResizingSidebar(true);
+
+    const move = (moveEvent: PointerEvent) => {
+      latestWidth = normalizeSidebarWidth(
+        startWidth + moveEvent.clientX - startX,
+      );
+      setDraftSidebarWidth(latestWidth);
+    };
+    const finish = () => {
+      controller.abort();
+      if (resizeAbortRef.current === controller) resizeAbortRef.current = null;
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setResizingSidebar(false);
+      setSidebarWidth(latestWidth);
+    };
+
+    window.addEventListener("pointermove", move, { signal: controller.signal });
+    window.addEventListener("pointerup", finish, {
+      once: true,
+      signal: controller.signal,
+    });
+    window.addEventListener("pointercancel", finish, {
+      once: true,
+      signal: controller.signal,
+    });
+  };
+
+  const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = draftSidebarWidth - 10;
+    if (event.key === "ArrowRight") nextWidth = draftSidebarWidth + 10;
+    if (event.key === "Home") nextWidth = MIN_SIDEBAR_WIDTH;
+    if (event.key === "End") nextWidth = MAX_SIDEBAR_WIDTH;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    const normalized = normalizeSidebarWidth(nextWidth);
+    setDraftSidebarWidth(normalized);
+    setSidebarWidth(normalized);
   };
 
   /* ---- Collapsed state ---- */
@@ -331,7 +417,30 @@ export function SidebarShell({
 
   /* ---- Expanded state ---- */
   return (
-    <aside className="flex w-[220px] h-dvh shrink-0 flex-col bg-[var(--secondary)] transition-all duration-200">
+    <aside
+      className={`relative flex h-dvh shrink-0 flex-col bg-[var(--secondary)] ${
+        resizingSidebar ? "" : "transition-[width] duration-200"
+      }`}
+      style={{ width: isMobile ? DEFAULT_SIDEBAR_WIDTH : draftSidebarWidth }}
+    >
+      {!isMobile && (
+        <div
+          role="separator"
+          aria-label={t("Resize sidebar")}
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={draftSidebarWidth}
+          tabIndex={0}
+          onPointerDown={startSidebarResize}
+          onKeyDown={handleResizeKeyDown}
+          onDoubleClick={() => {
+            setDraftSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+            setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+          }}
+          className="group/resize absolute -right-1 top-0 z-30 h-full w-2 cursor-col-resize touch-none outline-none after:absolute after:bottom-0 after:left-1/2 after:top-0 after:w-px after:-translate-x-1/2 after:bg-transparent after:transition-colors hover:after:bg-[var(--primary)]/45 focus-visible:after:bg-[var(--primary)]/60"
+        />
+      )}
       {/* Header: logo + collapse toggle */}
       <div className="flex h-14 items-center justify-between px-4">
         <Link

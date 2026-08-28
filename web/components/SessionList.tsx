@@ -1,9 +1,12 @@
 "use client";
 
-import { Check, Pencil, Trash2 } from "lucide-react";
+import { Check, FolderInput, Pencil, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { type SessionSummary } from "@/lib/session-api";
+import {
+  type SessionFolder,
+  type SessionSummary,
+} from "@/lib/session-api";
 import { normalizeMessageContent, truncateText } from "@/lib/message-content";
 import { SessionAvatar } from "@/components/sidebar/SessionAvatar";
 import {
@@ -29,6 +32,11 @@ interface SessionListProps {
   onSelect: (sessionId: string) => void | Promise<void>;
   onRename: (sessionId: string, title: string) => void | Promise<void>;
   onDelete: (sessionId: string) => void | Promise<void>;
+  folderOptions?: SessionFolder[];
+  onMove?: (
+    sessionId: string,
+    folderId: string | null,
+  ) => void | Promise<void>;
 }
 
 function StatusIndicator({ status }: { status?: SessionRuntimeStatus }) {
@@ -78,6 +86,8 @@ export default function SessionList({
   onSelect,
   onRename,
   onDelete,
+  folderOptions = [],
+  onMove,
 }: SessionListProps) {
   const { t, i18n } = useTranslation();
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -362,6 +372,36 @@ export default function SessionList({
                       )}
                     </div>
                     <div className="flex shrink-0 items-center gap-0.5 pt-px opacity-0 transition-opacity group-hover:opacity-100">
+                      {onMove && (
+                        <label
+                          className="relative rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
+                          title={t("Move to folder") as string}
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <span className="sr-only">{t("Move to folder")}</span>
+                          <FolderInput size={11} />
+                          <select
+                            value={session.folder_id ?? ""}
+                            onChange={(event) => {
+                              event.stopPropagation();
+                              void onMove(
+                                session.session_id,
+                                event.target.value || null,
+                              );
+                            }}
+                            onClick={(event) => event.stopPropagation()}
+                            aria-label={t("Move to folder")}
+                            className="absolute inset-0 cursor-pointer opacity-0"
+                          >
+                            <option value="">{t("Uncategorized")}</option>
+                            {folderOptions.map((folder) => (
+                              <option key={folder.id} value={folder.id}>
+                                {folder.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      )}
                       {isEditing ? (
                         <button
                           onClick={(event) => {
