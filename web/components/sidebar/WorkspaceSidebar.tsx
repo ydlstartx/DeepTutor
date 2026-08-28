@@ -10,10 +10,12 @@ import { ProfileLink } from "@/components/auth/ProfileLink";
 import { useUnifiedChat } from "@/context/UnifiedChatContext";
 import {
   createSessionFolder,
+  deleteSessionFolder,
   deleteSession,
   listSessionFolders,
   listSessions,
   moveSessionToFolder,
+  renameSessionFolder,
   updateSessionOrganization,
   updateSessionTitle,
   type SessionFolder,
@@ -165,6 +167,24 @@ function WorkspaceSidebarImpl() {
     setFolders((previous) => [...previous, folder]);
   }, []);
 
+  const handleRenameFolder = useCallback(
+    async (folderId: string, name: string) => {
+      const updated = await renameSessionFolder(folderId, name);
+      setFolders((previous) =>
+        previous.map((folder) => (folder.id === folderId ? updated : folder)),
+      );
+    },
+    [],
+  );
+
+  const handleDeleteFolder = useCallback(
+    async (folderId: string) => {
+      await deleteSessionFolder(folderId);
+      await refreshSessions();
+    },
+    [refreshSessions],
+  );
+
   const handleMoveSessionToFolder = useCallback(
     async (sessionId: string, folderId: string | null) => {
       await moveSessionToFolder(sessionId, folderId);
@@ -189,6 +209,8 @@ function WorkspaceSidebarImpl() {
       onDeleteSession={handleDeleteSession}
       onOrganizeSession={handleOrganizeSession}
       onCreateFolder={handleCreateFolder}
+      onRenameFolder={handleRenameFolder}
+      onDeleteFolder={handleDeleteFolder}
       onMoveSessionToFolder={handleMoveSessionToFolder}
       footerSlot={(collapsed) => (
         <>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAppShell } from "@/context/AppShellContext";
 import {
@@ -19,10 +20,13 @@ import {
   LayoutGrid,
   Library,
   Lock,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   PenLine,
   Settings,
+  Trash2,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -37,7 +41,7 @@ import type {
   SessionOrganizationPatch,
   SessionSummary,
 } from "@/lib/session-api";
-import { groupSessionsByFolder } from "@/lib/session-organization";
+import { buildSidebarSessionSections } from "@/lib/session-organization";
 import type { StudyCourse } from "@/lib/courses-api";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useCapabilityAccess } from "@/components/access/CapabilityAccessContext";
@@ -129,7 +133,31 @@ const SECONDARY_NAV: NavEntry[] = [
 ];
 const GITHUB_REPO_URL = "https://github.com/HKUDS/DeepTutor";
 const DOCS_URL = "https://deeptutor.info/";
-const RECENTS_COLLAPSED_KEY = "deeptutor.sidebar.recentsCollapsed";
+const FOLDER_MENU_WIDTH = 176;
+
+interface FolderMenuPosition {
+  left: number;
+  top: number;
+  openUpward: boolean;
+}
+
+function placeFolderMenu(anchor: DOMRect): FolderMenuPosition {
+  const margin = 12;
+  const gap = 4;
+  const estimatedHeight = 76;
+  const openUpward = window.innerHeight - anchor.bottom < estimatedHeight + gap;
+  return {
+    left: Math.max(
+      margin,
+      Math.min(
+        anchor.right - FOLDER_MENU_WIDTH,
+        window.innerWidth - FOLDER_MENU_WIDTH - margin,
+      ),
+    ),
+    top: openUpward ? anchor.top - gap : anchor.bottom + gap,
+    openUpward,
+  };
+}
 
 interface SidebarShellProps {
   sessions?: SessionSummary[];
@@ -148,6 +176,11 @@ interface SidebarShellProps {
     patch: SessionOrganizationPatch,
   ) => void | Promise<void>;
   onCreateFolder?: (name: string) => void | Promise<void>;
+  onRenameFolder?: (
+    folderId: string,
+    name: string,
+  ) => void | Promise<void>;
+  onDeleteFolder?: (folderId: string) => void | Promise<void>;
   onMoveSessionToFolder?: (
     sessionId: string,
     folderId: string | null,
@@ -173,6 +206,8 @@ export function SidebarShell({
   folders = [],
   onOrganizeSession,
   onCreateFolder,
+  onRenameFolder,
+  onDeleteFolder,
   onMoveSessionToFolder,
   footerSlot,
 }: SidebarShellProps) {
@@ -206,16 +241,22 @@ export function SidebarShell({
   const lockedTooltip = t("Locked — contact your administrator to get access.");
   const renderedFooter =
     typeof footerSlot === "function" ? footerSlot(collapsed) : footerSlot;
-  const [recentsCollapsed, setRecentsCollapsed] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [folderError, setFolderError] = useState<string | null>(null);
+  const [openFolderMenuId, setOpenFolderMenuId] = useState<string | null>(null);
+  const [folderMenuPosition, setFolderMenuPosition] =
+    useState<FolderMenuPosition | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [folderDraft, setFolderDraft] = useState("");
   const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(
     () => new Set(),
   );
   const [draftSidebarWidth, setDraftSidebarWidth] = useState(sidebarWidth);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const resizeAbortRef = useRef<AbortController | null>(null);
+  const folderMenuRootRef = useRef<HTMLDivElement>(null);
+  const folderMenuAnchorRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!resizingSidebar) {
@@ -235,24 +276,35 @@ export function SidebarShell({
     [],
   );
 
-  // Hydrate Recents collapse from localStorage after first render to stay SSR-safe.
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRecentsCollapsed(
-      window.localStorage.getItem(RECENTS_COLLAPSED_KEY) === "1",
-    );
-  }, []);
-
-  const toggleRecents = () => {
-    setRecentsCollapsed((prev) => {
-      const next = !prev;
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(RECENTS_COLLAPSED_KEY, next ? "1" : "0");
+    if (!openFolderMenuId) return;
+    const closeMenu = () => {
+      setOpenFolderMenuId(null);
+      setFolderMenuPosition(null);
+    };
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        !folderMenuRootRef.current?.contains(target) &&
+        !folderMenuAnchorRef.current?.contains(target)
+      ) {
+        closeMenu();
       }
-      return next;
-    });
-  };
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMenu();
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeMenu);
+    window.addEventListener("scroll", closeMenu, true);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeMenu);
+      window.removeEventListener("scroll", closeMenu, true);
+    };
+  }, [openFolderMenuId]);
 
   const handleHomeClick = (event: React.MouseEvent) => {
     // Always reset to a fresh session (mirrors the old "New Chat" affordance);
@@ -320,17 +372,17 @@ export function SidebarShell({
     setSidebarWidth(normalized);
   };
 
-  const recentSessions = sessions
-    .filter(
-      (session) =>
-        !session.preferences?.archived &&
-        !session.preferences?.parent_session_id,
-    )
-    .slice(0, 8);
+  const sidebarSessions = sessions.filter(
+    (session) =>
+      !session.preferences?.archived &&
+      !session.preferences?.parent_session_id,
+  );
   const folderManagementEnabled = Boolean(
     onCreateFolder && onMoveSessionToFolder,
   );
-  const recentFolderGroups = groupSessionsByFolder(recentSessions, folders);
+  const folderActionsEnabled = Boolean(onRenameFolder && onDeleteFolder);
+  const { folderGroups: sidebarFolderGroups, recentSessions } =
+    buildSidebarSessionSections(sidebarSessions, folders);
 
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
@@ -360,6 +412,57 @@ export function SidebarShell({
     } catch (error) {
       setFolderError(
         error instanceof Error ? t(error.message) : t("Could not move chat"),
+      );
+    }
+  };
+
+  const handleRenameFolder = async (folder: SessionFolder) => {
+    const name = folderDraft.trim();
+    if (!name || !onRenameFolder) return;
+    if (name === folder.name) {
+      setEditingFolderId(null);
+      setFolderDraft("");
+      return;
+    }
+    setFolderError(null);
+    try {
+      await onRenameFolder(folder.id, name);
+      setEditingFolderId(null);
+      setFolderDraft("");
+    } catch (error) {
+      setFolderError(
+        error instanceof Error
+          ? t(error.message)
+          : t("Could not rename folder"),
+      );
+    }
+  };
+
+  const handleDeleteFolder = async (folder: SessionFolder) => {
+    if (!onDeleteFolder) return;
+    if (
+      !window.confirm(
+        t(
+          'Delete folder "{{name}}"? Its conversations will move to Uncategorized.',
+          { name: folder.name },
+        ),
+      )
+    )
+      return;
+    setOpenFolderMenuId(null);
+    setFolderMenuPosition(null);
+    setFolderError(null);
+    try {
+      await onDeleteFolder(folder.id);
+      if (editingFolderId === folder.id) {
+        setEditingFolderId(null);
+        setFolderDraft("");
+      }
+    } catch (error) {
+      setFolderError(
+        error instanceof Error
+          ? t(error.message)
+          : t("Could not delete folder"),
       );
     }
   };
@@ -593,145 +696,242 @@ export function SidebarShell({
 
       {/* Chat history — its own region below the nav, takes remaining height */}
       {showSessions && onSelectSession && onRenameSession && onDeleteSession ? (
-        <section
-          className={`mt-4 flex min-h-0 flex-col ${
-            recentsCollapsed ? "" : "flex-1"
-          }`}
-        >
-          <div className="group/recents mx-2 flex items-center rounded-md text-[11.5px] font-normal text-[var(--muted-foreground)]/60 transition-colors hover:bg-[var(--background)]/40 hover:text-[var(--muted-foreground)]">
-            <button
-              type="button"
-              onClick={toggleRecents}
-              className="flex min-w-0 flex-1 items-center justify-between px-2 py-1 text-left"
-              aria-expanded={!recentsCollapsed}
-              aria-label={
-                recentsCollapsed
-                  ? (t("Show recents") as string)
-                  : (t("Hide recents") as string)
-              }
-            >
-              <span>{t("Recents")}</span>
-              <ChevronDown
-                size={13}
-                strokeWidth={1.7}
-                className={`transition-all duration-200 ${
-                  recentsCollapsed
-                    ? "-rotate-90 opacity-60"
-                    : "rotate-0 opacity-0 group-hover/recents:opacity-60"
-                }`}
-              />
-            </button>
-            {onCreateFolder ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setRecentsCollapsed(false);
-                  setCreatingFolder(true);
-                  setFolderError(null);
-                }}
-                className="mr-1 rounded p-1 opacity-65 transition-opacity hover:bg-[var(--background)] hover:opacity-100 focus:opacity-100"
-                title={t("New chat folder") as string}
-                aria-label={t("New chat folder")}
-              >
-                <FolderPlus size={13} strokeWidth={1.7} />
-              </button>
-            ) : null}
-          </div>
-          {!recentsCollapsed && (
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-0.5">
-              {creatingFolder ? (
-                <div className="mb-1.5 flex items-center gap-1 rounded-lg border border-[var(--border)]/60 bg-[var(--background)]/35 p-1">
-                  <input
-                    autoFocus
-                    value={newFolderName}
-                    maxLength={50}
-                    onChange={(event) => setNewFolderName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void handleCreateFolder();
-                      if (event.key === "Escape") {
-                        setCreatingFolder(false);
-                        setNewFolderName("");
-                        setFolderError(null);
-                      }
-                    }}
-                    placeholder={t("Chat folder name")}
-                    className="min-w-0 flex-1 bg-transparent px-1.5 py-0.5 text-[11.5px] text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/55"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleCreateFolder()}
-                    disabled={!newFolderName.trim()}
-                    className="rounded p-1 hover:bg-[var(--background)] disabled:opacity-30"
-                    aria-label={t("Create folder")}
-                  >
-                    <Check size={11} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
+        <section className="mt-4 flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+            <div className="flex items-center px-2 py-1 text-[11.5px] font-normal text-[var(--muted-foreground)]/60">
+              <span className="min-w-0 flex-1">{t("Chat folders")}</span>
+              {onCreateFolder ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingFolder(true);
+                    setFolderError(null);
+                  }}
+                  className="rounded p-1 opacity-65 transition-opacity hover:bg-[var(--background)] hover:opacity-100 focus:opacity-100"
+                  title={t("New chat folder") as string}
+                  aria-label={t("New chat folder")}
+                >
+                  <FolderPlus size={13} strokeWidth={1.7} />
+                </button>
+              ) : null}
+            </div>
+            {creatingFolder ? (
+              <div className="mb-1.5 flex items-center gap-1 rounded-lg border border-[var(--border)]/60 bg-[var(--background)]/35 p-1">
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  maxLength={50}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void handleCreateFolder();
+                    if (event.key === "Escape") {
                       setCreatingFolder(false);
                       setNewFolderName("");
                       setFolderError(null);
-                    }}
-                    className="rounded p-1 hover:bg-[var(--background)]"
-                    aria-label={t("Cancel")}
-                  >
-                    <X size={11} />
-                  </button>
-                </div>
-              ) : null}
-              {folderError ? (
-                <p className="mb-1.5 px-1 text-[10.5px] text-[var(--destructive)]">
-                  {folderError}
-                </p>
-              ) : null}
-              {loadingSessions ? (
-                <SessionList
-                  sessions={[]}
-                  activeSessionId={activeSessionId}
-                  loading
-                  onSelect={onSelectSession}
-                  onRename={onRenameSession}
-                  onDelete={onDeleteSession}
-                  compact
+                    }
+                  }}
+                  placeholder={t("Chat folder name")}
+                  className="min-w-0 flex-1 bg-transparent px-1.5 py-0.5 text-[11.5px] text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/55"
                 />
-              ) : onOrganizeSession && folderManagementEnabled ? (
-                <div className="space-y-1.5">
-                  {recentFolderGroups.map((group) => {
-                    const groupId = group.folder?.id ?? "uncategorized";
-                    const collapsedGroup = collapsedFolderIds.has(groupId);
-                    return (
-                      <section key={groupId}>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setCollapsedFolderIds((current) => {
-                              const next = new Set(current);
-                              if (next.has(groupId)) next.delete(groupId);
-                              else next.add(groupId);
-                              return next;
-                            })
-                          }
-                          className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[10.5px] text-[var(--muted-foreground)]/75 hover:bg-[var(--background)]/35 hover:text-[var(--muted-foreground)]"
-                          aria-expanded={!collapsedGroup}
-                          aria-label={t(
-                            collapsedGroup ? "Expand folder" : "Collapse folder",
-                          )}
-                        >
-                          <ChevronDown
-                            size={10}
-                            className={`shrink-0 transition-transform ${collapsedGroup ? "-rotate-90" : ""}`}
+                <button
+                  type="button"
+                  onClick={() => void handleCreateFolder()}
+                  disabled={!newFolderName.trim()}
+                  className="rounded p-1 hover:bg-[var(--background)] disabled:opacity-30"
+                  aria-label={t("Create folder")}
+                >
+                  <Check size={11} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCreatingFolder(false);
+                    setNewFolderName("");
+                    setFolderError(null);
+                  }}
+                  className="rounded p-1 hover:bg-[var(--background)]"
+                  aria-label={t("Cancel")}
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            ) : null}
+            {folderError ? (
+              <p className="mb-1.5 px-1 text-[10.5px] text-[var(--destructive)]">
+                {folderError}
+              </p>
+            ) : null}
+            {!loadingSessions &&
+            onOrganizeSession &&
+            folderManagementEnabled ? (
+              <div className="space-y-1">
+                {sidebarFolderGroups.map((group) => {
+                  const folder = group.folder;
+                  if (!folder) return null;
+                  const collapsedGroup = collapsedFolderIds.has(folder.id);
+                  return (
+                    <section key={folder.id}>
+                      {editingFolderId === folder.id ? (
+                        <div className="flex items-center gap-1 rounded-lg bg-[var(--background)]/35 p-1">
+                          <Folder
+                            size={12}
+                            className="ml-1 shrink-0 text-[var(--muted-foreground)]"
                           />
-                          <Folder size={11} className="shrink-0" />
-                          <span className="min-w-0 flex-1 truncate">
-                            {group.folder?.name ?? t("Uncategorized")}
-                          </span>
-                          <span className="tabular-nums opacity-65">
-                            {group.sessions.length}
-                          </span>
-                        </button>
-                        {!collapsedGroup ? (
-                          group.sessions.length > 0 ? (
+                          <input
+                            autoFocus
+                            value={folderDraft}
+                            maxLength={50}
+                            onChange={(event) =>
+                              setFolderDraft(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter")
+                                void handleRenameFolder(folder);
+                              if (event.key === "Escape") {
+                                setEditingFolderId(null);
+                                setFolderDraft("");
+                                setFolderError(null);
+                              }
+                            }}
+                            aria-label={t("Chat folder name")}
+                            className="min-w-0 flex-1 bg-transparent px-1 py-0.5 text-[11.5px] text-[var(--foreground)] outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleRenameFolder(folder)}
+                            disabled={!folderDraft.trim()}
+                            className="rounded p-1 hover:bg-[var(--background)] disabled:opacity-30"
+                            aria-label={t("Save folder name")}
+                          >
+                            <Check size={11} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingFolderId(null);
+                              setFolderDraft("");
+                              setFolderError(null);
+                            }}
+                            className="rounded p-1 hover:bg-[var(--background)]"
+                            aria-label={t("Cancel")}
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="group/folder relative flex min-w-0 items-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCollapsedFolderIds((current) => {
+                                const next = new Set(current);
+                                if (next.has(folder.id)) next.delete(folder.id);
+                                else next.add(folder.id);
+                                return next;
+                              })
+                            }
+                            className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg px-2 py-1.5 pr-8 text-left text-[12.5px] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--background)]/40 hover:text-[var(--foreground)]"
+                            aria-expanded={!collapsedGroup}
+                            aria-label={t(
+                              collapsedGroup
+                                ? "Expand folder"
+                                : "Collapse folder",
+                            )}
+                          >
+                            <ChevronDown
+                              size={11}
+                              className={`shrink-0 transition-transform ${collapsedGroup ? "-rotate-90" : ""}`}
+                            />
+                            <Folder size={13} className="shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">
+                              {folder.name}
+                            </span>
+                          </button>
+                          {folderActionsEnabled ? (
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                if (openFolderMenuId === folder.id) {
+                                  setOpenFolderMenuId(null);
+                                  setFolderMenuPosition(null);
+                                  return;
+                                }
+                                folderMenuAnchorRef.current =
+                                  event.currentTarget;
+                                setFolderMenuPosition(
+                                  placeFolderMenu(
+                                    event.currentTarget.getBoundingClientRect(),
+                                  ),
+                                );
+                                setOpenFolderMenuId(folder.id);
+                              }}
+                              className={`absolute right-1 rounded p-1 transition-opacity hover:bg-[var(--muted)] ${
+                                openFolderMenuId === folder.id
+                                  ? "opacity-100"
+                                  : "opacity-0 group-hover/folder:opacity-100 focus:opacity-100"
+                              }`}
+                              aria-label={t("Folder actions")}
+                              aria-haspopup="menu"
+                              aria-expanded={openFolderMenuId === folder.id}
+                            >
+                              <MoreHorizontal size={13} />
+                            </button>
+                          ) : null}
+                          {openFolderMenuId === folder.id &&
+                          folderMenuPosition &&
+                          typeof document !== "undefined"
+                            ? createPortal(
+                                <div
+                                  ref={folderMenuRootRef}
+                                  role="menu"
+                                  style={{
+                                    left: folderMenuPosition.left,
+                                    top: folderMenuPosition.top,
+                                    transform: folderMenuPosition.openUpward
+                                      ? "translateY(-100%)"
+                                      : undefined,
+                                    transformOrigin:
+                                      folderMenuPosition.openUpward
+                                        ? "bottom"
+                                        : "top",
+                                  }}
+                                  className="fixed z-[100] w-44 rounded-xl border border-[var(--border)] bg-[var(--popover)] p-1.5 text-[12px] shadow-xl"
+                                >
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => {
+                                      setEditingFolderId(folder.id);
+                                      setFolderDraft(folder.name);
+                                      setOpenFolderMenuId(null);
+                                      setFolderMenuPosition(null);
+                                      setFolderError(null);
+                                    }}
+                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[var(--foreground)] hover:bg-[var(--muted)]"
+                                  >
+                                    <Pencil size={13} />
+                                    <span>{t("Rename folder")}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() =>
+                                      void handleDeleteFolder(folder)
+                                    }
+                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[var(--destructive)] hover:bg-[var(--muted)]"
+                                  >
+                                    <Trash2 size={13} />
+                                    <span>{t("Delete folder")}</span>
+                                  </button>
+                                </div>,
+                                document.body,
+                              )
+                            : null}
+                        </div>
+                      )}
+                      {!collapsedGroup ? (
+                        group.sessions.length > 0 ? (
+                          <div className="pl-5">
                             <OrganizedSessionList
                               sessions={group.sessions}
                               courses={courses}
@@ -746,53 +946,82 @@ export function SidebarShell({
                               folderOptions={folders}
                               onMove={handleMoveSessionToFolder}
                             />
-                          ) : (
-                            <p className="px-6 py-1 text-[10px] text-[var(--muted-foreground)]/50">
-                              {t("No conversations in this folder")}
-                            </p>
-                          )
-                        ) : null}
-                      </section>
-                    );
-                  })}
-                </div>
-              ) : onOrganizeSession ? (
-                <OrganizedSessionList
-                  sessions={recentSessions}
-                  courses={courses}
-                  activeSessionId={activeSessionId}
-                  onSelect={(sessionId) => {
-                    drawer?.close();
-                    return onSelectSession(sessionId);
-                  }}
-                  onRename={onRenameSession}
-                  onDelete={onDeleteSession}
-                  onOrganize={onOrganizeSession}
-                />
-              ) : (
-                <SessionList
-                  sessions={recentSessions}
-                  activeSessionId={activeSessionId}
-                  onSelect={(sessionId) => {
-                    drawer?.close();
-                    return onSelectSession(sessionId);
-                  }}
-                  onRename={onRenameSession}
-                  onDelete={onDeleteSession}
-                  compact
-                />
-              )}
+                          </div>
+                        ) : (
+                          <p className="px-7 py-1 text-[10px] text-[var(--muted-foreground)]/50">
+                            {t("No conversations in this folder")}
+                          </p>
+                        )
+                      ) : null}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <div className="mt-4 px-2 py-1 text-[11.5px] font-normal text-[var(--muted-foreground)]/60">
+              {t("Recents")}
             </div>
-          )}
+            {loadingSessions ? (
+              <SessionList
+                sessions={[]}
+                activeSessionId={activeSessionId}
+                loading
+                onSelect={onSelectSession}
+                onRename={onRenameSession}
+                onDelete={onDeleteSession}
+                compact
+              />
+            ) : onOrganizeSession && folderManagementEnabled ? (
+              <OrganizedSessionList
+                sessions={recentSessions}
+                courses={courses}
+                activeSessionId={activeSessionId}
+                onSelect={(sessionId) => {
+                  drawer?.close();
+                  return onSelectSession(sessionId);
+                }}
+                onRename={onRenameSession}
+                onDelete={onDeleteSession}
+                onOrganize={onOrganizeSession}
+                folderOptions={folders}
+                onMove={handleMoveSessionToFolder}
+              />
+            ) : onOrganizeSession ? (
+              <OrganizedSessionList
+                sessions={sidebarSessions.slice(0, 8)}
+                courses={courses}
+                activeSessionId={activeSessionId}
+                onSelect={(sessionId) => {
+                  drawer?.close();
+                  return onSelectSession(sessionId);
+                }}
+                onRename={onRenameSession}
+                onDelete={onDeleteSession}
+                onOrganize={onOrganizeSession}
+              />
+            ) : (
+              <SessionList
+                sessions={sidebarSessions.slice(0, 8)}
+                activeSessionId={activeSessionId}
+                onSelect={(sessionId) => {
+                  drawer?.close();
+                  return onSelectSession(sessionId);
+                }}
+                onRename={onRenameSession}
+                onDelete={onDeleteSession}
+                compact
+              />
+            )}
+          </div>
         </section>
       ) : null}
 
-      {/* When recents is collapsed or unavailable, fill the gap above the footer. */}
+      {/* When chat history is unavailable, fill the gap above the footer. */}
       {(!showSessions ||
         !onSelectSession ||
         !onRenameSession ||
-        !onDeleteSession ||
-        recentsCollapsed) && <div className="flex-1" />}
+        !onDeleteSession) && <div className="flex-1" />}
 
       {/* Secondary nav + footer */}
       <div className="border-t border-[var(--border)]/40 px-2 py-2">

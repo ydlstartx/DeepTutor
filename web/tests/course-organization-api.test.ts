@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { listAllSessions, updateSessionOrganization } from "../lib/session-api";
 import {
+  buildSidebarSessionSections,
   groupSessionsByFolder,
   organizeSessionTree,
 } from "../lib/session-organization";
@@ -139,5 +140,42 @@ test("sidebar folder groups retain empty folders and recover unknown assignments
       { id: "folder-empty", sessions: [] },
       { id: null, sessions: ["legacy", "unassigned"] },
     ],
+  );
+});
+
+test("sidebar separates folder conversations from a bounded flat recents list", () => {
+  const folders: SessionFolder[] = [
+    {
+      id: "folder-a",
+      name: "Analog",
+      created_at: 1,
+      updated_at: 1,
+      session_count: 2,
+    },
+  ];
+  const assigned = [
+    { ...session("assigned-1"), folder_id: "folder-a" },
+    { ...session("assigned-2"), folder_id: "folder-a" },
+  ];
+  const unassigned = Array.from({ length: 10 }, (_, index) =>
+    session(`recent-${index + 1}`),
+  );
+
+  const sections = buildSidebarSessionSections(
+    [...assigned, ...unassigned],
+    folders,
+  );
+
+  assert.deepEqual(
+    sections.folderGroups[0]?.sessions.map((row) => row.session_id),
+    ["assigned-1", "assigned-2"],
+  );
+  assert.deepEqual(
+    sections.recentSessions.map((row) => row.session_id),
+    unassigned.slice(0, 8).map((row) => row.session_id),
+  );
+  assert.equal(
+    sections.recentSessions.some((row) => row.folder_id === "folder-a"),
+    false,
   );
 });

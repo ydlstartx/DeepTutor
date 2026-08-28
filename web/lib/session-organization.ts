@@ -84,3 +84,21 @@ export function groupSessionsByFolder(
     { folder: null, sessions: uncategorized },
   ];
 }
+
+/** Build the sidebar's two sibling sections without duplicating conversations. */
+export function buildSidebarSessionSections(
+  sessions: SessionSummary[],
+  folders: SessionFolder[],
+  recentLimit = 8,
+): {
+  folderGroups: SessionFolderGroup[];
+  recentSessions: SessionSummary[];
+} {
+  const groups = groupSessionsByFolder(sessions, folders);
+  return {
+    folderGroups: groups.filter((group) => group.folder !== null),
+    recentSessions: (
+      groups.find((group) => group.folder === null)?.sessions ?? []
+    ).slice(0, Math.max(0, recentLimit)),
+  };
+}
