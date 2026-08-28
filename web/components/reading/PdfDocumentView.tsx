@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { loadPdfjs, type PdfDocument } from "@/lib/pdfjs-loader";
+import {
+  loadPdfjs,
+  pdfDocumentInit,
+  type PdfDocument,
+} from "@/lib/pdfjs-loader";
 import type {
   AnnotationItem,
   NormalisedRect,
@@ -110,12 +114,12 @@ export function PdfDocumentView({
     (async () => {
       try {
         const pdfjs = await loadPdfjs();
-        const loadingTask = pdfjs.getDocument({
-          url: rawMaterialUrl(materialId),
-          // The raw route sits behind the session cookie like every other API
-          // route; pdf.js does its own fetching, so it needs telling.
-          withCredentials: true,
-        });
+        // The raw route sits behind the session cookie like every other API
+        // route; the shared options also provide the CMaps required by
+        // Identity-H/V CID fonts.
+        const loadingTask = pdfjs.getDocument(
+          pdfDocumentInit(rawMaterialUrl(materialId)),
+        );
         task = loadingTask;
         const opened: PdfDocument = await loadingTask.promise;
         if (cancelled) return;

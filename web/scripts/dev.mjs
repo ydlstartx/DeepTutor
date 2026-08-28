@@ -26,6 +26,7 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { preparePdfjsCMaps } from "./pdfjs-assets.mjs";
 
 const HEAP_CEILING_MB = 4096;
 const WEB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -51,6 +52,8 @@ const nodeOptions = /--max[-_]old[-_]space[-_]size/.test(inherited)
       HEAP_CEILING_MB,
       Math.floor(memoryBudgetMB() * 0.5),
     )}`.trim();
+
+preparePdfjsCMaps();
 
 const child = spawn(process.execPath, [NEXT_BIN, "dev", ...process.argv.slice(2)], {
   cwd: WEB_DIR,

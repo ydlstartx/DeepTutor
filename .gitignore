@@ -97,6 +97,8 @@ dist/
 web/dist/
 build/
 web/build/
+# Generated from the installed pdfjs-dist package by the dev/build wrappers.
+web/public/pdfjs/
 .open-next/
 **/.open-next/
 .wrangler/

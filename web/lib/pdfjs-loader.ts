@@ -18,6 +18,24 @@ export type Pdfjs = typeof PdfjsModule;
 export type PdfDocument = Awaited<ReturnType<Pdfjs["getDocument"]>["promise"]>;
 export type PdfPageProxy = Awaited<ReturnType<PdfDocument["getPage"]>>;
 
+/**
+ * Runtime assets required by pdf.js for predefined CID font encodings.
+ *
+ * In particular, PDFs produced by xdvipdfmx commonly embed Chinese CFF fonts
+ * with Identity-H encoding and rely on Adobe-GB1-UCS2. Without cMapUrl pdf.js
+ * logs a font-loading failure and silently paints only the Latin glyphs.
+ */
+export const PDFJS_CMAP_URL = "/pdfjs/cmaps/";
+
+export function pdfDocumentInit(url: string) {
+  return {
+    url,
+    withCredentials: true,
+    cMapUrl: PDFJS_CMAP_URL,
+    cMapPacked: true,
+  } as const;
+}
+
 let pending: Promise<Pdfjs> | null = null;
 
 export function loadPdfjs(): Promise<Pdfjs> {

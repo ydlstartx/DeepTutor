@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { preparePdfjsCMaps } from "./pdfjs-assets.mjs";
 
 const webRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -48,6 +49,7 @@ const isEntry =
 export { restoreAll };
 
 if (isEntry) {
+  preparePdfjsCMaps();
   const result = spawnSync(
     process.execPath,
     [nextBin, "build", ...process.argv.slice(2)],

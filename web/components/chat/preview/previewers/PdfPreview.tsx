@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import * as pdfjs from "pdfjs-dist";
+import { pdfDocumentInit } from "@/lib/pdfjs-loader";
 import type { FilePreviewSource } from "../previewerFor";
 import FallbackPreview from "./FallbackPreview";
 
@@ -41,7 +42,7 @@ export default function PdfPreview({
 
   useEffect(() => {
     let cancelled = false;
-    const task = pdfjs.getDocument({ url, withCredentials: true });
+    const task = pdfjs.getDocument(pdfDocumentInit(url));
     task.promise
       .then((loaded) => {
         if (cancelled) return;
