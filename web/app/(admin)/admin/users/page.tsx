@@ -16,6 +16,7 @@ import {
   type UserUsageSummary,
 } from "@/lib/admin-api";
 import { GrantEditor } from "@/features/multi-user/components/GrantEditor";
+import { BookPermissionEditor } from "@/features/multi-user/components/BookPermissionEditor";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import {
@@ -803,6 +804,7 @@ export default function AdminUsersPage() {
                         <tr>
                           <td colSpan={7} className="p-0">
                             <GrantEditor key={user.id} userId={user.id} />
+                            <BookPermissionEditor userId={user.id} />
                           </td>
                         </tr>
                       )}

@@ -10,6 +10,7 @@ from deeptutor.knowledge.manager import KnowledgeBaseManager
 from deeptutor.knowledge.policy import KnowledgeBaseWriteDisabledError
 from deeptutor.services.github_source.sync import sync_source
 from deeptutor.services.github_source.sync_service import GitHubSourceSyncService
+from deeptutor.services.web_source.sync import sync_source as sync_web_source
 
 
 class _ClientThatMustNotRun:
@@ -34,6 +35,29 @@ async def test_query_only_sync_rejects_before_network_or_raw_write(monkeypatch, 
             },
             base_dir=str(base),
             client=_ClientThatMustNotRun(),
+        )
+
+    assert not (base / "published" / "raw").exists()
+
+
+@pytest.mark.asyncio
+async def test_query_only_web_sync_rejects_before_network_or_raw_write(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("DEEPTUTOR_KB_QUERY_ONLY", "true")
+    base = tmp_path / "knowledge_bases"
+    monkeypatch.setattr(
+        "deeptutor.services.web_source.sync.crawl_and_diff",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("query-only policy must reject before network access")
+        ),
+    )
+
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        await sync_web_source(
+            "published",
+            {"id": "web-1", "url": "https://docs.example.com"},
+            base_dir=str(base),
         )
 
     assert not (base / "published" / "raw").exists()
@@ -69,3 +93,9 @@ def test_query_only_manager_rejects_github_source_metadata_writes(monkeypatch, t
         manager.remove_github_source("published", "source-1")
     with pytest.raises(KnowledgeBaseWriteDisabledError):
         manager.update_github_source_state("published", "source-1", last_sync_status="error")
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        manager.add_web_source("published", "https://docs.example.com")
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        manager.remove_web_source("published", "web-1")
+    with pytest.raises(KnowledgeBaseWriteDisabledError):
+        manager.update_web_source_state("published", "web-1", last_sync_status="error")

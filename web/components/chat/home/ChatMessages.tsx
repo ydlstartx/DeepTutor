@@ -112,6 +112,7 @@ interface NotebookReferenceGroup {
 // the same wording the bubble carries.
 export function getModeBadgeLabel(capability?: string | null): string {
   if (!capability || capability === "chat") return "Chat";
+  if (capability === "ask_questions") return "Ask Questions";
   if (capability === "deep_solve") return "Deep Solve";
   if (capability === "deep_question") return "Quiz Generation";
   if (capability === "deep_research") return "Deep Research";
@@ -1436,18 +1437,24 @@ export const ChatMessageList = memo(function ChatMessageList({
           const sib =
             msg.id !== undefined ? siblingsByMessageId.get(msg.id) : undefined;
           return (
-            <UserMessage
+            <div
               key={msg.id != null ? `msg-${msg.id}` : `${msg.role}-${i}`}
-              msg={msg}
-              index={i}
-              onPreviewAttachment={onPreviewAttachment}
-              onCopy={onCopyAssistantMessage}
-              onEdit={onEditMessage}
-              editDisabled={isStreaming}
-              siblingInfo={sib}
-              onSwitchBranch={onSwitchBranch}
-              availableKbNames={availableKbNames}
-            />
+              className="w-full"
+              data-chat-message-id={msg.id}
+              data-chat-message-role={msg.role}
+            >
+              <UserMessage
+                msg={msg}
+                index={i}
+                onPreviewAttachment={onPreviewAttachment}
+                onCopy={onCopyAssistantMessage}
+                onEdit={onEditMessage}
+                editDisabled={isStreaming}
+                siblingInfo={sib}
+                onSwitchBranch={onSwitchBranch}
+                availableKbNames={availableKbNames}
+              />
+            </div>
           );
         }
 
@@ -1491,6 +1498,8 @@ export const ChatMessageList = memo(function ChatMessageList({
           <div
             key={msg.id != null ? `msg-${msg.id}` : `${msg.role}-${i}`}
             className="w-full"
+            data-chat-message-id={msg.id}
+            data-chat-message-role={msg.role}
           >
             <InlineFileCardProvider
               attachments={msg.attachments ?? []}

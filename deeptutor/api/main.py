@@ -383,6 +383,7 @@ from deeptutor.api.routers import (
     capabilities_settings,
     chat,
     co_writer,
+    courses,
     dashboard,
     imports,
     knowledge,
@@ -399,6 +400,7 @@ from deeptutor.api.routers import (
     question_notebook,
     quiz_judge,
     reading,
+    reading_extensions,
     sessions,
     settings,
     skills,
@@ -460,6 +462,12 @@ app.include_router(
 )
 app.include_router(book.router, prefix="/api/v1/book", tags=["book"], dependencies=_auth)
 app.include_router(reading.router, prefix="/api/v1/reading", tags=["reading"], dependencies=_auth)
+app.include_router(
+    reading_extensions.router,
+    prefix="/api/v1/reading",
+    tags=["reading-extensions"],
+    dependencies=_auth,
+)
 app.include_router(memory.router, prefix="/api/v1/memory", tags=["memory"], dependencies=_auth)
 app.include_router(
     capabilities_settings.router,
@@ -476,6 +484,7 @@ app.include_router(
 app.include_router(
     sessions.router, prefix="/api/v1/sessions", tags=["sessions"], dependencies=_auth
 )
+app.include_router(courses.router, prefix="/api/v1/courses", tags=["courses"], dependencies=_auth)
 app.include_router(
     question_notebook.router,
     prefix="/api/v1/question-notebook",

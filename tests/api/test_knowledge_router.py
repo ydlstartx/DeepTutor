@@ -214,6 +214,9 @@ def test_rag_providers_lists_llamaindex_and_pageindex(monkeypatch) -> None:
         ("post", "/api/v1/knowledge/demo/github-source", {"json": {}}),
         ("delete", "/api/v1/knowledge/demo/github-source/source-1", {}),
         ("post", "/api/v1/knowledge/demo/sync-github", {}),
+        ("post", "/api/v1/knowledge/demo/web-source", {"json": {}}),
+        ("delete", "/api/v1/knowledge/demo/web-source/source-1", {}),
+        ("post", "/api/v1/knowledge/demo/sync-web", {}),
     ],
 )
 def test_query_only_api_rejects_kb_mutations_with_403(

@@ -58,3 +58,33 @@ def test_session_folder_api_rejects_unknown_folder(monkeypatch, tmp_path: Path) 
         )
     assert response.status_code == 404
     assert response.json()["detail"] == "Folder not found"
+
+
+def test_moving_parent_chat_keeps_little_tutor_in_same_folder(monkeypatch, tmp_path: Path) -> None:
+    sessions_module = importlib.import_module("deeptutor.api.routers.sessions")
+    store = SQLiteSessionStore(db_path=tmp_path / "sessions.db")
+    parent = asyncio.run(store.create_session(title="Parent"))
+    child = asyncio.run(store.create_session(title="Little Tutor"))
+    asyncio.run(
+        store.update_session_preferences(
+            child["id"],
+            {
+                "parent_session_id": parent["id"],
+                "session_kind": "selection_tutor",
+            },
+        )
+    )
+    folder = asyncio.run(store.create_session_folder("Course notes"))
+    monkeypatch.setattr(sessions_module, "get_session_store", lambda: store)
+
+    app = FastAPI()
+    app.include_router(sessions_module.router, prefix="/api/v1/sessions")
+    with TestClient(app) as client:
+        response = client.put(
+            f"/api/v1/sessions/{parent['id']}/folder",
+            json={"folder_id": folder["id"]},
+        )
+
+    assert response.status_code == 200
+    assert asyncio.run(store.get_session(parent["id"]))["folder_id"] == folder["id"]
+    assert asyncio.run(store.get_session(child["id"]))["folder_id"] == folder["id"]

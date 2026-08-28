@@ -44,6 +44,8 @@ class ProviderSpec:
     supports_prompt_caching: bool = False
     supports_stream_options: bool = True
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
+    # Bare model ids too short or generic for substring-based vendor detection.
+    exact_model_ids: tuple[str, ...] = ()
     is_oauth: bool = False
     is_direct: bool = False
     thinking_style: str = ""
@@ -60,6 +62,10 @@ class ProviderSpec:
     # entry fall back to ("on", "off") when thinking_style is set, and get
     # no selector at all otherwise.
     reasoning_effort_options: tuple[tuple[str, tuple[str, ...], str], ...] = ()
+    # Exact model ids whose Responses API executes `web_search` server-side.
+    # Exact matching is intentional: providers often expose Responses only on
+    # one model even when sibling models share the same family prefix.
+    native_web_search_models: tuple[str, ...] = ()
 
     @property
     def mode(self) -> str:
@@ -360,6 +366,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         # V4 (pro and flash) accepts top-level reasoning_effort low/high/max
         # (default high) alongside the thinking.type toggle.
         reasoning_effort_options=(("deepseek-v4", ("low", "high", "max"), "high"),),
+        native_web_search_models=("deepseek-v4-flash",),
     ),
     ProviderSpec(
         name="gemini",
@@ -404,8 +411,13 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         # this model"). Dropping the parameter (value None) lets the API apply
         # the correct fixed value per model and per thinking/non-thinking mode —
         # Moonshot's own recommendation. The tunable moonshot-v1-* series does
-        # not contain "kimi" and keeps the caller's temperature.
-        model_overrides=(("kimi", {"temperature": None}),),
+        # not contain "kimi" and keeps the caller's temperature. The Kimi
+        # coding endpoint addresses these models by bare ids such as "k3".
+        model_overrides=(
+            ("kimi", {"temperature": None}),
+            ("=k3", {"temperature": None}),
+        ),
+        exact_model_ids=("k3",),
         # kimi-k3 on the public API takes low/high/max and defaults to max
         # (unlike the coding-plan endpoint, which defaults to high).
         reasoning_effort_options=(("k3", ("low", "high", "max"), "max"),),
@@ -574,6 +586,9 @@ def find_by_model(model: str | None) -> ProviderSpec | None:
         if model_prefix and normalized_prefix == spec.name:
             return spec
     for spec in standard_specs:
+        if model_lower in spec.exact_model_ids:
+            return spec
+    for spec in standard_specs:
         if any(
             kw in model_lower or kw.replace("-", "_") in model_normalized for kw in spec.keywords
         ):
@@ -583,7 +598,12 @@ def find_by_model(model: str | None) -> ProviderSpec | None:
 
 def _matching_overrides(spec: ProviderSpec, model_lower: str) -> dict[str, Any]:
     for pattern, overrides in spec.model_overrides:
-        if pattern in model_lower:
+        # ``=name`` is an exact bare model id. Most historical patterns are
+        # vendor-family substrings, but a short id such as ``k3`` must not also
+        # match unrelated ids like ``sk3`` or ``k30``.
+        if (pattern.startswith("=") and model_lower == pattern[1:]) or (
+            not pattern.startswith("=") and pattern in model_lower
+        ):
             return dict(overrides)
     return {}
 
@@ -661,17 +681,11 @@ def apply_model_overrides(
     request-construction path (services provider, raw agentic kwargs,
     executors) so they all honor the same per-model constraints.
     """
-    if not spec or not model:
-        return
-    model_lower = model.lower()
-    for pattern, overrides in spec.model_overrides:
-        if pattern in model_lower:
-            for key, value in overrides.items():
-                if value is None:
-                    kwargs.pop(key, None)
-                else:
-                    kwargs[key] = value
-            break
+    for key, value in model_overrides_for(model, spec).items():
+        if value is None:
+            kwargs.pop(key, None)
+        else:
+            kwargs[key] = value
 
 
 def effort_options_for_model(
