@@ -1938,12 +1938,12 @@ def test_read_vector_storage_fresh_dir_uses_global_setting(tmp_path, monkeypatch
 # --------------------------------------------------------------------------- #
 
 
-def _stub_engine_counting(monkeypatch) -> list:
+def _stub_engine_counting(monkeypatch) -> list[tuple[Path, str | None]]:
     """Like _stub_engine but records every build_rag call."""
-    builds: list = []
+    builds: list[tuple[Path, str | None]] = []
 
-    def fake_build(wd, *_a, **_):
-        builds.append(wd)
+    def fake_build(wd, vector_storage=None, **_):
+        builds.append((Path(wd), vector_storage))
         return _FakeRag(wd)
 
     monkeypatch.setattr(engine, "build_rag", fake_build)
@@ -1963,6 +1963,35 @@ def _stub_engine_counting(monkeypatch) -> list:
     monkeypatch.setattr(engine, "insert", fake_insert)
     monkeypatch.setattr(engine, "query", fake_query)
     return builds
+
+
+@pytest.mark.parametrize("index_method", ["initialize", "add_documents"])
+def test_new_faiss_index_pins_the_engine_used_for_indexing(
+    tmp_path, monkeypatch, index_method
+) -> None:
+    """Output appearing before meta.json must not trigger the legacy Nano fallback."""
+    _force_available(monkeypatch, True)
+    monkeypatch.setattr(
+        "deeptutor.services.config.load_lightrag_settings",
+        lambda: {"vector_storage": "faiss"},
+    )
+    builds = _stub_engine_counting(monkeypatch)
+    _stub_parse(monkeypatch)
+    pipe = LightRagPipeline(kb_base_dir=str(tmp_path))
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF")
+
+    async def scenario() -> None:
+        assert await getattr(pipe, index_method)("kb", [str(pdf)]) is True
+        root = resolve_storage_dir_for_read(tmp_path / "kb", None)
+        assert root is not None
+        meta = json.loads((root / storage.META_FILENAME).read_text(encoding="utf-8"))
+        assert meta["vector_storage"] == "faiss"
+
+        await pipe.search("q", "kb")
+        assert [vector_storage for _, vector_storage in builds] == ["faiss", "faiss"]
+
+    asyncio.run(scenario())
 
 
 def test_rag_instance_built_once_per_version(tmp_path, monkeypatch) -> None:

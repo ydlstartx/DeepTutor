@@ -285,7 +285,7 @@ class LightRagPipeline:
         working_dir: Path,
         file_paths: List[str],
         progress_callback: Callable[[int, int], Any] | None,
-    ) -> int:
+    ) -> tuple[int, str]:
         """Run the complete local LightRAG indexing phase off the service loop.
 
         The RAG instance is constructed and consumed in one worker thread, so
@@ -296,7 +296,8 @@ class LightRagPipeline:
 
         The vector-storage engine is resolved up front (version meta.json pin,
         else the global setting) so the worker-built instance matches what
-        later queries through ``_get_rag`` will reopen.
+        later queries through ``_get_rag`` will reopen. Return that exact engine
+        alongside the count so callers can persist it after output appears.
         """
 
         if storage.has_output(working_dir):
@@ -326,7 +327,8 @@ class LightRagPipeline:
                         "LightRAG resource cleanup failed while indexing was aborting"
                     )
 
-        return await run_in_shared_worker_loop(job)
+        count = await run_in_shared_worker_loop(job)
+        return count, engine_id
 
     # ----- indexing -------------------------------------------------------
 
@@ -339,7 +341,7 @@ class LightRagPipeline:
             "Initializing KB '%s' with %d file(s) using LightRAG", kb_name, len(file_paths)
         )
         try:
-            count = await self._run_indexing(
+            count, engine_id = await self._run_indexing(
                 storage.working_dir(root_dir), file_paths, progress_callback
             )
             if count == 0:
@@ -357,7 +359,7 @@ class LightRagPipeline:
                 self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
             self._raise_if_corrupt_index(root_dir)
-            storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
+            storage.write_meta(root_dir, engine_id)
             self.logger.info("KB '%s' initialized with LightRAG (%d docs)", kb_name, count)
             return True
         except asyncio.CancelledError:
@@ -389,7 +391,7 @@ class LightRagPipeline:
             is_update,
         )
         try:
-            count = await self._run_indexing(
+            count, engine_id = await self._run_indexing(
                 storage.working_dir(root_dir), file_paths, progress_callback
             )
             if count == 0:
@@ -406,7 +408,7 @@ class LightRagPipeline:
                     self._cleanup_failed_version_dir(root_dir)
                 raise RuntimeError(message)
             self._raise_if_corrupt_index(root_dir)
-            storage.write_meta(root_dir, storage.read_vector_storage(root_dir))
+            storage.write_meta(root_dir, engine_id)
             self.logger.info("Added %d doc(s) to LightRAG KB '%s'", count, kb_name)
             return True
         except asyncio.CancelledError:
