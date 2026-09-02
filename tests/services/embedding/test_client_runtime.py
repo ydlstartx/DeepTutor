@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -37,6 +40,11 @@ class _FakeAdapter:
         )()
 
 
+def _reset_global_spacing_throttle() -> None:
+    EmbeddingClient._spacing_lock = threading.Lock()
+    EmbeddingClient._last_request_monotonic = 0.0
+
+
 def _build_config(
     binding: str,
     *,
@@ -58,6 +66,94 @@ def _build_config(
         batch_size=batch_size,
         request_timeout=30,
     )
+
+
+@pytest.mark.asyncio
+async def test_embedding_throttle_wait_does_not_block_owner_event_loop(monkeypatch) -> None:
+    """A bridged LightRAG burst must not freeze HTTP/timeouts on its owner loop."""
+    first_started = threading.Event()
+    release_first = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    class _HoldingAdapter(_FakeAdapter):
+        async def embed(self, request):
+            self.calls.append(request)
+            if request.texts == ["first"]:
+                first_started.set()
+                release_first.wait(timeout=2.0)
+            return type("Resp", (), {"embeddings": [[0.1] * 8 for _ in request.texts]})()
+
+    _FakeAdapter.instances = []
+    _reset_global_spacing_throttle()
+    monkeypatch.setattr(
+        "deeptutor.services.embedding.client._resolve_adapter_class", lambda _b: _HoldingAdapter
+    )
+    client = EmbeddingClient(_build_config("openai"))
+
+    def run_first_request() -> None:
+        try:
+            asyncio.run(client.embed(["first"]))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            thread_errors.append(exc)
+
+    first_thread = threading.Thread(target=run_first_request)
+    first_thread.start()
+    assert await asyncio.to_thread(first_started.wait, 1.0)
+
+    timer = threading.Timer(0.2, release_first.set)
+    timer.start()
+    second = asyncio.create_task(client.embed(["second"]))
+    started = time.monotonic()
+    await asyncio.sleep(0.03)
+
+    assert time.monotonic() - started < 0.1
+    assert second.done() is False
+    assert [call.texts for call in client.adapter.calls] == [["first"]]
+
+    await asyncio.wait_for(second, timeout=1.0)
+    await asyncio.to_thread(first_thread.join, 1.0)
+    timer.join(timeout=1.0)
+    assert first_thread.is_alive() is False
+    assert thread_errors == []
+    assert [call.texts for call in client.adapter.calls] == [["first"], ["second"]]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_embedding_throttle_wait_does_not_leak_lock(monkeypatch) -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    class _HoldingAdapter(_FakeAdapter):
+        async def embed(self, request):
+            self.calls.append(request)
+            if request.texts == ["first"]:
+                first_started.set()
+                release_first.wait(timeout=2.0)
+            return type("Resp", (), {"embeddings": [[0.1] * 8 for _ in request.texts]})()
+
+    _FakeAdapter.instances = []
+    _reset_global_spacing_throttle()
+    monkeypatch.setattr(
+        "deeptutor.services.embedding.client._resolve_adapter_class", lambda _b: _HoldingAdapter
+    )
+    client = EmbeddingClient(_build_config("openai"))
+
+    first_thread = threading.Thread(target=lambda: asyncio.run(client.embed(["first"])))
+    first_thread.start()
+    assert await asyncio.to_thread(first_started.wait, 1.0)
+
+    cancelled_waiter = asyncio.create_task(client.embed(["cancelled"]))
+    await asyncio.sleep(0.03)
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+
+    release_first.set()
+    await asyncio.to_thread(first_thread.join, 1.0)
+    assert first_thread.is_alive() is False
+
+    await asyncio.wait_for(client.embed(["third"]), timeout=1.0)
+    assert [call.texts for call in client.adapter.calls] == [["first"], ["third"]]
 
 
 @pytest.mark.asyncio

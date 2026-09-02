@@ -692,8 +692,8 @@ def test_lightrag_query_with_sources_keeps_answer_and_exposes_provenance(monkeyp
     captured: dict[str, object] = {}
 
     class _QueryParam:
-        def __init__(self, **kwargs) -> None:
-            captured["query_param"] = kwargs
+        def __init__(self, mode=None, top_k=None) -> None:
+            captured["query_param"] = {"mode": mode, "top_k": top_k}
 
     fake_lightrag = types.ModuleType("lightrag")
     fake_lightrag.QueryParam = _QueryParam
@@ -780,6 +780,100 @@ def test_lightrag_query_with_sources_keeps_answer_and_exposes_provenance(monkeyp
             "reference_id": "ref-1",
         },
     ]
+
+
+def test_native_lightrag_query_with_sources_reuses_one_retrieval(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _QueryParam:
+        def __init__(self, mode=None, top_k=None) -> None:
+            captured["query_param"] = {"mode": mode, "top_k": top_k}
+
+    fake_lightrag_module = types.ModuleType("lightrag")
+    fake_lightrag_module.QueryParam = _QueryParam
+    monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag_module)
+    monkeypatch.setattr(engine, "query_kwargs_from_settings", lambda: {"top_k": 3})
+
+    class _LightRag:
+        working_dir = "/kb/version-1"
+
+        async def aquery_llm(self, question, *, param):
+            captured["complete_query"] = question
+            captured["complete_param"] = param
+            return {
+                "status": "success",
+                "data": {
+                    "references": [{"reference_id": "ref-1", "file_path": "/kb/book.pdf"}],
+                    "chunks": [
+                        {
+                            "chunk_id": "chunk-1",
+                            "content": "The retrieved passage.",
+                            "reference_id": "ref-1",
+                        }
+                    ],
+                    "entities": [],
+                    "relationships": [],
+                },
+                "llm_response": {
+                    "content": "Grounded answer",
+                    "response_iterator": None,
+                    "is_streaming": False,
+                },
+            }
+
+        async def aquery(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("combined native query should not call aquery")
+
+        async def aquery_data(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("combined native query should not repeat retrieval")
+
+    rag = engine._NativeQueryRag(_LightRag())
+    rag._ready = True
+
+    answer, sources = asyncio.run(engine.query_with_sources(rag, "What is force?", "hybrid"))
+
+    assert answer == "Grounded answer"
+    assert captured["complete_query"] == "What is force?"
+    assert captured["query_param"] == {"mode": "hybrid", "top_k": 3}
+    assert sources == [
+        {
+            "title": "book.pdf",
+            "content": "The retrieved passage.",
+            "source": "/kb/book.pdf",
+            "page": "",
+            "chunk_id": "chunk-1",
+            "reference_id": "ref-1",
+        }
+    ]
+
+
+def test_native_lightrag_query_with_sources_falls_back_before_combined_api(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class _QueryParam:
+        def __init__(self, mode=None) -> None:
+            self.mode = mode
+
+    fake_lightrag_module = types.ModuleType("lightrag")
+    fake_lightrag_module.QueryParam = _QueryParam
+    monkeypatch.setitem(sys.modules, "lightrag", fake_lightrag_module)
+    monkeypatch.setattr(engine, "query_kwargs_from_settings", lambda: {})
+
+    class _LegacyLightRag:
+        working_dir = "/kb/version-1"
+
+        async def aquery(self, question, *, param):
+            calls.append(f"answer:{question}:{param.mode}")
+            return "Legacy answer"
+
+    rag = engine._NativeQueryRag(_LegacyLightRag())
+    rag._ready = True
+
+    answer, sources = asyncio.run(engine.query_with_sources(rag, "hello", "hybrid"))
+
+    assert answer == "Legacy answer"
+    assert sources == []
+    assert calls == ["answer:hello:hybrid"]
 
 
 def test_lightrag_query_sources_falls_back_when_structured_api_is_unavailable() -> None:

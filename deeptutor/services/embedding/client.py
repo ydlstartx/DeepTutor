@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 from contextlib import contextmanager
 import logging
 import re
+import threading
 from typing import Any, Dict, Iterator, List, Optional
 
 from deeptutor.services.config.embedding_endpoint import (
@@ -23,6 +25,10 @@ from .validation import validate_embedding_batch
 # Reusable executor for sync embedding calls made from inside a running event
 # loop (embed_sync submits asyncio.run to a worker thread).
 _sync_embed_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+# One waiter thread is enough: the spacing lock deliberately serializes provider
+# requests process-wide, including callers that run on different event loops.
+# Acquiring it here keeps that wait off every caller's event-loop thread.
+_spacing_lock_wait_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
 _BATCH_RANGE_PATTERN = re.compile(
@@ -88,31 +94,46 @@ def _resolve_adapter_class(binding: str) -> type[BaseEmbeddingAdapter]:
 class EmbeddingClient:
     """Unified embedding client for RAG and retrieval services."""
 
-    # 全局发帖节流：KB reindex 时 LlamaIndex 用线程池并发调 embedding，
-    # 每个线程经 _run_in_new_loop 跑独立 event loop——asyncio.Lock 绑定
-    # 创建时的 loop，跨 loop 既不互斥还会挂死。必须用线程级锁。
-    _spacing_lock: Any = None
+    # Global request throttle: LlamaIndex can call from multiple threads/loops,
+    # while LightRAG bridges requests back onto the API owner loop. A threading
+    # lock preserves cross-loop serialization, but its potentially-blocking
+    # acquire must run on the dedicated waiter thread above, never on an event
+    # loop that serves HTTP, timeouts, or cancellation.
+    _spacing_lock: Any = threading.Lock()
     _last_request_monotonic: float = 0.0
-    _thread_guard: Any = None
 
     @classmethod
     def _global_spacing_lock(cls):
-        import threading
-
-        if cls._spacing_lock is None:
-            cls._thread_guard = threading.Lock()
-            with cls._thread_guard:
-                if cls._spacing_lock is None:
-                    from threading import Lock as _TLock
-
-                    cls._spacing_lock = _TLock()
         return cls._spacing_lock
 
-    @staticmethod
-    def _hold_spacing_lock():
-        """Blocking acquire — cross-thread, loop-agnostic."""
-        lock = EmbeddingClient._global_spacing_lock()
-        lock.acquire()
+    @classmethod
+    async def _hold_spacing_lock(cls):
+        """Acquire the cross-loop throttle without blocking the caller's loop.
+
+        Cancellation cannot abandon an acquisition that is already running in
+        the waiter thread: once it eventually acquires the lock, the callback
+        releases it so later embedding requests are not stranded.
+        """
+        lock = cls._global_spacing_lock()
+        acquisition = _spacing_lock_wait_executor_pool.submit(lock.acquire)
+
+        def release_abandoned_acquisition(done: concurrent.futures.Future[bool]) -> None:
+            if done.cancelled():
+                return
+            try:
+                acquired = done.result()
+            except BaseException:
+                return
+            if acquired:
+                lock.release()
+
+        try:
+            acquired = await asyncio.wrap_future(acquisition)
+        except BaseException:
+            acquisition.add_done_callback(release_abandoned_acquisition)
+            raise
+        if not acquired:  # pragma: no cover - threading.Lock.acquire() returns True
+            raise RuntimeError("Failed to acquire embedding request throttle")
         return lock
 
     def __init__(self, config: Optional[EmbeddingConfig] = None):
@@ -164,8 +185,6 @@ class EmbeddingClient:
         # silently invalidate the indexes built from it.
         role = input_type if getattr(self.adapter, "SUPPORTS_INPUT_TYPE", False) else None
 
-        import asyncio
-
         # Clamp configured batch size against the provider's per-request item
         # cap. SiliconFlow Qwen3 family caps at 32; DashScope at 20; others
         # have generous defaults. Without this clamp, indexing a doc with many
@@ -192,20 +211,18 @@ class EmbeddingClient:
                 input_type=role,
             )
             try:
-                # 全局发帖节流：线程级锁串行化"等待间隔+发帖"，跨线程/跨
-                # event loop 互斥（asyncio 锁在新 loop 模型下失效的教训）。
-                # asyncio.sleep 换成阻塞等待发帖侧可接受：DT 的 embedding
-                # 并发都在后台线程里，阻塞不伤 API 主线程。
-                import time as _time
+                # Serialize provider requests across threads/event loops without
+                # ever blocking an event-loop thread while another request owns
+                # the process-wide throttle.
                 from time import monotonic as _mono
 
-                _lock = EmbeddingClient._hold_spacing_lock()
+                _lock = await EmbeddingClient._hold_spacing_lock()
                 try:
                     delay = self.config.batch_delay
                     if delay > 0:
                         elapsed = _mono() - EmbeddingClient._last_request_monotonic
                         if elapsed < delay:
-                            _time.sleep(delay - elapsed)
+                            await asyncio.sleep(delay - elapsed)
                     EmbeddingClient._last_request_monotonic = _mono()
                     response = await self.adapter.embed(request)
                 finally:

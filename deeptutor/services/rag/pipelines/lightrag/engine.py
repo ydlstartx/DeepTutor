@@ -678,11 +678,37 @@ async def query_with_sources(
 ) -> tuple[str, list[dict[str, Any]]]:
     """Return a LightRAG answer together with its structured provenance.
 
-    ``RAGAnything.aquery`` owns the answer path, including its optional VLM
-    enhancement. LightRAG exposes the records used for retrieval separately via
-    ``aquery_data``. Keeping those calls separate preserves the existing answer
-    behavior while allowing DeepTutor to surface citation metadata.
+    Native query-only deployments can use LightRAG's combined ``aquery_llm``
+    API, which returns the answer and retrieval records from one search. Full
+    RAG-Anything deployments keep their facade-owned answer path (including VLM
+    enhancement) and fetch provenance separately for compatibility.
     """
+    if isinstance(rag, _NativeQueryRag):
+        await ensure_ready(rag)
+        complete_query = getattr(rag.lightrag, "aquery_llm", None)
+        if callable(complete_query):
+            from lightrag import QueryParam
+
+            resolved = normalize_mode(mode) or DEFAULT_MODE
+            extra = query_kwargs_from_settings()
+            query_kwargs = _drop_unsupported(
+                QueryParam,
+                extra,
+                what="QueryParam",
+                package="LightRAG",
+            )
+            result = await complete_query(
+                question,
+                param=QueryParam(mode=resolved, **query_kwargs),
+            )
+            if isinstance(result, dict):
+                llm_response = result.get("llm_response")
+                if isinstance(llm_response, dict) and not llm_response.get("is_streaming"):
+                    answer = llm_response.get("content")
+                    return (answer if isinstance(answer, str) else ""), _query_data_to_sources(
+                        result
+                    )
+
     answer = await query(rag, question, mode)
     return answer, await query_sources(rag, question, mode)
 
