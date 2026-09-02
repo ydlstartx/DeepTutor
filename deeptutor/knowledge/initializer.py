@@ -219,6 +219,17 @@ class KnowledgeBaseInitializer:
                 )
                 raise RuntimeError("RAG pipeline returned failure")
 
+            # Initial creation and incremental adds share one dedup registry.
+            # Hashing can involve large files, so keep it off the API owner loop
+            # and register documents only after the provider index succeeded.
+            from deeptutor.knowledge.add_documents import record_indexed_document_hashes
+
+            await asyncio.to_thread(
+                record_indexed_document_hashes,
+                self.kb_dir / "metadata.json",
+                self.raw_dir,
+                doc_files,
+            )
             self._update_metadata_with_provider(provider)
             self.progress_tracker.update(
                 ProgressStage.PROCESSING_DOCUMENTS,

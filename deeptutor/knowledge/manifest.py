@@ -26,11 +26,11 @@ non-enumerable. A remote listing may be bounded by a request budget, in which
 case the count is flagged as a lower bound rather than being presented as a total.
 
 Deliberately NOT reported: how many documents made it into the *index*. Every
-per-file index record available is unreliable — LlamaIndex's ``docstore.json``
-counts nodes (chunk-level, so it drifts with the chunking config and costs a
-multi-MB JSON parse to read), ``metadata.json``'s ``file_hashes`` is only
-written on the incremental-add path (KBs built by the create path have none),
-and ``last_indexed_count`` is the size of the last batch rather than a total. A
+per-file index record available is unsuitable for that count — LlamaIndex's
+``docstore.json`` counts nodes (chunk-level, so it drifts with the chunking
+config and costs a multi-MB JSON parse to read), ``metadata.json``'s
+``file_hashes`` is a dedup registry rather than an index manifest, and
+``last_indexed_count`` is the size of the last batch rather than a total. A
 confidently wrong count is worse than no count, so a manifest carries the
 document set plus the KB's index *status* and stops there.
 """

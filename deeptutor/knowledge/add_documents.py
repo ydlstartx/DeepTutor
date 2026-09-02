@@ -13,7 +13,7 @@ import json
 import logging
 from pathlib import Path
 import shutil
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from deeptutor.knowledge.policy import ensure_kb_write_allowed
 from deeptutor.services.config import resolve_llm_runtime_config
@@ -122,6 +122,30 @@ def _raw_hash_key(file_path: Path, raw_dir: Path) -> str:
         return file_path.resolve().relative_to(raw_dir.resolve()).as_posix()
     except ValueError:
         return file_path.name
+
+
+def _file_sha256(file_path: Path) -> str:
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(65536), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+
+def record_indexed_document_hashes(
+    metadata_file: Path,
+    raw_dir: Path,
+    file_paths: Iterable[Path],
+) -> None:
+    """Atomically register successfully indexed documents for deduplication."""
+    metadata = _read_metadata(metadata_file)
+    hashes = metadata.get("file_hashes")
+    if not isinstance(hashes, dict):
+        hashes = {}
+        metadata["file_hashes"] = hashes
+    for file_path in file_paths:
+        hashes[_raw_hash_key(file_path, raw_dir)] = _file_sha256(file_path)
+    _write_metadata(metadata_file, metadata)
 
 
 def rename_raw_document(kb_dir: Path, file_path: Path, new_name: str) -> RawDocumentRename:
@@ -240,11 +264,7 @@ class DocumentAdder:
         return resolve_bound_provider(self.base_dir, self.kb_name)
 
     def _get_file_hash(self, file_path: Path) -> str:
-        sha256_hash = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            for byte_block in iter(lambda: f.read(65536), b""):
-                sha256_hash.update(byte_block)
-        return sha256_hash.hexdigest()
+        return _file_sha256(file_path)
 
     def get_ingested_hashes(self) -> dict[str, str]:
         if self.metadata_file.exists():
@@ -390,11 +410,7 @@ class DocumentAdder:
         return DocumentIndexResult(processed_files=processed_files, failures=failures)
 
     def _record_successful_hash(self, file_path: Path) -> None:
-        file_hash = self._get_file_hash(file_path)
-        metadata = _read_metadata(self.metadata_file)
-        hash_key = _raw_hash_key(file_path, self.raw_dir)
-        metadata.setdefault("file_hashes", {})[hash_key] = file_hash
-        _write_metadata(self.metadata_file, metadata)
+        record_indexed_document_hashes(self.metadata_file, self.raw_dir, [file_path])
 
     def update_metadata(self, added_count: int) -> None:
         """Update metadata after incremental add."""
