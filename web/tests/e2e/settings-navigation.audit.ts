@@ -1,9 +1,60 @@
 import { expect, test } from '@playwright/test'
+import type { Catalog } from '../../features/settings/store/SettingsStore'
+
+const emptyService = {
+  active_profile_id: null,
+  active_model_id: null,
+  profiles: [],
+}
+
+const catalog: Catalog = {
+  version: 1,
+  connections: [],
+  services: {
+    llm: {
+      active_profile_id: 'fixture-provider',
+      active_model_id: 'fixture-model',
+      profiles: [{
+        id: 'fixture-provider',
+        name: 'Fixture provider',
+        binding: 'openai',
+        base_url: 'https://example.invalid/v1',
+        api_key: '',
+        api_version: '',
+        models: [{ id: 'fixture-model', name: 'Fixture model', model: 'fixture-model' }],
+      }],
+    },
+    task: emptyService,
+    embedding: emptyService,
+    search: emptyService,
+    tts: emptyService,
+    stt: emptyService,
+    imagegen: emptyService,
+    videogen: emptyService,
+  },
+}
 
 test.describe('Settings navigation', () => {
   test('reports what is ready without dressing optional gaps as faults', async ({
     page,
   }) => {
+    // Readiness is an administrator settings surface. Resolve the settings
+    // payload as well as its readiness report so the panel is actually enabled.
+    await page.route('**/api/auth/status', route =>
+      route.fulfill({ status: 200, json: { enabled: false } })
+    )
+    await page.route('**/api/settings', route =>
+      route.fulfill({
+        status: 200,
+        json: {
+          ui: { theme: 'light', language: 'en', response_language: 'en' },
+          catalog,
+        },
+      })
+    )
+    await page.route('**/api/settings/draft', route =>
+      route.fulfill({ status: 200, json: { draft: null } })
+    )
     await page.route('**/api/settings/readiness', route =>
       route.fulfill({
         status: 200,
@@ -77,9 +128,9 @@ test.describe('Settings navigation', () => {
     const matrix = page.getByTestId('settings-readiness-matrix')
     await expect(matrix).toBeVisible()
 
-    // The selected parser that cannot be reached is the one thing called out.
+    // Check the parser row, independently of the summary repeating its issue.
     await expect(
-      panel.getByText(/endpoint is unreachable|服务地址连不上/)
+      matrix.getByText(/endpoint is unreachable|服务地址连不上/)
     ).toBeVisible()
     // The optional tool is folded behind its disclosure, not in the open list.
     await expect(

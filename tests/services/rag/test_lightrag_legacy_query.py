@@ -11,6 +11,8 @@ import networkx as nx
 import numpy as np
 import pytest
 
+EmbeddingFunc = pytest.importorskip("lightrag.utils").EmbeddingFunc
+
 from deeptutor.services.rag.pipelines.lightrag import engine, legacy_query, pipeline, storage
 
 
@@ -57,8 +59,6 @@ def _snapshot(root: Path) -> dict[str, str]:
 
 
 def _configure(monkeypatch):
-    from lightrag.utils import EmbeddingFunc
-
     async def embed(texts, **_kwargs):
         return np.ones((len(texts), 32), dtype=np.float32)
 
