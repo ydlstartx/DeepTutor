@@ -73,7 +73,11 @@ async def test_query_only_background_cycle_does_not_scan_or_mutate(monkeypatch, 
         ),
     )
 
-    await GitHubSourceSyncService(base_dir=str(tmp_path))._sync_one_cycle()
+    from deeptutor.multi_user.context import get_current_user
+
+    await GitHubSourceSyncService(
+        base_dir=str(tmp_path), owner=get_current_user()
+    )._sync_one_cycle()
 
 
 def test_query_only_manager_rejects_github_source_metadata_writes(monkeypatch, tmp_path) -> None:

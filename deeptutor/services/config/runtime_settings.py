@@ -14,7 +14,13 @@ from .origins import normalize_origins
 
 DEFAULT_SYSTEM_SETTINGS: dict[str, Any] = {
     "version": 1,
+    # About → Updates performs at most one release lookup per process/day.
+    # Operators may disable even that explicit network boundary for offline or
+    # audited deployments; DEEPTUTOR_VERSION_CHECK_ENABLED is the deployment
+    # override for read-only settings volumes.
+    "version_check_enabled": True,
     "backend_port": 8001,
+    "backend_workers": 1,
     "frontend_port": 3782,
     "next_public_api_base_external": "",
     "next_public_api_base": "",
@@ -27,11 +33,26 @@ DEFAULT_SYSTEM_SETTINGS: dict[str, Any] = {
     # from NODE_ENV and defaults off for normal local/source installs.
     "kb_query_only": False,
     # Enable the restricted-subprocess code-execution sandbox (the `exec` /
-    # `code_execution` tools the office skills — docx/pdf/pptx/xlsx — run on).
+    # unified `exec` tool the office skills — docx/pdf/pptx/xlsx — run on).
     # Default on so document generation works out of the box across all
     # deployment shapes; a stronger backend (runner sidecar / bwrap) still
     # takes precedence when available. Set false to disable host-side exec.
     "sandbox_allow_subprocess": True,
+    # Conservative chat -> deep_question routing. Explicit requests only, and
+    # callers can still pass config.auto_route=false for a single turn.
+    "capability_routing_enabled": False,
+    # Reference policy applied after every web-search provider. This belongs in
+    # runtime JSON so packaged installs and the settings service share one
+    # source of truth; project main.yaml is intentionally not an operator
+    # configuration surface.
+    "web_search_source_filtering": {
+        "enabled": True,
+        "blocked_domains": [],
+        "trusted_domains": [],
+        "content_filtering": True,
+        "use_educational_trusted_domains": False,
+        "use_moderation": False,
+    },
     # Chat attachment policy. Size caps gate what the composer accepts and
     # what the turn runtime / partner upload endpoints extract; the char
     # budgets bound how much extracted text is inlined into the LLM context
@@ -62,12 +83,21 @@ DEFAULT_AUTH_SETTINGS: dict[str, Any] = {
 }
 
 DEFAULT_INTEGRATIONS_SETTINGS: dict[str, Any] = {
-    "version": 1,
+    "version": 2,
     "pocketbase_url": "",
     "pocketbase_port": 8090,
     "pocketbase_external_url": "",
     "pocketbase_admin_email": "",
     "pocketbase_admin_password": "",
+    "turn_coordination": {
+        "backend": "memory",
+        "redis_url": "",
+        "key_prefix": "deeptutor",
+        "lease_ttl_seconds": 30,
+        "renew_interval_seconds": 10,
+        "recovery_interval_seconds": 10,
+        "stream_retention_seconds": 86_400,
+    },
 }
 
 # Document parsing settings. The parse layer (deeptutor/services/parsing)
@@ -255,6 +285,10 @@ DEFAULT_IMA_SETTINGS: dict[str, Any] = {
 # * ``top_k`` — default number of chunks a query returns.
 # * ``vector_top_k_multiplier`` / ``bm25_top_k_multiplier`` — how many extra
 #   candidates each child retriever fetches before fusion re-ranks to ``top_k``.
+# * ``reranker_model`` / ``rerank_top_k`` — optional cross-encoder refinement.
+#   An empty model keeps the existing embedding-only ranking.
+# * ``vector_index_type`` — FAISS index type for the next full index build.
+#   HNSW is opt-in and trades exact recall for sub-linear search at scale.
 # * ``chunk_size`` / ``chunk_overlap`` — indexing chunk geometry; changes apply
 #   on the next (re-)index, not retroactively.
 # * ``image_description_concurrency`` / ``image_description_timeout_seconds`` /
@@ -267,6 +301,11 @@ DEFAULT_IMA_SETTINGS: dict[str, Any] = {
 LLAMAINDEX_VECTOR_PROFILE = "vector"
 LLAMAINDEX_HYBRID_PROFILE = "hybrid"
 _LLAMAINDEX_PROFILES = frozenset({LLAMAINDEX_VECTOR_PROFILE, LLAMAINDEX_HYBRID_PROFILE})
+LLAMAINDEX_FLAT_VECTOR_INDEX = "flat"
+LLAMAINDEX_HNSW_VECTOR_INDEX = "hnsw"
+_LLAMAINDEX_VECTOR_INDEX_TYPES = frozenset(
+    {LLAMAINDEX_FLAT_VECTOR_INDEX, LLAMAINDEX_HNSW_VECTOR_INDEX}
+)
 
 DEFAULT_LLAMAINDEX_SETTINGS: dict[str, Any] = {
     "version": 1,
@@ -274,6 +313,12 @@ DEFAULT_LLAMAINDEX_SETTINGS: dict[str, Any] = {
     "top_k": 5,
     "vector_top_k_multiplier": 2,
     "bm25_top_k_multiplier": 2,
+    "reranker_model": "",
+    "rerank_top_k": 50,
+    "vector_index_type": LLAMAINDEX_FLAT_VECTOR_INDEX,
+    "hnsw_m": 32,
+    "hnsw_ef_construction": 200,
+    "hnsw_ef_search": 64,
     "chunk_size": 512,
     "chunk_overlap": 50,
     # Indexing throughput knobs. Parsing is usually CPU/subprocess-bound while
@@ -301,32 +346,27 @@ DEFAULT_GRAPHRAG_SETTINGS: dict[str, Any] = {
     "dynamic_community_selection": False,
 }
 
-# LightRAG retrieval + indexing knobs (HKUDS/LightRAG via RAG-Anything). ``top_k``
+# LightRAG retrieval + indexing knobs (HKUDS/LightRAG native SDK). ``top_k``
 # is the number of entities/relations the query pulls; ``response_type`` mirrors
-# GraphRAG's. These ride into ``QueryParam`` via the engine's aquery() call;
-# wiring is defensive (an older RAG-Anything that rejects a kwarg degrades to a
-# mode-only query). ``max_concurrent_files`` bounds DeepTutor's concurrent
-# document parsing (graph insertion stays serial); ``llm_model_max_async`` /
-# ``entity_extract_max_gleaning`` ride into LightRAG's own constructor via
-# RAGAnything's ``lightrag_kwargs`` passthrough.
+# GraphRAG's. These ride into ``QueryParam`` and the pinned SDK constructor.
+# ``max_concurrent_files`` sizes the native parser worker pool after DeepTutor
+# has frozen each ParseService result; pre-parsing itself remains serial.
+# Stable catalog references let LightRAG use a dedicated LLM while the global
+# active chat model remains unchanged for ordinary chat.
 DEFAULT_LIGHTRAG_SETTINGS: dict[str, Any] = {
     "version": 1,
     "top_k": 60,
     "response_type": "Multiple Paragraphs",
     "vector_storage": "nano",
     "max_concurrent_files": 1,
-    # LightRAG's upstream defaults are deliberately conservative. Eight LLM
-    # calls keeps local builds moving without the burstiness of an unbounded
-    # gather; embeddings stay lower because provider quotas are often tighter.
-    "llm_model_max_async": 8,
+    # Use native LightRAG's conservative LLM default; embedding quotas can
+    # be tighter, so their concurrency remains independently bounded.
+    "llm_model_max_async": 4,
     "embedding_concurrency": 2,
-    # RAG-Anything separately limits image/table/equation description tasks
-    # through LightRAG.max_parallel_insert; it is not governed by the two
-    # limits above.
+    # Native vision role concurrency for image/table/equation descriptions.
     "multimodal_concurrency": 8,
-    # Zero skips the optional second entity-extraction pass. It substantially
-    # reduces indexing calls; users can raise it for maximum graph recall.
-    "entity_extract_max_gleaning": 0,
+    # Keep the native extraction default; zero disables the optional extra pass.
+    "entity_extract_max_gleaning": 1,
     # Larger chunks and a smaller overlap reduce extraction calls for long
     # documents without making each prompt so dense that graph-format
     # adherence becomes fragile.  The remaining knobs cut vector round trips
@@ -335,6 +375,17 @@ DEFAULT_LIGHTRAG_SETTINGS: dict[str, Any] = {
     "chunk_overlap_token_size": 80,
     "embedding_batch_num": 20,
     "force_llm_summary_on_merge": 16,
+    "llm_profile_id": "",
+    "llm_model_id": "",
+}
+
+# LightRAG Server connection defaults. Individual knowledge bases remain free
+# to override the URL/key when they are connected; this account-level slice is
+# the reusable starting point shown on the engine page and in the create flow.
+DEFAULT_LIGHTRAG_SERVER_SETTINGS: dict[str, Any] = {
+    "version": 1,
+    "server_url": "",
+    "api_key": "",
 }
 
 IGNORE_PROCESS_OVERRIDES_ENV = "DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES"
@@ -606,6 +657,18 @@ class RuntimeSettingsService:
         _atomic_write_json(self.path_for("lightrag"), payload)
         return payload
 
+    def load_lightrag_server(self) -> dict[str, Any]:
+        return self._load_or_create(
+            "lightrag_server",
+            DEFAULT_LIGHTRAG_SERVER_SETTINGS,
+            self._normalize_lightrag_server,
+        )
+
+    def save_lightrag_server(self, settings: dict[str, Any]) -> dict[str, Any]:
+        payload = self._normalize_lightrag_server({**DEFAULT_LIGHTRAG_SERVER_SETTINGS, **settings})
+        _atomic_write_json(self.path_for("lightrag_server"), payload)
+        return payload
+
     def ensure_defaults(self) -> None:
         self.load_system(include_process_overrides=False)
         self.load_auth(include_process_overrides=False)
@@ -616,6 +679,7 @@ class RuntimeSettingsService:
         self.load_llamaindex(include_process_overrides=False)
         self.load_graphrag()
         self.load_lightrag()
+        self.load_lightrag_server()
 
     def render_environment(self) -> dict[str, str]:
         """Render non-model settings into process env names for subprocesses."""
@@ -623,7 +687,9 @@ class RuntimeSettingsService:
         auth = self.load_auth()
         integrations = self.load_integrations()
         return {
+            "DEEPTUTOR_VERSION_CHECK_ENABLED": _bool_env(system["version_check_enabled"]),
             "BACKEND_PORT": str(system["backend_port"]),
+            "BACKEND_WORKERS": str(system["backend_workers"]),
             "FRONTEND_PORT": str(system["frontend_port"]),
             "NEXT_PUBLIC_API_BASE_EXTERNAL": system["next_public_api_base_external"],
             "NEXT_PUBLIC_API_BASE": system["next_public_api_base"],
@@ -738,6 +804,8 @@ class RuntimeSettingsService:
         # ordinary JSON-backed settings.
         if value := self.process_env.get("DEEPTUTOR_KB_QUERY_ONLY", ""):
             payload["kb_query_only"] = value
+        if value := self._process_env_value("DEEPTUTOR_VERSION_CHECK_ENABLED"):
+            payload["version_check_enabled"] = value
         if value := self._process_env_value("BACKEND_PORT"):
             payload["backend_port"] = value
         if value := self._process_env_value("FRONTEND_PORT"):
@@ -756,8 +824,15 @@ class RuntimeSettingsService:
             payload["disable_ssl_verify"] = value
         if value := self._process_env_value("CHAT_ATTACHMENT_DIR"):
             payload["chat_attachment_dir"] = value
+        if value := (
+            self._process_env_value("DEEPTUTOR_BACKEND_WORKERS")
+            or self._process_env_value("BACKEND_WORKERS")
+        ):
+            payload["backend_workers"] = value
         if value := self._process_env_value("DEEPTUTOR_SANDBOX_ALLOW_SUBPROCESS"):
             payload["sandbox_allow_subprocess"] = value
+        if value := self._process_env_value("DEEPTUTOR_CAPABILITY_ROUTING_ENABLED"):
+            payload["capability_routing_enabled"] = value
         if value := self._process_env_value("CHAT_ATTACHMENT_MAX_FILE_MB"):
             payload["chat_attachment_max_file_mb"] = value
         if value := self._process_env_value("CHAT_ATTACHMENT_MAX_TOTAL_MB"):
@@ -797,6 +872,14 @@ class RuntimeSettingsService:
             payload["pocketbase_admin_email"] = value
         if value := self._process_env_value("POCKETBASE_ADMIN_PASSWORD"):
             payload["pocketbase_admin_password"] = value
+        coordination = dict(payload.get("turn_coordination") or {})
+        if value := self._process_env_value("DEEPTUTOR_TURN_COORDINATION_BACKEND"):
+            coordination["backend"] = value
+        if value := self._process_env_value("DEEPTUTOR_REDIS_URL"):
+            coordination["redis_url"] = value
+        if value := self._process_env_value("DEEPTUTOR_REDIS_KEY_PREFIX"):
+            coordination["key_prefix"] = value
+        payload["turn_coordination"] = coordination
         return self._normalize_integrations(payload)
 
     def _apply_mineru_process_overrides(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -863,6 +946,9 @@ class RuntimeSettingsService:
         profile = _string(settings.get("retrieval_profile")).lower()
         if profile not in _LLAMAINDEX_PROFILES:
             profile = LLAMAINDEX_HYBRID_PROFILE
+        vector_index_type = _string(settings.get("vector_index_type")).lower()
+        if vector_index_type not in _LLAMAINDEX_VECTOR_INDEX_TYPES:
+            vector_index_type = LLAMAINDEX_FLAT_VECTOR_INDEX
         chunk_size = _coerce_clamped_int(settings.get("chunk_size"), 512, 64, 8192)
         # Overlap must stay below the chunk size or chunking degenerates.
         chunk_overlap = _coerce_clamped_int(
@@ -878,6 +964,14 @@ class RuntimeSettingsService:
             "bm25_top_k_multiplier": _coerce_clamped_int(
                 settings.get("bm25_top_k_multiplier"), 2, 1, 10
             ),
+            "reranker_model": _string(settings.get("reranker_model"))[:200],
+            "rerank_top_k": _coerce_clamped_int(settings.get("rerank_top_k"), 50, 1, 100),
+            "vector_index_type": vector_index_type,
+            "hnsw_m": _coerce_clamped_int(settings.get("hnsw_m"), 32, 4, 64),
+            "hnsw_ef_construction": _coerce_clamped_int(
+                settings.get("hnsw_ef_construction"), 200, 16, 512
+            ),
+            "hnsw_ef_search": _coerce_clamped_int(settings.get("hnsw_ef_search"), 64, 1, 512),
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "parse_concurrency": _coerce_clamped_int(settings.get("parse_concurrency"), 2, 1, 8),
@@ -930,7 +1024,7 @@ class RuntimeSettingsService:
             raw_llm_model_max_async = settings.get("llm_concurrency")
         llm_model_max_async = _coerce_clamped_int(
             raw_llm_model_max_async,
-            8,
+            4,
             1,
             32,
         )
@@ -951,7 +1045,7 @@ class RuntimeSettingsService:
                 settings.get("multimodal_concurrency"), 8, 1, 16
             ),
             "entity_extract_max_gleaning": _coerce_clamped_int(
-                settings.get("entity_extract_max_gleaning"), 0, 0, 3
+                settings.get("entity_extract_max_gleaning"), 1, 0, 5
             ),
             "chunk_token_size": chunk_token_size,
             "chunk_overlap_token_size": chunk_overlap_token_size,
@@ -961,6 +1055,15 @@ class RuntimeSettingsService:
             "force_llm_summary_on_merge": _coerce_clamped_int(
                 settings.get("force_llm_summary_on_merge"), 16, 3, 64
             ),
+            "llm_profile_id": _string(settings.get("llm_profile_id"))[:128],
+            "llm_model_id": _string(settings.get("llm_model_id"))[:128],
+        }
+
+    def _normalize_lightrag_server(self, settings: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "server_url": _string(settings.get("server_url")).rstrip("/"),
+            "api_key": _string(settings.get("api_key")),
         }
 
     def _normalize_document_parsing(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -1115,6 +1218,8 @@ class RuntimeSettingsService:
         public_api_base = _string(settings.get("next_public_api_base_external")) or _string(
             settings.get("public_api_base")
         )
+        raw_source_filter = settings.get("web_search_source_filtering")
+        source_filter = raw_source_filter if isinstance(raw_source_filter, dict) else {}
         max_file_mb = _coerce_clamped_int(
             settings.get("chat_attachment_max_file_mb"),
             DEFAULT_SYSTEM_SETTINGS["chat_attachment_max_file_mb"],
@@ -1129,7 +1234,9 @@ class RuntimeSettingsService:
         max_total_mb = max(max_total_mb, max_file_mb)
         return {
             "version": 1,
+            "version_check_enabled": _coerce_bool(settings.get("version_check_enabled"), True),
             "backend_port": _coerce_port(settings.get("backend_port"), 8001),
+            "backend_workers": _coerce_clamped_int(settings.get("backend_workers"), 1, 1, 64),
             "frontend_port": _coerce_port(settings.get("frontend_port"), 3782),
             "next_public_api_base_external": public_api_base,
             "next_public_api_base": _string(settings.get("next_public_api_base")),
@@ -1141,6 +1248,19 @@ class RuntimeSettingsService:
             "sandbox_allow_subprocess": _coerce_bool(
                 settings.get("sandbox_allow_subprocess"), True
             ),
+            "capability_routing_enabled": _coerce_bool(
+                settings.get("capability_routing_enabled"), False
+            ),
+            "web_search_source_filtering": {
+                "enabled": _coerce_bool(source_filter.get("enabled"), True),
+                "blocked_domains": _string_or_list(source_filter.get("blocked_domains")),
+                "trusted_domains": _string_or_list(source_filter.get("trusted_domains")),
+                "content_filtering": _coerce_bool(source_filter.get("content_filtering"), True),
+                "use_educational_trusted_domains": _coerce_bool(
+                    source_filter.get("use_educational_trusted_domains"), False
+                ),
+                "use_moderation": _coerce_bool(source_filter.get("use_moderation"), False),
+            },
             "chat_attachment_max_file_mb": max_file_mb,
             "chat_attachment_max_total_mb": max_total_mb,
             "chat_attachment_max_chars_per_doc": _coerce_clamped_int(
@@ -1166,13 +1286,36 @@ class RuntimeSettingsService:
         }
 
     def _normalize_integrations(self, settings: dict[str, Any]) -> dict[str, Any]:
+        raw_coordination = settings.get("turn_coordination")
+        coordination = raw_coordination if isinstance(raw_coordination, dict) else {}
+        backend = _string(coordination.get("backend")).lower()
+        if backend not in {"memory", "redis"}:
+            backend = "memory"
+        key_prefix = _string(coordination.get("key_prefix")).strip(":") or "deeptutor"
         return {
-            "version": 1,
+            "version": 2,
             "pocketbase_url": _string(settings.get("pocketbase_url")).rstrip("/"),
             "pocketbase_port": _coerce_port(settings.get("pocketbase_port"), 8090),
             "pocketbase_external_url": _string(settings.get("pocketbase_external_url")).rstrip("/"),
             "pocketbase_admin_email": _string(settings.get("pocketbase_admin_email")),
             "pocketbase_admin_password": _string(settings.get("pocketbase_admin_password")),
+            "turn_coordination": {
+                "backend": backend,
+                "redis_url": _string(coordination.get("redis_url")),
+                "key_prefix": key_prefix,
+                "lease_ttl_seconds": _coerce_clamped_int(
+                    coordination.get("lease_ttl_seconds"), 30, 10, 300
+                ),
+                "renew_interval_seconds": _coerce_clamped_int(
+                    coordination.get("renew_interval_seconds"), 10, 1, 100
+                ),
+                "recovery_interval_seconds": _coerce_clamped_int(
+                    coordination.get("recovery_interval_seconds"), 10, 1, 300
+                ),
+                "stream_retention_seconds": _coerce_clamped_int(
+                    coordination.get("stream_retention_seconds"), 86_400, 60, 2_592_000
+                ),
+            },
         }
 
 
@@ -1298,6 +1441,10 @@ def load_lightrag_settings() -> dict[str, Any]:
     return get_runtime_settings_service().load_lightrag()
 
 
+def load_lightrag_server_settings() -> dict[str, Any]:
+    return get_runtime_settings_service().load_lightrag_server()
+
+
 def load_document_parsing_settings() -> dict[str, Any]:
     return get_runtime_settings_service().load_document_parsing()
 
@@ -1316,6 +1463,7 @@ __all__ = [
     "DEFAULT_IMA_SETTINGS",
     "DEFAULT_INTEGRATIONS_SETTINGS",
     "DEFAULT_LIGHTRAG_SETTINGS",
+    "DEFAULT_LIGHTRAG_SERVER_SETTINGS",
     "DEFAULT_LLAMAINDEX_SETTINGS",
     "DEFAULT_MINERU_SETTINGS",
     "DEFAULT_PAGEINDEX_SETTINGS",
@@ -1345,6 +1493,7 @@ __all__ = [
     "load_graphrag_settings",
     "load_integrations_settings",
     "load_lightrag_settings",
+    "load_lightrag_server_settings",
     "load_llamaindex_settings",
     "load_mineru_settings",
     "load_system_settings",

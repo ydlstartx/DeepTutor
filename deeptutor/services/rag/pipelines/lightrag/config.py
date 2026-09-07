@@ -1,16 +1,9 @@
-"""Bridge DeepTutor's runtime config into LightRAG / RAG-Anything.
-
-LightRAG (HKUDS/LightRAG) is a text knowledge-graph RAG engine; its multimodal
-story is RAG-Anything (HKUDS/RAG-Anything), built on top of LightRAG. The
-``lightrag`` provider uses RAG-Anything so multimodal content (the parse layer's
-``content_list``) becomes graph entities, while text-only documents fall back to
-a plain text insert.
+"""Bridge DeepTutor runtime configuration into the LightRAG 1.5 native SDK.
 
 This module is the decoupling seam: it exposes availability + mode helpers and
-builds the three adapters LightRAG needs from DeepTutor's already-resolved LLM /
-embedding clients. It imports neither RAG-Anything nor LightRAG at module load —
-the adapter builders import ``lightrag.utils`` lazily (only the embedding wrapper
-needs it), and engine construction lives in ``engine.py``.
+builds the three adapters LightRAG needs from DeepTutor's already-resolved LLM,
+vision, and embedding clients. LightRAG imports remain lazy so every other RAG
+provider can import without the optional extra installed.
 
 Decoupling notes:
 * ``llm_model_func`` / ``vision_model_func`` wrap DeepTutor's unified model
@@ -28,9 +21,12 @@ import importlib.util
 import inspect
 import logging
 import re
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
+    from deeptutor.multi_user.models import CurrentUser
+    from deeptutor.services.llm.config import LLMConfig
+
     from .worker import OwnerLoopBridge
 
 logger = logging.getLogger(__name__)
@@ -42,20 +38,10 @@ _T = TypeVar("_T")
 SUPPORTED_MODES = ("naive", "local", "global", "hybrid", "mix")
 DEFAULT_MODE = "hybrid"
 
-_ENTITY_EXTRACTION_MARKER = (
-    "You are a Knowledge Graph Specialist responsible for extracting entities and relationships"
-)
-_TUPLE_DELIMITER = "<|#|>"
-_COMPLETION_DELIMITER = "<|COMPLETE|>"
-_FORMAT_RETRY_PROMPT = """The previous extraction output did not follow the required record format.
-Re-output the complete extraction, correcting every malformed record.
-Output only entity records with exactly 4 <|#|>-separated fields, relation records with exactly 5 fields, and finish with <|COMPLETE|>.
-Do not add Markdown fences, explanations, or introductory text."""
-
 # Conservative cap for the embedding wrapper when the model doesn't advertise one.
 _DEFAULT_MAX_TOKEN_SIZE = 8192
 
-# Keep retries at the LightRAG adapter boundary so RAG-Anything receives one
+# Keep retries at the LightRAG adapter boundary so the SDK receives one
 # predictable policy for both text and vision calls. Provider retries are disabled
 # on every attempt to prevent the two retry layers from multiplying.
 _ADAPTER_MAX_ATTEMPTS = 3
@@ -69,7 +55,7 @@ _HTTP_STATUS_PATTERN = re.compile(
 
 
 class LightRagNotAvailableError(RuntimeError):
-    """Raised when the optional ``raganything`` dependency is not installed."""
+    """Raised when the optional ``lightrag-hku`` dependency is not installed."""
 
 
 class LightRagNotConfiguredError(RuntimeError):
@@ -148,16 +134,12 @@ async def _run_adapter_with_retry(
 
 
 def is_lightrag_available() -> bool:
-    """True when the dependency required by this deployment can be imported.
+    """True when the native LightRAG SDK can be imported.
 
-    Full/indexing deployments require RAG-Anything. Query-only images load an
-    existing index with native LightRAG and intentionally omit RAG-Anything's
-    MinerU/PyTorch dependency tree.
+    Opt-in extra: ``pip install 'deeptutor[rag-lightrag]'``. Until installed the
+    provider is hidden / blocked in the UI.
     """
-    from deeptutor.knowledge.policy import is_kb_query_only
-
-    package = "lightrag" if is_kb_query_only() else "raganything"
-    return importlib.util.find_spec(package) is not None
+    return importlib.util.find_spec("lightrag") is not None
 
 
 def normalize_mode(mode: str | None) -> str:
@@ -171,12 +153,7 @@ def normalize_mode(mode: str | None) -> str:
 
 
 def query_kwargs_from_settings() -> dict:
-    """Extra ``aquery`` kwargs (top_k, response_type) from runtime settings.
-
-    Returned as a dict so the engine can pass them through to LightRAG's
-    ``QueryParam`` and gracefully drop them if an older RAG-Anything rejects a
-    kwarg. Empty on any read error.
-    """
+    """``QueryParam`` values from runtime settings."""
     try:
         from deeptutor.services.config import load_lightrag_settings
 
@@ -190,106 +167,106 @@ def query_kwargs_from_settings() -> dict:
 
 
 def indexing_kwargs_from_settings() -> dict:
-    """Document-level indexing knobs from runtime settings.
-
-    ``max_concurrent_files`` is passed to RAG-Anything for compatibility and
-    also bounds DeepTutor's concurrent parse tasks. Graph insertion remains
-    serial to protect LightRAG's mutable stores. Empty on any read error, so a
-    bad settings file falls back to 1.
-    """
+    """Native parser-pool knobs from runtime settings."""
     try:
         from deeptutor.services.config import load_lightrag_settings
 
         settings = load_lightrag_settings()
-        return {"max_concurrent_files": int(settings.get("max_concurrent_files", 1))}
+        return {"max_parallel_parse_native": int(settings.get("max_concurrent_files", 1))}
     except Exception:
         return {}
 
 
-def lightrag_kwargs_from_settings() -> dict:
-    """Extra kwargs forwarded to LightRAG's own constructor via RAG-Anything's
-    ``lightrag_kwargs`` passthrough.
-
-    ``llm_model_max_async`` bounds how many concurrent LLM calls LightRAG's
-    internal priority queue issues (covers both query and entity-extraction
-    traffic, since both ride the same wrapped ``llm_model_func``).
-    ``entity_extract_max_gleaning`` controls how many extra extraction passes
-    LightRAG runs per chunk to recover entities/relations the first pass
-    missed. Empty on any read error, so a bad settings file falls back to
-    LightRAG's own built-in defaults.
-    """
+def constructor_kwargs_from_settings() -> dict:
+    """Direct LightRAG constructor knobs from runtime settings."""
     try:
         from deeptutor.services.config import load_lightrag_settings
 
         settings = load_lightrag_settings()
         return {
-            "llm_model_max_async": int(
-                settings.get("llm_model_max_async", settings.get("llm_concurrency", 8))
-            ),
+            "llm_model_max_async": int(settings.get("llm_model_max_async", 4)),
             "embedding_func_max_async": int(settings.get("embedding_concurrency", 2)),
-            "max_parallel_insert": int(settings.get("multimodal_concurrency", 8)),
-            "entity_extract_max_gleaning": int(settings.get("entity_extract_max_gleaning", 0)),
             "chunk_token_size": int(settings.get("chunk_token_size", 1400)),
             "chunk_overlap_token_size": int(settings.get("chunk_overlap_token_size", 80)),
             "embedding_batch_num": int(settings.get("embedding_batch_num", 20)),
             "force_llm_summary_on_merge": int(settings.get("force_llm_summary_on_merge", 16)),
+            # SDK watchdogs remain backstops behind the provider attempt/retry policy.
+            "default_llm_timeout": 900,
+            "default_embedding_timeout": 240,
+            "entity_extract_max_gleaning": int(settings.get("entity_extract_max_gleaning", 1)),
         }
     except Exception:
-        return {
-            "llm_model_max_async": 8,
-            "embedding_func_max_async": 2,
-            "max_parallel_insert": 8,
-            "entity_extract_max_gleaning": 0,
-            "chunk_token_size": 1400,
-            "chunk_overlap_token_size": 80,
-            "embedding_batch_num": 20,
-            "force_llm_summary_on_merge": 16,
-        }
+        return {}
 
 
-def _entity_extraction_format_score(result: Any) -> tuple[bool, int]:
-    """Return ``(is_parseable, valid_record_count)`` for extraction output.
+def _lightrag_llm_selection_from_settings(*, strict: bool) -> dict[str, str] | None:
+    try:
+        from deeptutor.services.config import load_lightrag_settings
 
-    LightRAG 1.4.x drops entity records that do not have exactly four fields
-    and relation records that do not have exactly five. Detect those failures
-    before the result enters LightRAG's persistent cache so only malformed
-    chunks pay for a corrective request.
-    """
-    if not isinstance(result, str):
-        return False, 0
-
-    has_completion = _COMPLETION_DELIMITER in result.upper()
-    valid_records = 0
-    malformed = False
-    records = result.replace(_COMPLETION_DELIMITER, "\n").replace(
-        _COMPLETION_DELIMITER.lower(), "\n"
-    )
-    for raw_line in records.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        fields = [field.strip() for field in line.split(_TUPLE_DELIMITER)]
-        record_type = fields[0].lower() if fields else ""
-        if record_type == "entity" and len(fields) == 4 and all(fields[1:]):
-            valid_records += 1
-        elif record_type in {"relation", "relationship"} and len(fields) == 5 and all(fields[1:]):
-            valid_records += 1
-        else:
-            malformed = True
-
-    return has_completion and not malformed, valid_records
+        settings = load_lightrag_settings()
+        profile_id = str(settings.get("llm_profile_id") or "").strip()
+        model_id = str(settings.get("llm_model_id") or "").strip()
+        if not profile_id and not model_id:
+            return None
+        if not profile_id or not model_id:
+            if strict:
+                raise ValueError("The LightRAG LLM selection is incomplete.")
+            logger.warning("Ignoring incomplete LightRAG LLM selection; using the active model")
+            return None
+        return {"profile_id": profile_id, "model_id": model_id}
+    except Exception:
+        if strict:
+            raise
+        logger.warning(
+            "Could not read LightRAG LLM selection; using the active model",
+            exc_info=True,
+        )
+        return None
 
 
-def build_llm_model_func(*, io_bridge: OwnerLoopBridge | None = None):
+def lightrag_llm_selection_from_settings() -> dict[str, str] | None:
+    """Return the released query-model selection with its fallback semantics."""
+    return _lightrag_llm_selection_from_settings(strict=False)
+
+
+def lightrag_indexing_selection_from_settings() -> dict[str, str] | None:
+    """Return the indexing default, rejecting unreadable or partial settings."""
+    return _lightrag_llm_selection_from_settings(strict=True)
+
+
+def resolve_lightrag_query_llm_config():
+    """Resolve the current LightRAG query model with the released fallback contract."""
+    from deeptutor.services.model_selection.runtime import resolve_llm_config_for_selection
+
+    selection = lightrag_llm_selection_from_settings()
+    try:
+        return resolve_llm_config_for_selection(selection)
+    except ValueError:
+        logger.warning(
+            "LightRAG LLM selection %s no longer exists in the catalog; using the active model",
+            selection,
+        )
+        return resolve_llm_config_for_selection(None)
+
+
+def build_llm_model_func(
+    *,
+    io_bridge: OwnerLoopBridge | None = None,
+    llm_config: LLMConfig | None = None,
+    owner: CurrentUser | None = None,
+):
     """Wrap DeepTutor's unified LLM callable for LightRAG.
 
     Drops LightRAG's internal kwargs while preserving explicit ``messages``.
-    Entity-extraction responses are format-checked and only malformed chunks
-    are retried, avoiding the cost of an unconditional gleaning pass.
     """
-    from deeptutor.services.llm import get_llm_client
+    if llm_config is None:
+        from deeptutor.services.llm import get_llm_client
 
-    base = get_llm_client().get_model_func()
+        base = get_llm_client().get_model_func()
+    else:
+        from deeptutor.services.llm.client import build_model_func_for_config
+
+        base = build_model_func_for_config(llm_config, allow_multimodal=False)
 
     async def llm_model_func(
         prompt="",
@@ -298,94 +275,94 @@ def build_llm_model_func(*, io_bridge: OwnerLoopBridge | None = None):
         messages=None,
         **_ignored,
     ):
-        async def request(
-            request_prompt: str,
-            request_history: list[dict[str, Any]],
-        ):
-            return await base(
-                request_prompt,
-                system_prompt=system_prompt,
-                history_messages=request_history,
-                messages=messages,
-                max_retries=0,
-                allow_image_fallback=False,
-            )
+        async def request():
+            async def complete():
+                return await base(
+                    prompt or "",
+                    system_prompt=system_prompt,
+                    history_messages=history_messages or [],
+                    messages=messages,
+                    max_retries=0,
+                    allow_image_fallback=False,
+                )
 
-        original_prompt = prompt or ""
-        original_history = list(history_messages or [])
+            if owner is None:
+                return await complete()
+            from deeptutor.multi_user.paths import user_context
 
-        async def run_request(request_prompt: str, request_history: list[dict[str, Any]]):
-            return await _run_adapter_with_retry(
-                lambda: request(request_prompt, request_history),
-                io_bridge=io_bridge,
-            )
+            with user_context(owner):
+                return await complete()
 
-        result = await run_request(original_prompt, original_history)
-        is_extraction = (
-            messages is None
-            and isinstance(system_prompt, str)
-            and _ENTITY_EXTRACTION_MARKER in system_prompt
-        )
-        if not is_extraction:
-            return result
-
-        parseable, valid_count = _entity_extraction_format_score(result)
-        if parseable:
-            return result
-
-        logger.warning(
-            "LightRAG entity extraction returned malformed output (%d valid records); "
-            "retrying this chunk once",
-            valid_count,
-        )
-        retry_history = [
-            *original_history,
-            {"role": "user", "content": original_prompt},
-            {"role": "assistant", "content": str(result)},
-        ]
-        repaired = await run_request(_FORMAT_RETRY_PROMPT, retry_history)
-        repaired_parseable, repaired_count = _entity_extraction_format_score(repaired)
-        if (repaired_parseable and repaired_count >= valid_count) or (repaired_count > valid_count):
-            return repaired
-        return result
+        return await _run_adapter_with_retry(request, io_bridge=io_bridge)
 
     return llm_model_func
 
 
-def build_vision_model_func(*, io_bridge: OwnerLoopBridge | None = None):
-    """Wrap DeepTutor's vision-capable callable for RAG-Anything's image step."""
-    from deeptutor.services.llm import get_llm_client
+def build_vision_model_func(
+    *,
+    io_bridge: OwnerLoopBridge | None = None,
+    llm_config: LLMConfig | None = None,
+    owner: CurrentUser | None = None,
+):
+    """Map rc2 ``image_inputs`` to DeepTutor's vision callable."""
+    if llm_config is None:
+        from deeptutor.services.llm import get_llm_client
 
-    base = get_llm_client().get_vision_model_func()
+        base = get_llm_client().get_vision_model_func()
+    else:
+        from deeptutor.services.llm.client import build_model_func_for_config
+
+        base = build_model_func_for_config(llm_config, allow_multimodal=True)
 
     async def vision_model_func(
         prompt="",
         system_prompt=None,
         history_messages=None,
-        image_data=None,
+        image_inputs=None,
         messages=None,
         **_ignored,
     ):
+        if not isinstance(image_inputs, list) or len(image_inputs) != 1:
+            raise ValueError("LightRAG vision requests must contain exactly one image input")
+        payload = image_inputs[0]
+        if not isinstance(payload, dict):
+            raise ValueError("LightRAG vision image input must be an object")
+        image_data = payload.get("base64")
+        if not isinstance(image_data, str) or not image_data.strip():
+            raise ValueError("LightRAG vision image input requires a non-empty base64 value")
+
         async def request():
-            return await base(
-                prompt or "",
-                system_prompt=system_prompt,
-                history_messages=history_messages or [],
-                image_data=image_data,
-                messages=messages,
-                max_retries=0,
-                # Never strip the image and answer anyway. The provider's
-                # stage-2 fallback exists to salvage a text answer from a model
-                # that turns out not to take images, but here the *whole point*
-                # of the call is the image: a description produced without it is
-                # invented, and it would be indexed as fact. Fail the image
-                # instead, and let the caller log and skip it.
-                allow_image_fallback=False,
-            )
+            async def complete():
+                return await base(
+                    prompt or "",
+                    system_prompt=system_prompt,
+                    history_messages=history_messages or [],
+                    image_data=image_data,
+                    messages=messages,
+                    max_retries=0,
+                    allow_image_fallback=False,
+                )
+
+            if owner is None:
+                return await complete()
+            from deeptutor.multi_user.paths import user_context
+
+            with user_context(owner):
+                return await complete()
 
         return await _run_adapter_with_retry(request, io_bridge=io_bridge)
 
     return vision_model_func
+
+
+def vision_model_available() -> bool:
+    """Return whether the active DeepTutor model is explicitly vision-capable."""
+    try:
+        from deeptutor.services.llm import get_llm_client
+
+        return bool(get_llm_client().supports_multimodal_images())
+    except Exception:
+        return False
 
 
 def build_embedding_func(*, io_bridge: OwnerLoopBridge | None = None):
@@ -439,8 +416,11 @@ __all__ = [
     "normalize_mode",
     "query_kwargs_from_settings",
     "indexing_kwargs_from_settings",
-    "lightrag_kwargs_from_settings",
+    "constructor_kwargs_from_settings",
+    "lightrag_llm_selection_from_settings",
+    "resolve_lightrag_query_llm_config",
     "build_llm_model_func",
     "build_vision_model_func",
+    "vision_model_available",
     "build_embedding_func",
 ]

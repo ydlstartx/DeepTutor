@@ -1,9 +1,15 @@
 "use client";
 
+import { BrandGlyph } from "@/components/common/BrandIcon";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { SidebarNav } from "@/components/sidebar/SidebarNav";
+import { SECONDARY_NAV } from "@/components/sidebar/nav-entries";
+import { mergeManualOrder, readSessionOrder, writeSessionOrder } from "@/lib/sidebar-layout";
+import type { MasteryTopicLabel } from "@/lib/learning-api";
+import type { ReadingCollectionLabel } from "@/lib/reading-workspace-api";
 import { createPortal } from "react-dom";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAppShell } from "@/context/AppShellContext";
 import {
   BookOpen,
@@ -54,83 +60,6 @@ import {
   normalizeSidebarWidth,
 } from "@/context/app-shell-storage";
 
-interface NavEntry {
-  href: string;
-  label: string;
-  icon: LucideIcon;
-  tooltipKey?: string;
-  /** Model capability this feature needs; locked when the user lacks it. */
-  requires?: Capability;
-}
-
-const PRIMARY_NAV: NavEntry[] = [
-  {
-    href: "/home",
-    label: "Home",
-    icon: House,
-    tooltipKey: "Home tooltip",
-    requires: "llm",
-  },
-  {
-    href: "/partners",
-    label: "Partners",
-    icon: HeartHandshake,
-    tooltipKey: "Partners tooltip",
-    requires: "llm",
-  },
-  {
-    // My Agents is its own top-level feature (pulled out of the Learning
-    // Space): connect a live local Claude Code / Codex to consult in chat,
-    // and manage imported agent conversations. Ungated — managing connections
-    // and imports needs no per-user model grant.
-    href: "/agents",
-    label: "My Agents",
-    icon: Bot,
-    tooltipKey: "Agents tooltip",
-  },
-  {
-    href: "/co-writer",
-    label: "Co-Writer",
-    icon: PenLine,
-    tooltipKey: "Co-Writer tooltip",
-    requires: "llm",
-  },
-  {
-    href: "/book",
-    label: "Book",
-    icon: Library,
-    tooltipKey: "Book tooltip",
-    requires: "llm",
-  },
-  {
-    href: "/space",
-    label: "Learning Space",
-    icon: LayoutGrid,
-    tooltipKey: "Space tooltip",
-  },
-];
-
-const SECONDARY_NAV: NavEntry[] = [
-  {
-    // Memory is its own top-level console (pulled out of the Learning Space):
-    // a place to inspect and curate the tutor's long-term memory, not a daily
-    // workspace. Never gated — memory has no per-user model requirement.
-    href: "/memory",
-    label: "Memory",
-    icon: Brain,
-    tooltipKey: "Memory tooltip",
-  },
-  {
-    // Knowledge Center sits just above Settings: it's a console for managing
-    // KBs and retrieval engines, not a daily workspace. Never gated — embedding
-    // / search are shared admin infrastructure, no per-user model grant needed.
-    href: "/knowledge",
-    label: "Knowledge Center",
-    icon: BookOpen,
-    tooltipKey: "Knowledge tooltip",
-  },
-  { href: "/settings", label: "Settings", icon: Settings },
-];
 const GITHUB_REPO_URL = "https://github.com/HKUDS/DeepTutor";
 const DOCS_URL = "https://deeptutor.info/";
 const FOLDER_MENU_WIDTH = 176;
@@ -170,6 +99,9 @@ interface SidebarShellProps {
   onRenameSession?: (sessionId: string, title: string) => void | Promise<void>;
   onDeleteSession?: (sessionId: string) => void | Promise<void>;
   courses?: StudyCourse[];
+  liveSessionIds?: ReadonlySet<string>;
+  masteryTopics?: MasteryTopicLabel[];
+  readingCollections?: ReadingCollectionLabel[];
   folders?: SessionFolder[];
   onOrganizeSession?: (
     sessionId: string,
@@ -203,6 +135,9 @@ export function SidebarShell({
   onRenameSession,
   onDeleteSession,
   courses = [],
+  liveSessionIds,
+  masteryTopics = [],
+  readingCollections = [],
   folders = [],
   onOrganizeSession,
   onCreateFolder,
@@ -214,7 +149,6 @@ export function SidebarShell({
   const pathname = usePathname();
   const router = useRouter();
   const { t } = useTranslation();
-  const { has } = useCapabilityAccess();
   const {
     sidebarCollapsed,
     setSidebarCollapsed: setCollapsed,
@@ -236,9 +170,6 @@ export function SidebarShell({
     drawer?.close();
   };
 
-  const navLocked = (item: NavEntry) =>
-    item.requires ? !has(item.requires) : false;
-  const lockedTooltip = t("Locked — contact your administrator to get access.");
   const renderedFooter =
     typeof footerSlot === "function" ? footerSlot(collapsed) : footerSlot;
   const [creatingFolder, setCreatingFolder] = useState(false);
@@ -306,6 +237,33 @@ export function SidebarShell({
     };
   }, [openFolderMenuId]);
 
+  const [sessionOrder, setSessionOrder] = useState<string[]>([]);
+  const sessionOrderRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    const stored = readSessionOrder();
+    sessionOrderRef.current = stored;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSessionOrder(stored);
+  }, []);
+
+  // A drag only ever speaks for the entries on screen, so it is merged into
+  // the stored order rather than replacing it.
+  const handleReorderSessions = useCallback((nextIds: string[]) => {
+    const merged = mergeManualOrder(sessionOrderRef.current, nextIds);
+    sessionOrderRef.current = merged;
+    setSessionOrder(merged);
+    writeSessionOrder(merged);
+  }, []);
+
+  const handleResetSessionOrder = useCallback(() => {
+    sessionOrderRef.current = [];
+    setSessionOrder([]);
+    writeSessionOrder([]);
+  }, []);
+
+  const recentsScrollRef = useRef<HTMLDivElement>(null);
+
   const handleHomeClick = (event: React.MouseEvent) => {
     // Always reset to a fresh session (mirrors the old "New Chat" affordance);
     // let modifier-clicks fall through to default Link behavior so middle-click
@@ -315,7 +273,7 @@ export function SidebarShell({
     event.preventDefault();
     drawer?.close();
     onNewChat?.();
-    router.push("/home");
+    router.push("/chat");
   };
 
   const startSidebarResize = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -382,7 +340,7 @@ export function SidebarShell({
   );
   const folderActionsEnabled = Boolean(onRenameFolder && onDeleteFolder);
   const { folderGroups: sidebarFolderGroups, recentSessions } =
-    buildSidebarSessionSections(sidebarSessions, folders);
+    buildSidebarSessionSections(sidebarSessions, folders, sidebarSessions.length);
 
   const handleCreateFolder = async () => {
     const name = newFolderName.trim();
@@ -490,61 +448,7 @@ export function SidebarShell({
         </div>
 
         {/* Primary nav */}
-        <nav className="mt-1 flex w-full flex-col items-center gap-1 px-1.5">
-          {PRIMARY_NAV.map((item) => {
-            const active = pathname.startsWith(item.href);
-            const locked = navLocked(item);
-            const description = locked
-              ? lockedTooltip
-              : item.tooltipKey
-                ? t(item.tooltipKey)
-                : undefined;
-            if (locked) {
-              return (
-                <Tooltip
-                  key={item.href}
-                  label={t(item.label)}
-                  description={description}
-                  side="right"
-                >
-                  <div
-                    aria-label={`${t(item.label)} — ${lockedTooltip}`}
-                    aria-disabled
-                    className="relative flex h-9 w-9 cursor-not-allowed items-center justify-center rounded-xl text-[var(--muted-foreground)]/40"
-                  >
-                    <item.icon size={18} strokeWidth={1.6} />
-                    <Lock
-                      size={10}
-                      strokeWidth={2}
-                      className="absolute bottom-1 right-1 text-[var(--muted-foreground)]/70"
-                    />
-                  </div>
-                </Tooltip>
-              );
-            }
-            return (
-              <Tooltip
-                key={item.href}
-                label={t(item.label)}
-                description={description}
-                side="right"
-              >
-                <Link
-                  href={item.href}
-                  onClick={item.href === "/home" ? handleHomeClick : undefined}
-                  aria-label={t(item.label)}
-                  className={`relative flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-150 ${
-                    active
-                      ? "bg-[var(--accent)] text-[var(--foreground)] shadow-sm"
-                      : "text-[var(--foreground)]/85 hover:bg-[var(--background)]/60 hover:text-[var(--foreground)]"
-                  }`}
-                >
-                  <item.icon size={18} strokeWidth={active ? 2 : 1.6} />
-                </Link>
-              </Tooltip>
-            );
-          })}
-        </nav>
+        <SidebarNav collapsed={true} onHomeClick={handleHomeClick} onNavigate={closeDrawerOnNav} />
 
         <div className="flex-1" />
 
@@ -577,7 +481,7 @@ export function SidebarShell({
             aria-label={t("Docs") as string}
             className="mt-1 flex h-9 w-9 items-center justify-center rounded-xl text-[var(--muted-foreground)]/70 transition-colors hover:bg-[var(--background)]/50 hover:text-[var(--foreground)]"
           >
-            <BookText size={15} strokeWidth={1.6} />
+            <BookText size={15} strokeWidth={1.6} className="text-blue-600 dark:text-blue-400" />
           </a>
           <a
             href={GITHUB_REPO_URL}
@@ -587,7 +491,7 @@ export function SidebarShell({
             aria-label="GitHub"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--muted-foreground)]/70 transition-colors hover:bg-[var(--background)]/50 hover:text-[var(--foreground)]"
           >
-            <Github size={15} strokeWidth={1.6} />
+            <BrandGlyph namespace="mcp" id="github" size={15} />
           </a>
           <VersionBadge collapsed />
         </div>
@@ -648,56 +552,12 @@ export function SidebarShell({
       </div>
 
       {/* Primary nav */}
-      <nav className="px-2 pt-1">
-        <div className="space-y-px">
-          {PRIMARY_NAV.map((item) => {
-            const active = pathname.startsWith(item.href);
-            const locked = navLocked(item);
-            if (locked) {
-              return (
-                <Tooltip
-                  key={item.href}
-                  label={t(item.label)}
-                  description={lockedTooltip}
-                  side="right"
-                >
-                  <div
-                    aria-label={`${t(item.label)} — ${lockedTooltip}`}
-                    aria-disabled
-                    className="flex cursor-not-allowed items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] text-[var(--muted-foreground)]/40"
-                  >
-                    <item.icon size={16} strokeWidth={1.5} />
-                    <span>{t(item.label)}</span>
-                    <Lock size={13} strokeWidth={1.8} className="ml-auto" />
-                  </div>
-                </Tooltip>
-              );
-            }
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={
-                  item.href === "/home" ? handleHomeClick : closeDrawerOnNav
-                }
-                className={`flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13.5px] transition-colors ${
-                  active
-                    ? "bg-[var(--accent)] font-medium text-[var(--foreground)]"
-                    : "text-[var(--foreground)]/85 hover:bg-[var(--background)]/60 hover:text-[var(--foreground)]"
-                }`}
-              >
-                <item.icon size={16} strokeWidth={active ? 1.9 : 1.5} />
-                <span>{t(item.label)}</span>
-              </Link>
-            );
-          })}
-        </div>
-      </nav>
+      <SidebarNav collapsed={false} onHomeClick={handleHomeClick} onNavigate={closeDrawerOnNav} />
 
       {/* Chat history — its own region below the nav, takes remaining height */}
       {showSessions && onSelectSession && onRenameSession && onDeleteSession ? (
         <section className="mt-4 flex min-h-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+          <div ref={recentsScrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
             <div className="flex items-center px-2 py-1 text-[11.5px] font-normal text-[var(--muted-foreground)]/60">
               <span className="min-w-0 flex-1">{t("Chat folders")}</span>
               {onCreateFolder ? (
@@ -933,6 +793,13 @@ export function SidebarShell({
                         group.sessions.length > 0 ? (
                           <div className="pl-5">
                             <OrganizedSessionList
+                              masteryTopics={masteryTopics}
+                              readingCollections={readingCollections}
+                              liveSessionIds={liveSessionIds}
+                              manualOrder={sessionOrder}
+                              onReorder={handleReorderSessions}
+                              onResetOrder={handleResetSessionOrder}
+                              scrollRef={recentsScrollRef}
                               sessions={group.sessions}
                               courses={courses}
                               activeSessionId={activeSessionId}
@@ -974,6 +841,13 @@ export function SidebarShell({
               />
             ) : onOrganizeSession && folderManagementEnabled ? (
               <OrganizedSessionList
+                              masteryTopics={masteryTopics}
+                              readingCollections={readingCollections}
+                              liveSessionIds={liveSessionIds}
+                              manualOrder={sessionOrder}
+                              onReorder={handleReorderSessions}
+                              onResetOrder={handleResetSessionOrder}
+                              scrollRef={recentsScrollRef}
                 sessions={recentSessions}
                 courses={courses}
                 activeSessionId={activeSessionId}
@@ -989,7 +863,14 @@ export function SidebarShell({
               />
             ) : onOrganizeSession ? (
               <OrganizedSessionList
-                sessions={sidebarSessions.slice(0, 8)}
+                              masteryTopics={masteryTopics}
+                              readingCollections={readingCollections}
+                              liveSessionIds={liveSessionIds}
+                              manualOrder={sessionOrder}
+                              onReorder={handleReorderSessions}
+                              onResetOrder={handleResetSessionOrder}
+                              scrollRef={recentsScrollRef}
+                sessions={sidebarSessions}
                 courses={courses}
                 activeSessionId={activeSessionId}
                 onSelect={(sessionId) => {
@@ -1002,7 +883,7 @@ export function SidebarShell({
               />
             ) : (
               <SessionList
-                sessions={sidebarSessions.slice(0, 8)}
+                sessions={sidebarSessions}
                 activeSessionId={activeSessionId}
                 onSelect={(sessionId) => {
                   drawer?.close();
@@ -1064,7 +945,7 @@ export function SidebarShell({
             aria-label="GitHub"
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)]/55 transition-colors hover:bg-[var(--background)]/50 hover:text-[var(--muted-foreground)]"
           >
-            <Github size={13} strokeWidth={1.7} />
+            <BrandGlyph namespace="mcp" id="github" size={15} />
           </a>
         </div>
       </div>

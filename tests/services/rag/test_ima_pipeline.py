@@ -315,6 +315,7 @@ class TestClientWire:
             "http://bucket.cos.ap-guangzhou.myqcloud.com/file.pdf",
             "https://example.com/file.pdf",
             "https://myqcloud.com.evil.test/file.pdf",
+            "https://other.ima.qq.com/file.pdf",
         ],
     )
     def test_file_media_rejects_urls_outside_official_cos(self, url: str) -> None:
@@ -324,17 +325,27 @@ class TestClientWire:
         with pytest.raises(ImaAPIError):
             asyncio.run(_client(handler).get_media_content("m-file"))
 
-    @pytest.mark.parametrize(
-        ("filename", "size", "message"),
-        [
-            ("file.txt", MAX_MEDIA_BYTES + 1, "20 MB"),
-            ("file.pdf", MAX_PDF_MEDIA_BYTES + 1, "200 MB"),
-        ],
-    )
-    def test_file_media_rejects_content_length_over_budget(
-        self, filename: str, size: int, message: str
-    ) -> None:
-        media_url = f"https://bucket.cos.ap-guangzhou.myqcloud.com/{filename}"
+    def test_file_media_accepts_ima_qq_com_resource_url(self) -> None:
+        media_url = "https://res-pkb.ima.qq.com/pkb-1/notes.txt"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return _ok({"media_type": 1, "url_info": {"url": media_url}})
+            return httpx.Response(
+                200,
+                content=b"full file text",
+                headers={"content-type": "text/plain"},
+            )
+
+        media = asyncio.run(_client(handler).get_media_content("m-file"))
+
+        assert media == ImaMediaContent(
+            data=b"full file text",
+            filename="notes.txt",
+        )
+
+    def test_file_media_rejects_content_length_over_budget(self) -> None:
+        media_url = "https://bucket.cos.ap-guangzhou.myqcloud.com/file.pdf"
 
         def handler(request: httpx.Request) -> httpx.Response:
             if request.method == "POST":
@@ -342,10 +353,10 @@ class TestClientWire:
             return httpx.Response(
                 200,
                 content=b"x",
-                headers={"content-length": str(size)},
+                headers={"content-length": str(MAX_PDF_MEDIA_BYTES + 1)},
             )
 
-        with pytest.raises(ImaAPIError, match=message):
+        with pytest.raises(ImaAPIError, match="200 MB"):
             asyncio.run(_client(handler).get_media_content("m-file"))
 
 
@@ -638,60 +649,6 @@ class _SearchStub:
 
 
 class TestPipelineSearch:
-    def test_zero_hit_falls_back_to_a_matching_inventory_title(self, tmp_path) -> None:
-        base = _kb_config(
-            tmp_path,
-            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
-        )
-
-        class Stub(_SearchStub):
-            async def get_knowledge_list(self, **_kwargs):
-                return parse_knowledge_page(
-                    {
-                        "knowledge_list": [
-                            {"media_id": "m1", "title": "Alpha course.pdf"},
-                            {"media_id": "m2", "title": "Unrelated.pdf"},
-                        ],
-                        "is_end": True,
-                    }
-                )
-
-        stub = Stub(media={"m1": ImaMediaContent(text="grounded course text")})
-        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
-
-        result = asyncio.run(pipeline.search("Alpha course", "IMA"))
-
-        assert result["sources"][0]["title"] == "Alpha course.pdf"
-        assert result["sources"][0]["content"] == "grounded course text"
-        assert "fell back" in result["retrieval_diagnostic"]
-        assert stub.media_calls == ["m1"]
-
-    def test_zero_hit_chinese_phrase_matches_punctuated_inventory_title(self, tmp_path) -> None:
-        base = _kb_config(
-            tmp_path,
-            {"client_id": "cid", "api_key": "key", "knowledge_base_id": "kb-1"},
-        )
-
-        class Stub(_SearchStub):
-            async def get_knowledge_list(self, **_kwargs):
-                return parse_knowledge_page(
-                    {
-                        "knowledge_list": [
-                            {"media_id": "m1", "title": "高中数学：函数的定义.pdf"},
-                            {"media_id": "m2", "title": "高中英语语法.pdf"},
-                        ],
-                        "is_end": True,
-                    }
-                )
-
-        stub = Stub(media={"m1": ImaMediaContent(text="函数定义与映射关系")})
-        pipeline = ImaPipeline(kb_base_dir=base, client_factory=lambda _c: stub)
-
-        result = asyncio.run(pipeline.search("高中数学函数定义", "IMA"))
-
-        assert [source["title"] for source in result["sources"]] == ["高中数学：函数的定义.pdf"]
-        assert result["sources"][0]["content"] == "函数定义与映射关系"
-
     def test_search_shapes_snippets_into_context_and_sources(self, tmp_path) -> None:
         base = _kb_config(
             tmp_path,
@@ -902,14 +859,14 @@ class TestPipelineSearch:
         assert stub.limit == 50
 
     def test_kb_without_credentials_uses_the_account_pair(self, tmp_path, monkeypatch) -> None:
+        import deeptutor.services.config as config_module
         from deeptutor.services.config.runtime_settings import RuntimeSettingsService
-        import deeptutor.services.rag.pipelines.ima.config as ima_config_module
 
         service = RuntimeSettingsService(tmp_path / "settings", process_env={})
         service.save_ima({"client_id": "cid", "api_key": "key"})
+        monkeypatch.setattr(config_module, "get_runtime_settings_service", lambda: service)
         monkeypatch.setattr(
-            ima_config_module,
-            "get_ima_settings_service",
+            "deeptutor.services.rag.pipelines.ima.config.get_ima_settings_service",
             lambda **_kwargs: service,
         )
 

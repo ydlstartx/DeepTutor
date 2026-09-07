@@ -106,7 +106,7 @@ RUN pip install --upgrade pip && \
 FROM python-common AS python-full
 RUN python -c "import pathlib,tomllib; p=tomllib.loads(pathlib.Path('pyproject.toml').read_text()); pathlib.Path('/tmp/rag-lightrag.txt').write_text('\\n'.join(p['project']['optional-dependencies']['rag-lightrag'])+'\\n')" && \
     pip install -r /tmp/rag-lightrag.txt && \
-    python -c "import lightrag, raganything; print('LightRAG indexing runtime import: OK')"
+    python -c "import lightrag; print('LightRAG indexing runtime import: OK')"
 
 # Cloud query runtime: opens the same LightRAG stores directly, without the
 # unused RAG-Anything -> MinerU -> PyTorch/CUDA dependency chain.
@@ -134,7 +134,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES=1
 
 # Code-execution sandbox: the restricted-subprocess backend (which the office
-# skills — docx/pdf/pptx/xlsx — rely on for `exec` / `code_execution`) is
+# skills — docx/pdf/pptx/xlsx — rely on for `exec`) is
 # enabled by default via the `sandbox_allow_subprocess` runtime setting
 # (system.json, default on), exported to DEEPTUTOR_SANDBOX_ALLOW_SUBPROCESS at
 # startup. No hardcoded ENV here — that would override the setting and block
@@ -191,7 +191,7 @@ RUN mkdir -p \
     data/user/workspace/chat/deep_question \
     data/user/workspace/chat/deep_research/reports \
     data/user/workspace/chat/math_animator \
-    data/user/workspace/chat/_detached_code_execution \
+    data/user/workspace/chat/_detached_exec \
     data/user/logs \
     data/knowledge_bases \
     data/upload
@@ -275,6 +275,7 @@ set -e
 
 BACKEND_PORT=${BACKEND_PORT:-8001}
 BACKEND_HOST=${BACKEND_HOST:-0.0.0.0}
+BACKEND_WORKERS=${BACKEND_WORKERS:-1}
 
 echo "[Backend]  🚀 Starting FastAPI backend on ${BACKEND_HOST}:${BACKEND_PORT}..."
 
@@ -297,7 +298,7 @@ echo "[Backend]  🚀 Starting FastAPI backend on ${BACKEND_HOST}:${BACKEND_PORT
 # reaper so the client is the only side retiring idle connections.
 WS_MAX_SIZE=$(python -c "from deeptutor.services.config import get_ws_max_size; print(get_ws_max_size())" 2>/dev/null || echo 16777216)
 KEEP_ALIVE=$(python -c "from deeptutor.services.config import HTTP_KEEP_ALIVE_TIMEOUT; print(HTTP_KEEP_ALIVE_TIMEOUT)" 2>/dev/null || echo 300)
-exec python -m uvicorn deeptutor.api.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT} --no-access-log --ws-max-size ${WS_MAX_SIZE} --timeout-keep-alive ${KEEP_ALIVE}
+exec python -m uvicorn deeptutor.api.main:app --host ${BACKEND_HOST} --port ${BACKEND_PORT} --workers ${BACKEND_WORKERS} --no-access-log --ws-max-size ${WS_MAX_SIZE} --timeout-keep-alive ${KEEP_ALIVE}
 EOF
 
 RUN sed -i 's/\r$//' /app/start-backend.sh && chmod +x /app/start-backend.sh
@@ -338,6 +339,8 @@ export DEEPTUTOR_IGNORE_PROCESS_ENV_OVERRIDES=1
 # data/user/settings/*.json below.
 for key in \
     BACKEND_PORT \
+    BACKEND_WORKERS \
+    DEEPTUTOR_BACKEND_WORKERS \
     FRONTEND_PORT \
     NEXT_PUBLIC_API_BASE_EXTERNAL \
     NEXT_PUBLIC_API_BASE \
@@ -468,7 +471,7 @@ try:
 except Exception:
     pass
 
-urllib.request.urlopen(f"http://localhost:{port}/", timeout=5).close()
+urllib.request.urlopen(f"http://localhost:{port}/health/ready", timeout=5).close()
 EOF
 
 # Expose ports

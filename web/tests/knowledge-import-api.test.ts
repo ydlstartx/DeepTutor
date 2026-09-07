@@ -5,7 +5,7 @@ import {
   importExistingKnowledgeBase,
   listKnowledgeImportFolders,
   probeKnowledgeImportFolder,
-} from "../lib/knowledge-api";
+} from "../features/knowledge/api/client";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -72,7 +72,7 @@ test("knowledge import API uses only upload-relative paths", async () => {
       name: "High school",
     });
 
-    assert.equal(calls[0].input, "/api/v1/knowledge/import/folders?path=courses");
+    assert.equal(calls[0].input, "/api/knowledge-bases/import/folders?path=courses");
     assert.deepEqual(calls[1].body, { path: "courses/high-school" });
     assert.deepEqual(calls[2].body, {
       path: "courses/high-school",

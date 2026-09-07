@@ -15,6 +15,7 @@ pre-commit>=3.0.0
 # safety dropped (mirrors pyproject.toml): 2.x pins packaging<22, breaking wheel/lancedb;
 # 3.x was already replaced by pip-audit in .pre-commit-config.yaml.
 bandit>=1.8.0
+import-linter>=2.1.0,<3.0.0
 
 # --- Test fixture builders for document-loader tests ---
 # These are also pulled by cli.txt at runtime; keep explicit here so dev/test

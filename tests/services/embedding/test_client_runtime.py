@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from typing import Any
 
 import pytest
@@ -40,18 +39,12 @@ class _FakeAdapter:
         )()
 
 
-def _reset_global_spacing_throttle() -> None:
-    EmbeddingClient._spacing_lock = threading.Lock()
-    EmbeddingClient._last_request_monotonic = 0.0
-
-
 def _build_config(
     binding: str,
     *,
     model: str = "text-embedding-3-small",
     base_url: str = "https://api.openai.com/v1/embeddings",
     send_dimensions: bool | None = None,
-    batch_size: int = 2,
 ) -> EmbeddingConfig:
     return EmbeddingConfig(
         model=model,
@@ -63,97 +56,9 @@ def _build_config(
         provider_mode="standard",
         dim=8,
         send_dimensions=send_dimensions,
-        batch_size=batch_size,
+        batch_size=2,
         request_timeout=30,
     )
-
-
-@pytest.mark.asyncio
-async def test_embedding_throttle_wait_does_not_block_owner_event_loop(monkeypatch) -> None:
-    """A bridged LightRAG burst must not freeze HTTP/timeouts on its owner loop."""
-    first_started = threading.Event()
-    release_first = threading.Event()
-    thread_errors: list[BaseException] = []
-
-    class _HoldingAdapter(_FakeAdapter):
-        async def embed(self, request):
-            self.calls.append(request)
-            if request.texts == ["first"]:
-                first_started.set()
-                release_first.wait(timeout=2.0)
-            return type("Resp", (), {"embeddings": [[0.1] * 8 for _ in request.texts]})()
-
-    _FakeAdapter.instances = []
-    _reset_global_spacing_throttle()
-    monkeypatch.setattr(
-        "deeptutor.services.embedding.client._resolve_adapter_class", lambda _b: _HoldingAdapter
-    )
-    client = EmbeddingClient(_build_config("openai"))
-
-    def run_first_request() -> None:
-        try:
-            asyncio.run(client.embed(["first"]))
-        except BaseException as exc:  # pragma: no cover - asserted below
-            thread_errors.append(exc)
-
-    first_thread = threading.Thread(target=run_first_request)
-    first_thread.start()
-    assert await asyncio.to_thread(first_started.wait, 1.0)
-
-    timer = threading.Timer(0.2, release_first.set)
-    timer.start()
-    second = asyncio.create_task(client.embed(["second"]))
-    started = time.monotonic()
-    await asyncio.sleep(0.03)
-
-    assert time.monotonic() - started < 0.1
-    assert second.done() is False
-    assert [call.texts for call in client.adapter.calls] == [["first"]]
-
-    await asyncio.wait_for(second, timeout=1.0)
-    await asyncio.to_thread(first_thread.join, 1.0)
-    timer.join(timeout=1.0)
-    assert first_thread.is_alive() is False
-    assert thread_errors == []
-    assert [call.texts for call in client.adapter.calls] == [["first"], ["second"]]
-
-
-@pytest.mark.asyncio
-async def test_cancelled_embedding_throttle_wait_does_not_leak_lock(monkeypatch) -> None:
-    first_started = threading.Event()
-    release_first = threading.Event()
-
-    class _HoldingAdapter(_FakeAdapter):
-        async def embed(self, request):
-            self.calls.append(request)
-            if request.texts == ["first"]:
-                first_started.set()
-                release_first.wait(timeout=2.0)
-            return type("Resp", (), {"embeddings": [[0.1] * 8 for _ in request.texts]})()
-
-    _FakeAdapter.instances = []
-    _reset_global_spacing_throttle()
-    monkeypatch.setattr(
-        "deeptutor.services.embedding.client._resolve_adapter_class", lambda _b: _HoldingAdapter
-    )
-    client = EmbeddingClient(_build_config("openai"))
-
-    first_thread = threading.Thread(target=lambda: asyncio.run(client.embed(["first"])))
-    first_thread.start()
-    assert await asyncio.to_thread(first_started.wait, 1.0)
-
-    cancelled_waiter = asyncio.create_task(client.embed(["cancelled"]))
-    await asyncio.sleep(0.03)
-    cancelled_waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await cancelled_waiter
-
-    release_first.set()
-    await asyncio.to_thread(first_thread.join, 1.0)
-    assert first_thread.is_alive() is False
-
-    await asyncio.wait_for(client.embed(["third"]), timeout=1.0)
-    assert [call.texts for call in client.adapter.calls] == [["first"], ["third"]]
 
 
 @pytest.mark.asyncio
@@ -173,103 +78,63 @@ async def test_embedding_client_batches_requests(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_multimodal_embedding_uses_model_batch_cap_before_first_request(
+async def test_embedding_client_serializes_concurrent_calls_without_blocking_loop(
     monkeypatch,
 ) -> None:
-    class _CappedMultimodalAdapter(_FakeAdapter):
-        def get_model_info(self):
-            return {"multimodal": True, "max_multimodal_batch_items": 10}
+    class _NonBlockingOnlyLock:
+        def __init__(self) -> None:
+            self._lock = threading.Lock()
+
+        def acquire(self, blocking: bool = True) -> bool:
+            if blocking:
+                raise AssertionError("embedding spacing lock must not block the event loop")
+            return self._lock.acquire(blocking=False)
+
+        def release(self) -> None:
+            self._lock.release()
+
+    class _ConcurrentAdapter(_FakeAdapter):
+        in_flight = 0
+        max_in_flight = 0
 
         async def embed(self, request):
-            self.calls.append(request)
-            return type(
-                "Resp",
-                (),
-                {"embeddings": [[float(i), 0.0] for i, _ in enumerate(request.contents or [])]},
-            )()
+            type(self).in_flight += 1
+            type(self).max_in_flight = max(type(self).max_in_flight, type(self).in_flight)
+            try:
+                await asyncio.sleep(0.02)
+                return await super().embed(request)
+            finally:
+                type(self).in_flight -= 1
 
     _FakeAdapter.instances = []
     monkeypatch.setattr(
         "deeptutor.services.embedding.client._resolve_adapter_class",
-        lambda _b: _CappedMultimodalAdapter,
+        lambda _b: _ConcurrentAdapter,
     )
-    client = EmbeddingClient(_build_config("aliyun", model="qwen3-vl-embedding", batch_size=20))
+    monkeypatch.setattr(EmbeddingClient, "_spacing_lock", _NonBlockingOnlyLock())
+    monkeypatch.setattr(EmbeddingClient, "_last_request_monotonic", 0.0)
+    _ConcurrentAdapter.in_flight = 0
+    _ConcurrentAdapter.max_in_flight = 0
+    client = EmbeddingClient(_build_config("openai"))
 
-    vectors = await client.embed_contents([{"image": f"image-{i}"} for i in range(25)])
+    heartbeat = asyncio.Event()
 
-    assert len(vectors) == 25
-    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [10, 10, 5]
+    async def mark_loop_responsive() -> None:
+        await asyncio.sleep(0)
+        heartbeat.set()
 
-
-@pytest.mark.asyncio
-async def test_multimodal_embedding_learns_explicit_provider_limit_and_retries_failed_slice(
-    monkeypatch,
-) -> None:
-    class _AdaptiveMultimodalAdapter(_FakeAdapter):
-        def get_model_info(self):
-            return {"multimodal": True}
-
-        async def embed(self, request):
-            self.calls.append(request)
-            items = request.contents or []
-            if len(items) > 10:
-                raise RuntimeError(
-                    "status=400, code=InvalidParameter, "
-                    "message=image batch size can should be [1, 10]"
-                )
-            return type(
-                "Resp",
-                (),
-                {"embeddings": [[float(i), 0.0] for i, _ in enumerate(items)]},
-            )()
-
-    _FakeAdapter.instances = []
-    monkeypatch.setattr(
-        "deeptutor.services.embedding.client._resolve_adapter_class",
-        lambda _b: _AdaptiveMultimodalAdapter,
+    first, second, _ = await asyncio.wait_for(
+        asyncio.gather(
+            client.embed(["first"]),
+            client.embed(["second"]),
+            mark_loop_responsive(),
+        ),
+        timeout=1.0,
     )
-    client = EmbeddingClient(_build_config("aliyun", model="future-vl-embedding", batch_size=20))
 
-    vectors = await client.embed_contents([{"image": f"image-{i}"} for i in range(25)])
-    second_vectors = await client.embed_contents([{"image": f"next-{i}"} for i in range(12)])
-
-    assert len(vectors) == 25
-    assert len(second_vectors) == 12
-    # The first request discovers the cap. Only that slice is retried, and the
-    # next call on the same model starts at the learned size instead of failing.
-    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [
-        20,
-        10,
-        10,
-        5,
-        10,
-        2,
-    ]
-
-
-@pytest.mark.asyncio
-async def test_multimodal_embedding_does_not_shrink_unrelated_provider_errors(
-    monkeypatch,
-) -> None:
-    class _AuthFailureAdapter(_FakeAdapter):
-        def get_model_info(self):
-            return {"multimodal": True}
-
-        async def embed(self, request):
-            self.calls.append(request)
-            raise RuntimeError("status=401, code=InvalidApiKey")
-
-    _FakeAdapter.instances = []
-    monkeypatch.setattr(
-        "deeptutor.services.embedding.client._resolve_adapter_class",
-        lambda _b: _AuthFailureAdapter,
-    )
-    client = EmbeddingClient(_build_config("aliyun", model="future-vl-embedding", batch_size=20))
-
-    with pytest.raises(RuntimeError, match="InvalidApiKey"):
-        await client.embed_contents([{"image": f"image-{i}"} for i in range(20)])
-
-    assert [len(call.contents or []) for call in _FakeAdapter.instances[0].calls] == [20]
+    assert heartbeat.is_set()
+    assert len(first) == len(second) == 1
+    assert _ConcurrentAdapter.max_in_flight == 1
 
 
 @pytest.mark.asyncio

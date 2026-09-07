@@ -25,7 +25,7 @@ test("password APIs send credentials only to their scoped endpoints", async () =
 
     assert.deepEqual(calls, [
       {
-        url: "/api/v1/auth/profile/password",
+        url: "/api/auth/profile/password",
         method: "PUT",
         body: {
           current_password: "current-secret",
@@ -33,7 +33,7 @@ test("password APIs send credentials only to their scoped endpoints", async () =
         },
       },
       {
-        url: "/api/v1/auth/users/student%40example.com/password",
+        url: "/api/auth/users/student%40example.com/password",
         method: "PUT",
         body: { new_password: "reset-secret-1234" },
       },

@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 import logging
-import re
-import threading
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, List, Optional
 
 from deeptutor.services.config.embedding_endpoint import (
     redact_embedding_endpoint_for_display,
@@ -21,58 +17,6 @@ from deeptutor.services.config.provider_runtime import (
 from .adapters import ADAPTER_BACKENDS, BaseEmbeddingAdapter, EmbeddingRequest
 from .config import EmbeddingConfig, get_embedding_config
 from .validation import validate_embedding_batch
-
-# Reusable executor for sync embedding calls made from inside a running event
-# loop (embed_sync submits asyncio.run to a worker thread).
-_sync_embed_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-# One waiter thread is enough: the spacing lock deliberately serializes provider
-# requests process-wide, including callers that run on different event loops.
-# Acquiring it here keeps that wait off every caller's event-loop thread.
-_spacing_lock_wait_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-
-_BATCH_RANGE_PATTERN = re.compile(
-    r"(?:image\s+)?batch(?:[_\s-]*size)?[^\n]{0,80}?"
-    r"\[\s*\d+\s*,\s*(\d+)\s*\]",
-    re.IGNORECASE,
-)
-_BATCH_MAX_PATTERN = re.compile(
-    r"(?:image\s+)?batch(?:[_\s-]*size)?[^\n]{0,80}?"
-    r"(?:max(?:imum)?|at\s+most|no\s+more\s+than)\D{0,16}(\d+)",
-    re.IGNORECASE,
-)
-_HTTP_413_PATTERN = re.compile(
-    r"(?:status(?:[_\s-]*code)?\s*[:=]\s*413\b|http(?:\s+status)?\s+413\b)",
-    re.IGNORECASE,
-)
-
-
-def _batch_limit_from_error(exc: Exception) -> int | None:
-    """Extract an explicit provider batch limit without adapting unrelated 4xx errors."""
-    message = str(exc)
-    for pattern in (_BATCH_RANGE_PATTERN, _BATCH_MAX_PATTERN):
-        match = pattern.search(message)
-        if match:
-            limit = int(match.group(1))
-            return limit if limit > 0 else None
-    return None
-
-
-def _is_adaptable_batch_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    if _batch_limit_from_error(exc) is not None:
-        return True
-    return (
-        _HTTP_413_PATTERN.search(message) is not None
-        or "payload too large" in message
-        or "too many" in message
-        and ("batch" in message or "input" in message)
-    )
-
-
-@contextmanager
-def _sync_embed_executor() -> Iterator[concurrent.futures.ThreadPoolExecutor]:
-    yield _sync_embed_executor_pool
 
 
 def _resolve_adapter_class(binding: str) -> type[BaseEmbeddingAdapter]:
@@ -94,54 +38,43 @@ def _resolve_adapter_class(binding: str) -> type[BaseEmbeddingAdapter]:
 class EmbeddingClient:
     """Unified embedding client for RAG and retrieval services."""
 
-    # Global request throttle: LlamaIndex can call from multiple threads/loops,
-    # while LightRAG bridges requests back onto the API owner loop. A threading
-    # lock preserves cross-loop serialization, but its potentially-blocking
-    # acquire must run on the dedicated waiter thread above, never on an event
-    # loop that serves HTTP, timeouts, or cancellation.
-    _spacing_lock: Any = threading.Lock()
+    # 全局发帖节流：KB reindex 时 LlamaIndex 用线程池并发调 embedding，
+    # 每个线程经 _run_in_new_loop 跑独立 event loop——asyncio.Lock 绑定
+    # 创建时的 loop，跨 loop 既不互斥还会挂死。必须用线程级锁。
+    _spacing_lock: Any = None
     _last_request_monotonic: float = 0.0
+    _thread_guard: Any = None
 
     @classmethod
     def _global_spacing_lock(cls):
+        import threading
+
+        if cls._spacing_lock is None:
+            cls._thread_guard = threading.Lock()
+            with cls._thread_guard:
+                if cls._spacing_lock is None:
+                    from threading import Lock as _TLock
+
+                    cls._spacing_lock = _TLock()
         return cls._spacing_lock
 
-    @classmethod
-    async def _hold_spacing_lock(cls):
-        """Acquire the cross-loop throttle without blocking the caller's loop.
+    @staticmethod
+    @asynccontextmanager
+    async def _hold_spacing_lock():
+        """Acquire the cross-thread lock without blocking the current loop."""
+        import asyncio
 
-        Cancellation cannot abandon an acquisition that is already running in
-        the waiter thread: once it eventually acquires the lock, the callback
-        releases it so later embedding requests are not stranded.
-        """
-        lock = cls._global_spacing_lock()
-        acquisition = _spacing_lock_wait_executor_pool.submit(lock.acquire)
-
-        def release_abandoned_acquisition(done: concurrent.futures.Future[bool]) -> None:
-            if done.cancelled():
-                return
-            try:
-                acquired = done.result()
-            except BaseException:
-                return
-            if acquired:
-                lock.release()
-
+        lock = EmbeddingClient._global_spacing_lock()
+        while not lock.acquire(blocking=False):
+            await asyncio.sleep(0.05)
         try:
-            acquired = await asyncio.wrap_future(acquisition)
-        except BaseException:
-            acquisition.add_done_callback(release_abandoned_acquisition)
-            raise
-        if not acquired:  # pragma: no cover - threading.Lock.acquire() returns True
-            raise RuntimeError("Failed to acquire embedding request throttle")
-        return lock
+            yield
+        finally:
+            lock.release()
 
     def __init__(self, config: Optional[EmbeddingConfig] = None):
         self.config = config or get_embedding_config()
         self.logger = logging.getLogger(__name__)
-        # The client is recreated when its immutable model config changes, so
-        # an instance-local learned cap is automatically model-specific.
-        self._learned_multimodal_batch_size: int | None = None
         endpoint = self.config.effective_url or self.config.base_url
         problem = embedding_endpoint_validation_error(self.config.binding, endpoint)
         if problem:
@@ -185,6 +118,8 @@ class EmbeddingClient:
         # silently invalidate the indexes built from it.
         role = input_type if getattr(self.adapter, "SUPPORTS_INPUT_TYPE", False) else None
 
+        import asyncio
+
         # Clamp configured batch size against the provider's per-request item
         # cap. SiliconFlow Qwen3 family caps at 32; DashScope at 20; others
         # have generous defaults. Without this clamp, indexing a doc with many
@@ -211,22 +146,18 @@ class EmbeddingClient:
                 input_type=role,
             )
             try:
-                # Serialize provider requests across threads/event loops without
-                # ever blocking an event-loop thread while another request owns
-                # the process-wide throttle.
+                # 全局发帖节流：线程级锁串行化"等待间隔+发帖"，跨线程/跨
+                # event loop 互斥（asyncio 锁在新 loop 模型下失效的教训）。
+                # 非阻塞轮询避免同一 loop 内的并发调用在 acquire() 上互锁。
                 from time import monotonic as _mono
 
-                _lock = await EmbeddingClient._hold_spacing_lock()
-                try:
-                    delay = self.config.batch_delay
-                    if delay > 0:
+                async with EmbeddingClient._hold_spacing_lock():
+                    if batch_delay > 0:
                         elapsed = _mono() - EmbeddingClient._last_request_monotonic
-                        if elapsed < delay:
-                            await asyncio.sleep(delay - elapsed)
+                        if elapsed < batch_delay:
+                            await asyncio.sleep(batch_delay - elapsed)
                     EmbeddingClient._last_request_monotonic = _mono()
                     response = await self.adapter.embed(request)
-                finally:
-                    _lock.release()
             except Exception as exc:
                 # Capture batch context so the task log stream / KB diagnostics
                 # show actionable info instead of a bare exception string.
@@ -317,43 +248,11 @@ class EmbeddingClient:
 
         spec = EMBEDDING_PROVIDERS.get(self.config.binding)
         provider_max = spec.max_batch_items if spec else 256
-        model_max: int | None = None
-        try:
-            raw_model_max = self.adapter.get_model_info().get("max_multimodal_batch_items")
-            if raw_model_max is not None:
-                model_max = max(1, int(raw_model_max))
-        except (AttributeError, TypeError, ValueError):
-            model_max = None
-        batch_size = max(
-            1,
-            min(
-                self.config.batch_size,
-                provider_max,
-                model_max if model_max is not None else provider_max,
-                self._learned_multimodal_batch_size
-                if self._learned_multimodal_batch_size is not None
-                else provider_max,
-            ),
-        )
-        if batch_size < self.config.batch_size:
-            self.logger.info(
-                "Clamped multimodal batch_size %d -> %d "
-                "(binding=%s, model=%s, provider_max=%d, model_max=%s)",
-                self.config.batch_size,
-                batch_size,
-                self.config.binding,
-                self.config.model,
-                provider_max,
-                model_max,
-            )
+        batch_size = max(1, min(self.config.batch_size, provider_max))
         all_embeddings: List[List[float]] = []
-        start = 0
-        completed_batches = 0
-        expected_dim: int | None = None
+        total_batches = (len(contents) + batch_size - 1) // batch_size
 
-        # A cursor loop lets a provider correct an outdated/unknown model cap.
-        # Only the failed slice is retried; vectors from prior batches remain.
-        while start < len(contents):
+        for i, start in enumerate(range(0, len(contents), batch_size)):
             batch = contents[start : start + batch_size]
             request = EmbeddingRequest(
                 texts=[],
@@ -362,74 +261,25 @@ class EmbeddingClient:
                 contents=batch,
                 enable_fusion=False,
             )
-            try:
-                response = await self.adapter.embed(request)
-            except Exception as exc:
-                explicit_limit = _batch_limit_from_error(exc)
-                if not _is_adaptable_batch_error(exc) or len(batch) <= 1:
-                    self.logger.error(
-                        "Multimodal embedding batch failed "
-                        "(binding=%s, model=%s, start_index=%d, batch_items=%d): %s",
-                        self.config.binding,
-                        self.config.model,
-                        start,
-                        len(batch),
-                        exc,
-                    )
-                    raise
-
-                if explicit_limit is not None and explicit_limit < len(batch):
-                    smaller_batch_size = min(batch_size, explicit_limit)
-                else:
-                    smaller_batch_size = max(1, len(batch) // 2)
-                if smaller_batch_size >= batch_size:
-                    raise
-                self.logger.warning(
-                    "Multimodal embedding provider rejected batch_items=%d; "
-                    "retrying the same slice with batch_size=%d "
-                    "(binding=%s, model=%s): %s",
-                    len(batch),
-                    smaller_batch_size,
-                    self.config.binding,
-                    self.config.model,
-                    exc,
-                )
-                batch_size = smaller_batch_size
-                self._learned_multimodal_batch_size = smaller_batch_size
-                continue
-
-            total_batches = completed_batches + (
-                (len(contents) - start + batch_size - 1) // batch_size
-            )
+            response = await self.adapter.embed(request)
             validated = validate_embedding_batch(
                 response.embeddings,
                 expected_count=len(batch),
                 binding=self.config.binding,
                 model=self.config.model,
-                batch_index=completed_batches + 1,
+                batch_index=i + 1,
                 total_batches=total_batches,
                 start_index=start,
             )
-            batch_dim = len(validated[0]) if validated else 0
-            if expected_dim is None:
-                expected_dim = batch_dim
-            elif batch_dim != expected_dim:
-                raise ValueError(
-                    "Embedding provider returned inconsistent vector dimensions "
-                    f"across multimodal batches (binding={self.config.binding}, "
-                    f"model={self.config.model}): expected {expected_dim}, got {batch_dim}."
-                )
             all_embeddings.extend(validated)
-            start += len(batch)
-            completed_batches += 1
 
             if progress_callback:
                 try:
-                    progress_callback(completed_batches, total_batches)
+                    progress_callback(i + 1, total_batches)
                 except Exception:
                     pass
 
-            if start < len(contents) and self.config.batch_delay > 0:
+            if i < total_batches - 1 and self.config.batch_delay > 0:
                 await asyncio.sleep(self.config.batch_delay)
 
         return all_embeddings
@@ -442,9 +292,9 @@ class EmbeddingClient:
         except RuntimeError:
             return asyncio.run(self.embed(texts))
 
-        # Shared executor instead of a fresh ThreadPoolExecutor per call
-        # (thread creation on every sync embedding was pure overhead).
-        with _sync_embed_executor() as executor:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(asyncio.run, self.embed(texts))
             return future.result()
 

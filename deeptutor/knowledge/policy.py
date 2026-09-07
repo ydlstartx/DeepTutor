@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 KB_QUERY_ONLY_ENV = "DEEPTUTOR_KB_QUERY_ONLY"
 KB_QUERY_ONLY_MESSAGE = (
     "Knowledge base modification is disabled on this server. "
@@ -15,6 +17,9 @@ class KnowledgeBaseWriteDisabledError(PermissionError):
 
 def is_kb_query_only() -> bool:
     """Return the effective deployment policy from centralized runtime settings."""
+    value = os.getenv(KB_QUERY_ONLY_ENV)
+    if value is not None:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
     from deeptutor.services.config.runtime_settings import load_system_settings
 
     return bool(load_system_settings().get("kb_query_only", False))

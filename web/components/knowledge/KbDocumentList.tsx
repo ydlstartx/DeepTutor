@@ -1,5 +1,7 @@
 "use client";
 
+import { browserStorage } from "@/shared/storage";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -25,7 +27,7 @@ import {
   moveKbFile,
   renameKbFile,
   type KnowledgeBaseFile,
-} from "@/lib/knowledge-api";
+} from "@/features/knowledge/api/files";
 import { docIconFor, formatBytes } from "@/lib/doc-attachments";
 
 interface KbDocumentListProps {
@@ -146,7 +148,7 @@ export default function KbDocumentList({
   // width is applied after mount to avoid a server/client mismatch.
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   useEffect(() => {
-    const saved = Number(window.localStorage.getItem(WIDTH_STORAGE_KEY));
+    const saved = Number(browserStorage.readRaw("local", WIDTH_STORAGE_KEY));
     if (Number.isFinite(saved) && saved >= MIN_WIDTH && saved <= MAX_WIDTH) {
       setWidth(saved);
     }
@@ -181,7 +183,7 @@ export default function KbDocumentList({
       handle.removeEventListener("pointercancel", stop);
       document.body.style.userSelect = previousUserSelect;
       setWidth((current) => {
-        window.localStorage.setItem(WIDTH_STORAGE_KEY, String(current));
+        browserStorage.writeRaw("local", WIDTH_STORAGE_KEY, String(current));
         return current;
       });
     };
@@ -857,7 +859,7 @@ export default function KbDocumentList({
         onPointerDown={startResize}
         onDoubleClick={() => {
           setWidth(DEFAULT_WIDTH);
-          window.localStorage.setItem(WIDTH_STORAGE_KEY, String(DEFAULT_WIDTH));
+          browserStorage.writeRaw("local", WIDTH_STORAGE_KEY, String(DEFAULT_WIDTH));
         }}
         className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize transition-colors hover:bg-[var(--primary)]/30 active:bg-[var(--primary)]/50"
       />

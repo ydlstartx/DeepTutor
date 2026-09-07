@@ -87,115 +87,28 @@ def test_azure_provider_passes_disable_ssl_http_client(monkeypatch: pytest.Monke
     assert clients[0].kwargs["verify"] is False
 
 
-@pytest.mark.asyncio
-async def test_sdk_complete_passes_disable_ssl_http_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from deeptutor.services.llm import executors
+def test_agentic_client_passes_disable_ssl_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agentic handle builds its SDK client through the same helper as provider_core."""
+    from deeptutor.runtime.agentic import client as agentic_mod
 
     clients = _enable_ssl_override(monkeypatch)
-    captured = _capture_async_openai(monkeypatch, executors)
+    captured = _capture_async_openai(monkeypatch, agentic_mod)
 
-    async def fake_create_with_format_fallback(*_args: Any, **_kwargs: Any) -> Any:
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
-        )
-
-    monkeypatch.setattr(executors, "_create_with_format_fallback", fake_create_with_format_fallback)
-
-    result = await executors.sdk_complete(
-        prompt="hi",
-        system_prompt="system",
-        provider_name="openai",
-        model="gpt-test",
-        api_key="sk-test",
-        base_url="https://example.com/v1",
-    )
-
-    assert result == "ok"
-    assert captured[0]["http_client"] is clients[0]
-    assert clients[0].kwargs["verify"] is False
-
-
-@pytest.mark.asyncio
-async def test_sdk_complete_openrouter_uses_nested_reasoning_body(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from deeptutor.services.llm import executors
-
-    _capture_async_openai(monkeypatch, executors)
-    captured_payload: dict[str, Any] = {}
-
-    async def fake_create_with_format_fallback(
-        _client: Any, payload: dict[str, Any], **_kwargs: Any
-    ) -> Any:
-        captured_payload.update(payload)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
-        )
-
-    monkeypatch.setattr(executors, "_create_with_format_fallback", fake_create_with_format_fallback)
-
-    result = await executors.sdk_complete(
-        prompt="hi",
-        system_prompt="system",
-        provider_name="openrouter",
-        model="openai/gpt-5.6-sol",
-        api_key="sk-or-test",
-        base_url="https://openrouter.ai/api/v1",
-        reasoning_effort="xhigh",
-    )
-
-    assert result == "ok"
-    assert captured_payload["extra_body"] == {"reasoning": {"effort": "xhigh"}}
-    assert "reasoning_effort" not in captured_payload
-
-
-@pytest.mark.asyncio
-async def test_sdk_stream_passes_disable_ssl_http_client(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from deeptutor.services.llm import executors
-
-    clients = _enable_ssl_override(monkeypatch)
-    captured = _capture_async_openai(monkeypatch, executors)
-
-    class StreamStub:
-        def __init__(self) -> None:
-            self._chunks = [
-                SimpleNamespace(
-                    choices=[SimpleNamespace(delta=SimpleNamespace(content="hi"))],
-                )
-            ]
-
-        def __aiter__(self) -> "StreamStub":
-            return self
-
-        async def __anext__(self) -> Any:
-            if not self._chunks:
-                raise StopAsyncIteration
-            return self._chunks.pop(0)
-
-    async def fake_create_with_format_fallback(*_args: Any, **_kwargs: Any) -> StreamStub:
-        return StreamStub()
-
-    monkeypatch.setattr(executors, "_create_with_format_fallback", fake_create_with_format_fallback)
-
-    chunks = [
-        chunk
-        async for chunk in executors.sdk_stream(
-            prompt="hi",
-            system_prompt="system",
-            provider_name="openai",
+    agentic_mod._build_openai_client(
+        agentic_mod.LLMClientConfig(
+            binding="custom",
             model="gpt-test",
             api_key="sk-test",
             base_url="https://example.com/v1",
-        )
-    ]
+            extra_headers={"X-Test": "1"},
+        ),
+        disable_ssl_verify=True,
+    )
 
-    assert chunks == ["hi"]
     assert captured[0]["http_client"] is clients[0]
     assert clients[0].kwargs["verify"] is False
+    assert captured[0]["default_headers"]["X-Test"] == "1"
+    assert "x-session-affinity" in captured[0]["default_headers"]
 
 
 def test_embedding_sdk_passes_disable_ssl_http_client(

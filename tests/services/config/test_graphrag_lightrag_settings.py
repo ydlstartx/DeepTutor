@@ -34,10 +34,9 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
     assert defaults["top_k"] == 60
     assert defaults["response_type"] == "Multiple Paragraphs"
     assert defaults["vector_storage"] == "nano"
-    assert defaults["llm_concurrency"] == 8
+    assert defaults["llm_concurrency"] == 4
     assert defaults["embedding_concurrency"] == 2
     assert defaults["multimodal_concurrency"] == 8
-    assert defaults["entity_extract_max_gleaning"] == 0
     assert defaults["chunk_token_size"] == 1400
     assert defaults["chunk_overlap_token_size"] == 80
     assert defaults["embedding_batch_num"] == 20
@@ -66,7 +65,7 @@ def test_lightrag_defaults_and_clamp(tmp_path: Path) -> None:
     assert throughput["llm_model_max_async"] == 32
     assert throughput["embedding_concurrency"] == 1
     assert throughput["multimodal_concurrency"] == 16
-    assert throughput["entity_extract_max_gleaning"] == 3
+    assert throughput["entity_extract_max_gleaning"] == 5
     assert throughput["chunk_token_size"] == 256
     assert throughput["chunk_overlap_token_size"] == 255
     assert throughput["embedding_batch_num"] == 256
@@ -91,8 +90,11 @@ def test_lightrag_indexing_knobs_round_trip_and_clamp(tmp_path: Path) -> None:
     svc = RuntimeSettingsService(tmp_path, process_env={})
     defaults = svc.load_lightrag()
     assert defaults["max_concurrent_files"] == 1
-    assert defaults["llm_model_max_async"] == 8
-    assert defaults["entity_extract_max_gleaning"] == 0
+
+    assert defaults["llm_model_max_async"] == 4
+    assert defaults["entity_extract_max_gleaning"] == 1
+    assert defaults["llm_profile_id"] == ""
+    assert defaults["llm_model_id"] == ""
 
     saved = svc.save_lightrag(
         {
@@ -114,8 +116,8 @@ def test_lightrag_indexing_knobs_round_trip_and_clamp(tmp_path: Path) -> None:
     )
     assert clamped["max_concurrent_files"] == 16
     assert clamped["llm_model_max_async"] == 1
-    assert clamped["entity_extract_max_gleaning"] == 3
 
+    assert clamped["entity_extract_max_gleaning"] == 5
     # Editing one knob must not reset the query knobs beside it.
     assert clamped["top_k"] == 60
     assert clamped["response_type"] == "Multiple Paragraphs"
@@ -159,8 +161,46 @@ def test_lightrag_settings_written_before_the_indexing_knobs_still_load(
     loaded = RuntimeSettingsService(tmp_path, process_env={}).load_lightrag()
     assert loaded["top_k"] == 25
     assert loaded["max_concurrent_files"] == 1
-    assert loaded["llm_model_max_async"] == 8
-    assert loaded["entity_extract_max_gleaning"] == 0
+
+    assert loaded["llm_model_max_async"] == 4
+    assert loaded["entity_extract_max_gleaning"] == 1
+    assert loaded["llm_profile_id"] == ""
+    assert loaded["llm_model_id"] == ""
+
+
+def test_lightrag_dedicated_llm_selection_round_trip(tmp_path: Path) -> None:
+    """Empty references mean the active model; a complete pair is preserved."""
+    svc = RuntimeSettingsService(tmp_path, process_env={})
+    assert svc.load_lightrag()["llm_profile_id"] == ""
+
+    saved = svc.save_lightrag({"llm_profile_id": " profile-1 ", "llm_model_id": " model-1 "})
+    assert saved["llm_profile_id"] == "profile-1"
+    assert saved["llm_model_id"] == "model-1"
+
+    cleared = svc.save_lightrag({"llm_profile_id": "", "llm_model_id": ""})
+    assert cleared["llm_profile_id"] == ""
+    assert cleared["llm_model_id"] == ""
+
+
+def test_lightrag_server_defaults_round_trip_without_exposing_shape_drift(
+    tmp_path: Path,
+) -> None:
+    svc = RuntimeSettingsService(tmp_path, process_env={})
+    assert svc.load_lightrag_server() == {
+        "version": 1,
+        "server_url": "",
+        "api_key": "",
+    }
+
+    saved = svc.save_lightrag_server(
+        {"server_url": " http://localhost:9621/ ", "api_key": " secret "}
+    )
+    assert saved == {
+        "version": 1,
+        "server_url": "http://localhost:9621",
+        "api_key": "secret",
+    }
+    assert (tmp_path / "lightrag_server.json").exists()
 
 
 def test_response_type_capped(tmp_path: Path) -> None:
@@ -172,7 +212,13 @@ def test_response_type_capped(tmp_path: Path) -> None:
 def test_preflight_shape_for_all_engines() -> None:
     from deeptutor.services.rag.preflight import engine_preflight
 
-    for provider in ("llamaindex", "pageindex", "graphrag", "lightrag"):
+    for provider in (
+        "llamaindex",
+        "pageindex",
+        "graphrag",
+        "lightrag",
+        "lightrag-server",
+    ):
         report = engine_preflight(provider)
         assert set(report) == {"ok", "checks"}
         assert isinstance(report["ok"], bool)

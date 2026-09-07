@@ -26,7 +26,7 @@ def test_query_only_does_not_block_chat_attachment_storage_or_preview(
     monkeypatch.setattr(attachments_router, "get_attachment_store", lambda: store)
 
     app = FastAPI()
-    app.include_router(attachments_router.router, prefix="/api/attachments")
+    app.include_router(attachments_router.router, prefix="/files/attachments")
     with TestClient(app) as client:
         response = client.get(url)
 

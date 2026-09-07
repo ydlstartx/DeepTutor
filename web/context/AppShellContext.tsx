@@ -23,6 +23,9 @@ import {
   CODE_BLOCK_SETTINGS_EVENT,
   CODE_BLOCK_THEME_STORAGE_KEY,
   CODE_BLOCK_WRAP_LONG_LINES_STORAGE_KEY,
+  DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS,
+  DEFAULT_CODE_BLOCK_THEME,
+  DEFAULT_CODE_BLOCK_WRAP_LONG_LINES,
   LANGUAGE_EVENT,
   LANGUAGE_STORAGE_KEY,
   hasStoredLanguage,
@@ -58,6 +61,7 @@ interface AppShellContextValue {
   theme: Theme;
   setTheme: (theme: Theme) => void;
   language: AppLanguage;
+  languageReady: boolean;
   setLanguage: (language: AppLanguage) => void;
   activeSessionId: string | null;
   setActiveSessionId: (sessionId: string | null) => void;
@@ -81,6 +85,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
   });
   // Always start with "en" to match SSR; hydrate from localStorage after mount
   const [language, setLanguageState] = useState<AppLanguage>("en");
+  const [languageReady, setLanguageReady] = useState(false);
   const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
     () => readStoredActiveSessionId(),
   );
@@ -88,18 +93,16 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(false);
   const [sidebarWidth, setSidebarWidthState] = useState<number>(220);
   // Code block settings - start with defaults, hydrate from localStorage after mount
-  const [codeBlockTheme, setCodeBlockThemeState] = useState<string>(() =>
-    readStoredCodeBlockTheme(),
+  const [codeBlockTheme, setCodeBlockThemeState] = useState<string>(
+    DEFAULT_CODE_BLOCK_THEME,
   );
   const [codeBlockShowLineNumbers, setCodeBlockShowLineNumbersState] =
-    useState<boolean>(() => readStoredCodeBlockShowLineNumbers());
+    useState<boolean>(DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS);
   const [codeBlockWrapLongLines, setCodeBlockWrapLongLinesState] =
-    useState<boolean>(() => readStoredCodeBlockWrapLongLines());
+    useState<boolean>(DEFAULT_CODE_BLOCK_WRAP_LONG_LINES);
 
   useEffect(() => {
     // Hydrate client-only preferences after SSR-safe first render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLanguageState(readStoredLanguage());
     setSidebarCollapsedState(readStoredSidebarCollapsed());
     setSidebarWidthState(readStoredSidebarWidth());
     setCodeBlockThemeState(readStoredCodeBlockTheme());
@@ -118,11 +121,23 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
     // reader-facing output language are stored together and are gated by the
     // same "has this browser chosen yet?" question, so splitting them into two
     // bootstraps would only give them a chance to disagree.
-    if (hasStoredLanguage()) return;
     const controller = new AbortController();
+    let cancelled = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
     void (async () => {
+      if (hasStoredLanguage()) {
+        if (!cancelled) {
+          setLanguageState(readStoredLanguage());
+          setLanguageReady(true);
+        }
+        return;
+      }
+      fallbackTimer = setTimeout(() => {
+        controller.abort();
+        if (!cancelled) setLanguageReady(true);
+      }, 1_500);
       try {
-        const response = await apiFetch(apiUrl("/api/v1/settings/ui"), {
+        const response = await apiFetch(apiUrl("/api/settings/ui"), {
           signal: controller.signal,
           skipAuthRedirect: true,
         });
@@ -144,12 +159,19 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
             payload.language,
           ),
         );
-        setLanguageState(payload.language);
+        if (!cancelled) setLanguageState(payload.language);
       } catch {
         // Offline or unauthenticated: keep the local default.
+      } finally {
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        if (!cancelled) setLanguageReady(true);
       }
     })();
-    return () => controller.abort();
+    return () => {
+      cancelled = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      controller.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -260,6 +282,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
   const setLanguage = useCallback((nextLanguage: AppLanguage) => {
     writeStoredLanguage(nextLanguage);
     setLanguageState(nextLanguage);
+    setLanguageReady(true);
   }, []);
 
   const setActiveSessionId = useCallback((sessionId: string | null) => {
@@ -299,6 +322,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       theme,
       setTheme,
       language,
+      languageReady,
       setLanguage,
       activeSessionId,
       setActiveSessionId,
@@ -319,6 +343,7 @@ export function AppShellProvider({ children }: { children: React.ReactNode }) {
       codeBlockTheme,
       codeBlockWrapLongLines,
       language,
+      languageReady,
       setActiveSessionId,
       setCodeBlockShowLineNumbers,
       setCodeBlockTheme,

@@ -1,6 +1,7 @@
 import { apiFetch, apiUrl } from "@/lib/api";
 import { invalidateClientCache, withClientCache } from "@/lib/client-cache";
-import type { LLMSelection, StreamEvent } from "@/lib/unified-ws";
+import type { LLMSelection, StreamEvent } from "@/features/chat/model/protocol";
+import { browserReturnPath, loginHref } from "@/shared/auth/return-url";
 
 export interface SessionMessage {
   id: number;
@@ -19,22 +20,59 @@ export interface SessionMessage {
     extracted_text?: string;
     generated?: boolean;
     size_bytes?: number;
+    origin?: "workspace";
+    workspace_id?: string;
+    workspace_item_id?: string;
+    relative_path?: string;
+    sha256?: string;
+    title?: string;
+    caption?: string;
   }>;
   metadata?: Record<string, unknown>;
+  trace?: MessageTraceMetadata;
   created_at: number;
   /** Edit-branching: id of the message this row continues. `null` for the
    *  first message in a session. Siblings share the same parent. */
   parent_message_id?: number | null;
 }
 
+export interface MessageTraceMetadata {
+  turn_id?: string | null;
+  total?: number;
+  last_seq?: number;
+  truncated?: boolean;
+  /** Wall-clock start of the whole turn, epoch seconds. Supplied because the
+   *  preview keeps only tool and terminal events: the moment the turn began
+   *  is never among them, so timing the preview alone starts the clock at the
+   *  first tool call. */
+  started_at?: number | null;
+  /** Wall-clock end of the whole turn, epoch seconds. */
+  ended_at?: number | null;
+}
+
+export interface MessageTracePage {
+  session_id: string;
+  message_id: number;
+  turn_id?: string | null;
+  events: StreamEvent[];
+  total: number;
+  last_seq: number;
+  next_seq: number | null;
+  complete: boolean;
+}
+
 export interface SessionPreferences {
   capability?: string;
+  /** Stable learning surface, independent of the action used for a turn. */
+  workspace_mode?: "immersive_reading" | "mastery_path" | "";
   tools?: string[];
   knowledge_bases?: string[];
   language?: string;
   llm_selection?: LLMSelection | null;
   /** Persistent mastery state associated with this conversation. */
   mastery_path_id?: string;
+  /** "outline" | "study" | "review" — what this mastery conversation is for. */
+  mastery_session_mode?: string;
   /** Session-level persona preference; "" / absent = Default (no persona). */
   persona?: string;
   /** Edit-branching: maps a parent_message_id → the child id currently
@@ -45,7 +83,11 @@ export interface SessionPreferences {
   course_id?: string;
   /** Source conversation for nested selected-text tutor threads. */
   parent_session_id?: string;
-  session_kind?: "chat" | "selection_tutor";
+  session_kind?: "chat" | "selection_tutor" | "immersive_reading";
+  /** Owning Immersive Reading workspace, present only for reading sessions. */
+  reading_workspace_id?: string;
+  /** Material active when the reading conversation was created. */
+  reading_material_id?: string;
   pinned?: boolean;
   archived?: boolean;
 }
@@ -129,8 +171,7 @@ export interface QuizResultItem {
 
 async function expectJson<T>(response: Response): Promise<T> {
   if (response.status === 401 && typeof window !== "undefined") {
-    const next = encodeURIComponent(window.location.pathname);
-    window.location.href = `/login?next=${next}`;
+    window.location.href = loginHref(browserReturnPath(window.location));
     return new Promise(() => {});
   }
   if (!response.ok) {
@@ -161,7 +202,7 @@ export async function listSessions(
     `sessions:${limit}:${offset}`,
     async () => {
       const response = await apiFetch(
-        apiUrl(`/api/v1/sessions?${qs.toString()}`),
+        apiUrl(`/api/sessions?${qs.toString()}`),
         {
           cache: "no-store",
         },
@@ -193,18 +234,40 @@ export async function getSession(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<SessionDetail> {
-  const response = await apiFetch(apiUrl(`/api/v1/sessions/${sessionId}`), {
+  const response = await apiFetch(apiUrl(`/api/sessions/${sessionId}`), {
     cache: "no-store",
     signal,
   });
   return expectJson<SessionDetail>(response);
 }
 
+/**
+ * One line the user is likely to type next, for the home composer's
+ * placeholder — "" when there is nothing worth offering (no exchange yet,
+ * a timeout, a model that didn't come back with something usable).
+ */
+export async function fetchSessionAskHint(
+  sessionId: string,
+  init?: RequestInit,
+): Promise<string> {
+  try {
+    const response = await apiFetch(
+      apiUrl(`/api/sessions/${sessionId}/ask-hint`),
+      { cache: "no-store", ...init },
+    );
+    const result = await expectJson<{ hint?: string }>(response);
+    return typeof result.hint === "string" ? result.hint : "";
+  } catch {
+    // A missing hint is not a failure the composer should ever surface.
+    return "";
+  }
+}
+
 export async function updateSessionTitle(
   sessionId: string,
   title: string,
 ): Promise<SessionDetail> {
-  const response = await apiFetch(apiUrl(`/api/v1/sessions/${sessionId}`), {
+  const response = await apiFetch(apiUrl(`/api/sessions/${sessionId}`), {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title }),
@@ -212,6 +275,21 @@ export async function updateSessionTitle(
   const data = await expectJson<{ session: SessionDetail }>(response);
   invalidateClientCache("sessions:");
   return data.session;
+}
+
+export async function getMessageTrace(
+  sessionId: string,
+  messageId: number,
+  afterSeq = 0,
+  signal?: AbortSignal,
+): Promise<MessageTracePage> {
+  const response = await apiFetch(
+    apiUrl(
+      `/api/sessions/${sessionId}/messages/${messageId}/events?after_seq=${afterSeq}&limit=500`,
+    ),
+    { cache: "no-store", signal },
+  );
+  return expectJson<MessageTracePage>(response);
 }
 
 export type SessionOrganizationPatch = Partial<{
@@ -227,7 +305,7 @@ export async function updateSessionOrganization(
   patch: SessionOrganizationPatch,
 ): Promise<SessionDetail> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/${sessionId}/organization`),
+    apiUrl(`/api/sessions/${sessionId}/organization`),
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -240,7 +318,7 @@ export async function updateSessionOrganization(
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  const response = await apiFetch(apiUrl(`/api/v1/sessions/${sessionId}`), {
+  const response = await apiFetch(apiUrl(`/api/sessions/${sessionId}`), {
     method: "DELETE",
   });
   await expectJson<{ deleted: boolean }>(response);
@@ -253,7 +331,7 @@ export async function listSessionFolders(options?: {
   return withClientCache<SessionFolder[]>(
     "session-folders",
     async () => {
-      const response = await apiFetch(apiUrl("/api/v1/sessions/folders"), {
+      const response = await apiFetch(apiUrl("/api/sessions/folders"), {
         cache: "no-store",
       });
       const data = await expectJson<{ folders: SessionFolder[] }>(response);
@@ -266,7 +344,7 @@ export async function listSessionFolders(options?: {
 export async function createSessionFolder(
   name: string,
 ): Promise<SessionFolder> {
-  const response = await apiFetch(apiUrl("/api/v1/sessions/folders"), {
+  const response = await apiFetch(apiUrl("/api/sessions/folders"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
@@ -281,7 +359,7 @@ export async function renameSessionFolder(
   name: string,
 ): Promise<SessionFolder> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/folders/${folderId}`),
+    apiUrl(`/api/sessions/folders/${folderId}`),
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -295,7 +373,7 @@ export async function renameSessionFolder(
 
 export async function deleteSessionFolder(folderId: string): Promise<void> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/folders/${folderId}`),
+    apiUrl(`/api/sessions/folders/${folderId}`),
     { method: "DELETE" },
   );
   await expectJson<{ deleted: boolean }>(response);
@@ -308,7 +386,7 @@ export async function moveSessionToFolder(
   folderId: string | null,
 ): Promise<void> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/${sessionId}/folder`),
+    apiUrl(`/api/sessions/${sessionId}/folder`),
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -326,7 +404,7 @@ export async function recordQuizResults(
   turnId?: string | null,
 ): Promise<void> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/${sessionId}/quiz-results`),
+    apiUrl(`/api/sessions/${sessionId}/quiz-results`),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -341,7 +419,7 @@ export async function deleteMessage(
   messageId: number,
 ): Promise<void> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/${sessionId}/messages/${messageId}`),
+    apiUrl(`/api/sessions/${sessionId}/messages/${messageId}`),
     { method: "DELETE" },
   );
   await expectJson<{ deleted: boolean }>(response);
@@ -352,7 +430,7 @@ export async function updateBranchSelection(
   selectedBranches: Record<string, number>,
 ): Promise<void> {
   const response = await apiFetch(
-    apiUrl(`/api/v1/sessions/${sessionId}/branch-selection`),
+    apiUrl(`/api/sessions/${sessionId}/branch-selection`),
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },

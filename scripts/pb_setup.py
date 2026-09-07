@@ -9,13 +9,14 @@ Run this once after starting PocketBase for the first time:
 Requires integrations.pocketbase_url, integrations.pocketbase_admin_email, and
 integrations.pocketbase_admin_password in data/user/settings/integrations.json.
 
-Safe to re-run — existing records are preserved and missing fields are added.
+Safe to re-run — existing collections receive missing fields and indexes.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 import sys
+import time
 
 # Allow running from project root without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -63,9 +64,77 @@ def _existing_collections(pb) -> set[str]:
         return set()
 
 
-def _create_if_missing(pb, name: str, schema: dict, existing: set[str]) -> bool:
+def _public_dict(value):
+    if isinstance(value, dict):
+        return dict(value)
+    return {key: item for key, item in vars(value).items() if not key.startswith("_")}
+
+
+def _sync_existing_collection(pb, schema: dict) -> None:
+    """Idempotently append v2 fields/indexes to an existing collection."""
+    record = next(item for item in pb.collections.get_full_list() if item.name == schema["name"])
+    current_fields = getattr(record, "fields", None)
+    payload_key = "fields"
+    if current_fields is None:
+        current_fields = getattr(record, "schema", [])
+        payload_key = "schema"
+    current_fields = [_field_for_api(_public_dict(item)) for item in current_fields]
+    field_names = {field.get("name") for field in current_fields}
+    merged_fields = current_fields + [
+        field for field in schema.get("schema", []) if field["name"] not in field_names
+    ]
+    current_indexes = list(getattr(record, "indexes", []) or [])
+
+    # Add fields first: duplicate cleanup below writes the new failure columns
+    # before the partial unique index can be installed.
+    if len(merged_fields) != len(current_fields):
+        pb.collections.update(record.id, {payload_key: merged_fields, "indexes": current_indexes})
+
+    if schema["name"] == "turns":
+        active = {"queued", "running", "waiting_input"}
+        rows = pb.collection("turns").get_full_list()
+        grouped: dict[str, list] = {}
+        for row in rows:
+            if getattr(row, "status", "") in active:
+                grouped.setdefault(getattr(row, "session_id", ""), []).append(row)
+        now = time.time()
+        for rows_for_session in grouped.values():
+            rows_for_session.sort(
+                key=lambda item: (
+                    float(getattr(item, "turn_updated_at", 0) or 0),
+                    getattr(item, "id", ""),
+                ),
+                reverse=True,
+            )
+            for duplicate in rows_for_session[1:]:
+                pb.collection("turns").update(
+                    duplicate.id,
+                    {
+                        "status": "failed",
+                        "error": "Duplicate active turn resolved during migration",
+                        "failure_code": "migration_duplicate_running",
+                        "turn_updated_at": now,
+                        "finished_at": now,
+                        "state_version": int(getattr(duplicate, "state_version", 1) or 1) + 1,
+                    },
+                )
+
+    desired_indexes = schema.get("indexes", [])
+    merged_indexes = current_indexes + [
+        index for index in desired_indexes if index not in current_indexes
+    ]
+    if merged_indexes != current_indexes:
+        pb.collections.update(record.id, {payload_key: merged_fields, "indexes": merged_indexes})
+
+
+def _create_if_missing(pb, name: str, schema: dict, existing: set[str]):
     if name in existing:
-        print(f"  skip  {name} (already exists)")
+        try:
+            _sync_existing_collection(pb, schema)
+            print(f"  sync  {name}")
+        except Exception as exc:
+            print(f"  ERROR syncing {name}: {exc}")
+            raise
         return True
     try:
         pb.collections.create(schema)
@@ -96,44 +165,6 @@ def _field_for_api(field: dict) -> dict:
     if "primary_key" in payload:
         payload["primaryKey"] = payload.pop("primary_key")
     return payload
-
-
-def _ensure_fields(pb, collection_name: str, required_fields: list[dict]) -> bool:
-    """Add missing fields without replacing data in an existing collection.
-
-    PocketBase renamed the collection payload from ``schema`` to ``fields``.
-    Supporting both shapes lets operators safely rerun this script during an
-    upgrade instead of manually editing production collections.
-    """
-    try:
-        collection = next(
-            item for item in pb.collections.get_full_list() if item.name == collection_name
-        )
-        current_fields = getattr(collection, "fields", None)
-        payload_key = "fields"
-        if current_fields is None:
-            current_fields = getattr(collection, "schema", [])
-            payload_key = "schema"
-        existing_names = {
-            (field.get("name") if isinstance(field, dict) else getattr(field, "name", ""))
-            for field in current_fields
-        }
-        missing = [field for field in required_fields if field["name"] not in existing_names]
-        if not missing:
-            return True
-        preserved = [
-            _field_for_api(field) if isinstance(field, dict) else vars(field)
-            for field in current_fields
-        ]
-        pb.collections.update(
-            collection.id,
-            {payload_key: [*preserved, *missing]},
-        )
-        print(f"  update {collection_name} (added {', '.join(field['name'] for field in missing)})")
-        return True
-    except Exception as exc:
-        print(f"  ERROR updating {collection_name}: {exc}")
-        return False
 
 
 def main():
@@ -170,6 +201,8 @@ def main():
                 {"name": "session_activity_at", "type": "number", "required": False},
                 {"name": "capability", "type": "text", "required": False},
                 {"name": "status", "type": "text", "required": False},
+                {"name": "session_created_at", "type": "number", "required": False},
+                {"name": "session_updated_at", "type": "number", "required": False},
             ],
             "listRule": "",
             "viewRule": "",
@@ -209,6 +242,7 @@ def main():
                 {"name": "capability", "type": "text", "required": False},
                 {"name": "events_json", "type": "json", "required": False},
                 {"name": "attachments_json", "type": "json", "required": False},
+                {"name": "metadata_json", "type": "json", "required": False},
                 {"name": "msg_created_at", "type": "number", "required": False},
             ],
             "listRule": "",
@@ -232,6 +266,18 @@ def main():
                 {"name": "turn_created_at", "type": "number", "required": False},
                 {"name": "turn_updated_at", "type": "number", "required": False},
                 {"name": "finished_at", "type": "number", "required": False},
+                {"name": "owner_id", "type": "text", "required": False},
+                {"name": "fencing_token", "type": "number", "required": False},
+                {"name": "state_version", "type": "number", "required": False},
+                {"name": "failure_code", "type": "text", "required": False},
+                {"name": "retryable", "type": "bool", "required": False},
+                {"name": "assistant_message_id", "type": "text", "required": False},
+            ],
+            "indexes": [
+                "CREATE UNIQUE INDEX idx_turns_turn_id ON turns (turn_id)",
+                "CREATE UNIQUE INDEX idx_turns_one_active_session ON turns (session_id) "
+                "WHERE status IN ('queued', 'running', 'waiting_input')",
+                "CREATE UNIQUE INDEX idx_turns_assistant_message ON turns (assistant_message_id)",
             ],
             "listRule": "",
             "viewRule": "",
@@ -255,6 +301,9 @@ def main():
                 {"name": "content", "type": "text", "required": False},
                 {"name": "metadata_json", "type": "json", "required": False},
                 {"name": "event_timestamp", "type": "number", "required": False},
+            ],
+            "indexes": [
+                "CREATE UNIQUE INDEX idx_turn_events_turn_seq ON turn_events (turn_id, seq)"
             ],
             "listRule": "",
             "viewRule": "",
@@ -296,30 +345,6 @@ def main():
     for col in collections:
         if not _create_if_missing(pb, col["name"], col, existing):
             setup_ok = False
-
-    # ``_create_if_missing`` intentionally leaves existing collections alone;
-    # explicitly migrate the session fields required by folder organization.
-    if not _ensure_fields(
-        pb,
-        "sessions",
-        [
-            {"name": "folder_id", "type": "text", "required": False},
-            {"name": "session_activity_at", "type": "number", "required": False},
-        ],
-    ):
-        setup_ok = False
-    if not _ensure_fields(
-        pb,
-        "session_folders",
-        [
-            {"name": "folder_id", "type": "text", "required": True},
-            {"name": "user_id", "type": "text", "required": True},
-            {"name": "name", "type": "text", "required": True},
-            {"name": "folder_created_at", "type": "number", "required": True},
-            {"name": "folder_updated_at", "type": "number", "required": True},
-        ],
-    ):
-        setup_ok = False
 
     if not setup_ok:
         print("\nERROR: PocketBase setup did not complete; see errors above.")

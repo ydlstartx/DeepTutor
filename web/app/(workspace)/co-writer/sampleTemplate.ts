@@ -93,7 +93,7 @@ ${FENCE}json
 {
   "app_name": "${PUBLIC_PRODUCT_NAME}",
   "default_capability": "chat",
-  "enabled_tools": ["rag", "web_search", "code_execution", "reason"],
+  "enabled_tools": ["rag", "web_search", "exec", "reason"],
   "ui": {
     "co_writer_template": true
   }

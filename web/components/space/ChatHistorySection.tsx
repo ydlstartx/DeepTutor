@@ -3,50 +3,49 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Check,
-  ChevronDown,
-  Folder,
-  FolderPlus,
   History,
   Loader2,
-  Pencil,
   RefreshCw,
   Search,
-  Trash2,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import OrganizedSessionList from "@/components/courses/OrganizedSessionList";
+import ArchivedConversations from "@/components/space/ArchivedConversations";
 import SpaceSectionHeader from "@/components/space/SpaceSectionHeader";
 import { useAppShell } from "@/context/AppShellContext";
 import {
-  createSessionFolder,
+  fetchMasteryTopicIndex,
+  type MasteryTopicLabel,
+} from "@/lib/learning-api";
+import { sessionRoute } from "@/lib/mastery-session";
+import {
+  fetchReadingCollectionIndex,
+  type ReadingCollectionLabel,
+} from "@/lib/reading-workspace-api";
+import { collectArchivedConversations } from "@/lib/session-archive";
+import { notifySessionsChanged } from "@/lib/session-events";
+import {
   deleteSession,
-  deleteSessionFolder,
   listAllSessions,
-  listSessionFolders,
-  moveSessionToFolder,
-  renameSessionFolder,
   updateSessionTitle,
   updateSessionOrganization,
-  type SessionFolder,
   type SessionOrganizationPatch,
   type SessionSummary,
 } from "@/lib/session-api";
-import { listCourses, type StudyCourse } from "@/lib/courses-api";
 
-/** Sessions list for chat history. Reopened sessions route to the main chat. */
+/**
+ * The learning space's conversation history: search, filter, and the archive.
+ *
+ * A conversation reopens on the surface it was held in (see ``sessionRoute``),
+ * not always in the main chat. This page used to send everything to `/chat`,
+ * which for a reading conversation meant reopening it with its material closed
+ * and its citations pointing at a document that is not on screen.
+ */
 export interface ChatHistorySectionProps {
   icon?: LucideIcon;
   title?: string;
   description?: string;
-}
-
-interface FolderGroup {
-  id: string | null;
-  name: string;
-  sessions: SessionSummary[];
 }
 
 export default function ChatHistorySection({
@@ -54,51 +53,45 @@ export default function ChatHistorySection({
   title,
   description,
 }: ChatHistorySectionProps = {}) {
-  const basePath = "/home";
+  const basePath = "/chat";
   const { t } = useTranslation();
   const router = useRouter();
   const { activeSessionId, setActiveSessionId } = useAppShell();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [folders, setFolders] = useState<SessionFolder[]>([]);
-  const [courses, setCourses] = useState<StudyCourse[]>([]);
+  const [masteryTopics, setMasteryTopics] = useState<MasteryTopicLabel[]>([]);
+  const [readingCollections, setReadingCollections] = useState<
+    ReadingCollectionLabel[]
+  >([]);
   const [loading, setLoading] = useState(true);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [courseFilter, setCourseFilter] = useState("all");
+  const [courseFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [archiveFilter, setArchiveFilter] = useState("active");
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [newFolderName, setNewFolderName] = useState("");
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
-  const [folderDraft, setFolderDraft] = useState("");
-  const [folderError, setFolderError] = useState<string | null>(null);
-  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(
-    () => new Set(),
-  );
 
-  const describeError = useCallback(
-    (error: unknown, fallbackKey: string) =>
-      error instanceof Error ? t(error.message) : t(fallbackKey),
-    [t],
-  );
-
-  const load = useCallback(async (force = false) => {
-    setLoading(true);
-    setFolderError(null);
+  // ``quiet`` refetches without swapping the panel for its skeleton: a restore
+  // acts on one row and says so on that row, so blanking the whole archive
+  // underneath it would be the only thing the eye followed.
+  const load = useCallback(async (force = false, quiet = false) => {
+    if (!quiet) setLoading(true);
     try {
-      const [nextSessions, nextFolders, nextCourses] = await Promise.all([
+      // Topic and collection labels only name which surface an archived
+      // conversation came from, so losing them costs that line, never the
+      // conversation.
+      const [nextSessions, nextTopics, nextCollections] = await Promise.all([
         listAllSessions({ force }),
-        listSessionFolders({ force }),
-        listCourses({ force }),
+        fetchMasteryTopicIndex().catch(() => [] as MasteryTopicLabel[]),
+        fetchReadingCollectionIndex().catch(
+          () => [] as ReadingCollectionLabel[],
+        ),
       ]);
       setSessions(nextSessions);
-      setFolders(nextFolders);
-      setCourses(nextCourses);
-    } catch (error) {
-      setFolderError(describeError(error, "Failed to load chat history"));
+      setMasteryTopics(nextTopics);
+      setReadingCollections(nextCollections);
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
-  }, [describeError]);
+  }, []);
 
   useEffect(() => {
     void load(true);
@@ -131,44 +124,18 @@ export default function ChatHistorySection({
     });
   }, [archiveFilter, courseFilter, kindFilter, query, sessions]);
 
-  const groups = useMemo<FolderGroup[]>(() => {
-    const byFolder = new Map<string, SessionSummary[]>();
-    const uncategorized: SessionSummary[] = [];
-    const knownFolderIds = new Set(folders.map((folder) => folder.id));
-    for (const session of filteredSessions) {
-      if (!session.folder_id || !knownFolderIds.has(session.folder_id)) {
-        uncategorized.push(session);
-        continue;
-      }
-      const bucket = byFolder.get(session.folder_id) ?? [];
-      bucket.push(session);
-      byFolder.set(session.folder_id, bucket);
-    }
-    return [
-      ...folders.map((folder) => ({
-        id: folder.id,
-        name: folder.name,
-        sessions: byFolder.get(folder.id) ?? [],
-      })),
-      {
-        id: null,
-        name: t("Uncategorized"),
-        sessions: uncategorized,
-      },
-    ];
-  }, [filteredSessions, folders, t]);
-
   const handleSelect = useCallback(
     (sessionId: string) => {
       setActiveSessionId(sessionId);
-      router.push(`${basePath}/${sessionId}`);
+      const session = sessions.find((item) => item.session_id === sessionId);
+      router.push(session ? sessionRoute(session) : `${basePath}/${sessionId}`);
     },
-    [basePath, router, setActiveSessionId],
+    [basePath, router, sessions, setActiveSessionId],
   );
 
   const handleRename = useCallback(
-    async (sessionId: string, nextTitle: string) => {
-      await updateSessionTitle(sessionId, nextTitle);
+    async (sessionId: string, title: string) => {
+      await updateSessionTitle(sessionId, title);
       await load(true);
     },
     [load],
@@ -179,75 +146,48 @@ export default function ChatHistorySection({
       if (!window.confirm(t("Delete this chat?"))) return;
       await deleteSession(sessionId);
       if (activeSessionId === sessionId) setActiveSessionId(null);
-      await load(true);
+      setSessions((prev) =>
+        prev.filter((session) => session.session_id !== sessionId),
+      );
     },
-    [activeSessionId, load, setActiveSessionId, t],
+    [activeSessionId, setActiveSessionId, t],
   );
 
-  const handleCreateFolder = async () => {
-    const name = newFolderName.trim();
-    if (!name) return;
-    setFolderError(null);
-    try {
-      await createSessionFolder(name);
-      setNewFolderName("");
-      setCreatingFolder(false);
-      await load(true);
-    } catch (error) {
-      setFolderError(describeError(error, "Could not create folder"));
-    }
-  };
+  // The archived view is built from the same filtered set as the list, so the
+  // search box and the type filter still narrow it.
+  const archiveBuckets = useMemo(
+    () =>
+      collectArchivedConversations({
+        sessions: filteredSessions,
+        masteryTopics,
+        readingCollections,
+      }),
+    [filteredSessions, masteryTopics, readingCollections],
+  );
 
-  const handleRenameFolder = async (folderId: string) => {
-    const name = folderDraft.trim();
-    if (!name) return;
-    setFolderError(null);
-    try {
-      await renameSessionFolder(folderId, name);
-      setEditingFolderId(null);
-      setFolderDraft("");
-      await load(true);
-    } catch (error) {
-      setFolderError(describeError(error, "Could not rename folder"));
-    }
-  };
-
-  const handleDeleteFolder = async (folder: SessionFolder) => {
-    if (
-      !window.confirm(
-        t(
-          'Delete folder "{{name}}"? Its conversations will move to Uncategorized.',
-          { name: folder.name },
-        ),
-      )
-    )
-      return;
-    setFolderError(null);
-    try {
-      await deleteSessionFolder(folder.id);
-      await load(true);
-    } catch (error) {
-      setFolderError(describeError(error, "Could not delete folder"));
-    }
-  };
-
-  const handleMove = async (sessionId: string, folderId: string | null) => {
-    setFolderError(null);
-    try {
-      await moveSessionToFolder(sessionId, folderId);
-      // The backend also moves direct Little Tutor children with their parent.
-      // Reload the full snapshot so both levels change folders immediately in
-      // the UI instead of leaving child rows stale until the next refresh.
-      await load(true);
-    } catch (error) {
-      setFolderError(describeError(error, "Could not move chat"));
-    }
-  };
+  const handleRestore = useCallback(
+    async (sessionId: string) => {
+      setRestoringId(sessionId);
+      try {
+        await updateSessionOrganization(sessionId, { archived: false });
+        // Restoring cascades to the tutor threads under the conversation, so
+        // the server's own list is what says which rows are left.
+        await load(true, true);
+        notifySessionsChanged();
+      } finally {
+        setRestoringId(null);
+      }
+    },
+    [load],
+  );
 
   const handleOrganize = useCallback(
     async (sessionId: string, patch: SessionOrganizationPatch) => {
       await updateSessionOrganization(sessionId, patch);
       await load(true);
+      // Archiving or restoring here changes what the sidebar beside this page
+      // is allowed to show, and that list was fetched when the shell mounted.
+      notifySessionsChanged();
     },
     [load],
   );
@@ -257,7 +197,7 @@ export default function ChatHistorySection({
   const headerDescription =
     description ??
     t(
-      "Browse, organize, rename, delete, and reopen previous conversations from your learning space.",
+      "Browse, rename, delete, and reopen previous conversations from your learning space.",
     );
 
   return (
@@ -272,37 +212,24 @@ export default function ChatHistorySection({
           </span>
         }
         action={
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setCreatingFolder(true);
-                setFolderError(null);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)]/50 px-3 py-1.5 text-[12px] font-medium text-[var(--muted-foreground)] transition-colors hover:border-[var(--border)] hover:text-[var(--foreground)]"
-            >
-              <FolderPlus className="h-3.5 w-3.5" />
-              {t("New chat folder")}
-            </button>
-            <button
-              type="button"
-              onClick={() => void load(true)}
-              disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)]/50 px-3 py-1.5 text-[12px] font-medium text-[var(--muted-foreground)] transition-colors hover:border-[var(--border)] hover:text-[var(--foreground)] disabled:opacity-40"
-            >
-              {loading ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3 w-3" />
-              )}
-              {t("Refresh")}
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => void load(true)}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)]/50 px-3 py-1.5 text-[12px] font-medium text-[var(--muted-foreground)] transition-colors hover:border-[var(--border)] hover:text-[var(--foreground)] disabled:opacity-40"
+          >
+            {loading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            {t("Refresh")}
+          </button>
         }
       />
 
       <section className="rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-sm">
-        <div className="space-y-3 border-b border-[var(--border)]/60 px-4 py-3">
+        <div className="border-b border-[var(--border)]/60 px-4 py-3">
           <label className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[13px] text-[var(--muted-foreground)] focus-within:border-[var(--ring)]">
             <Search size={14} strokeWidth={1.7} />
             <input
@@ -312,65 +239,10 @@ export default function ChatHistorySection({
               className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/55"
             />
           </label>
-          {creatingFolder && (
-            <div className="flex items-center gap-2">
-              <FolderPlus size={15} className="text-[var(--muted-foreground)]" />
-              <input
-                autoFocus
-                value={newFolderName}
-                maxLength={50}
-                onChange={(event) => setNewFolderName(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void handleCreateFolder();
-                  if (event.key === "Escape") setCreatingFolder(false);
-                }}
-                placeholder={t("Chat folder name")}
-                className="min-w-0 flex-1 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-[13px] outline-none focus:border-[var(--ring)]"
-              />
-              <button
-                type="button"
-                onClick={() => void handleCreateFolder()}
-                disabled={!newFolderName.trim()}
-                className="rounded-md p-1.5 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)] disabled:opacity-30"
-                aria-label={t("Create folder")}
-              >
-                <Check size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setCreatingFolder(false);
-                  setNewFolderName("");
-                }}
-                className="rounded-md p-1.5 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                aria-label={t("Cancel")}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          )}
-
-          {folderError && (
-            <p className="text-[12px] text-[var(--destructive)]">{folderError}</p>
-          )}
-          <div className="mt-2 grid gap-2 sm:grid-cols-3">
-            <label className="sr-only" htmlFor="history-course-filter">
-              {t("Filter by course")}
-            </label>
-            <select
-              id="history-course-filter"
-              value={courseFilter}
-              onChange={(event) => setCourseFilter(event.target.value)}
-              className="rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-1.5 text-[12px] text-[var(--foreground)] outline-none focus:border-[var(--ring)]"
-            >
-              <option value="all">{t("All courses")}</option>
-              <option value="unclassified">{t("Unclassified")}</option>
-              {courses.map((course) => (
-                <option key={course.id} value={course.id}>
-                  {course.name}
-                </option>
-              ))}
-            </select>
+          {/* Course filter temporarily hidden pending further product work;
+              courseFilter stays at its "all" default so filteredSessions is
+              unaffected. */}
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
             <label className="sr-only" htmlFor="history-kind-filter">
               {t("Filter by conversation type")}
             </label>
@@ -400,7 +272,7 @@ export default function ChatHistorySection({
           </div>
         </div>
 
-        <div className="space-y-5 px-3 py-4">
+        <div className="px-3 py-3">
           {loading ? (
             <div className="space-y-2 p-2">
               {[0, 1, 2, 3].map((item) => (
@@ -410,119 +282,23 @@ export default function ChatHistorySection({
                 />
               ))}
             </div>
+          ) : archiveFilter === "archived" ? (
+            <ArchivedConversations
+              buckets={archiveBuckets}
+              restoringId={restoringId}
+              onOpen={handleSelect}
+              onRestore={handleRestore}
+            />
           ) : (
-            groups.map((group) => {
-              const groupKey = group.id ?? "uncategorized";
-              const collapsed = collapsedFolderIds.has(groupKey);
-              const folder = group.id
-                ? folders.find((item) => item.id === group.id)
-                : null;
-              return (
-                <section key={groupKey}>
-                  <div className="mb-2 flex min-h-7 items-center gap-2 px-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setCollapsedFolderIds((current) => {
-                          const next = new Set(current);
-                          if (next.has(groupKey)) next.delete(groupKey);
-                          else next.add(groupKey);
-                          return next;
-                        })
-                      }
-                      className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                      aria-expanded={!collapsed}
-                      aria-label={t(
-                        collapsed ? "Expand folder" : "Collapse folder",
-                      )}
-                    >
-                      <ChevronDown
-                        size={13}
-                        className={`transition-transform ${collapsed ? "-rotate-90" : ""}`}
-                      />
-                    </button>
-                    <Folder
-                      size={15}
-                      className="shrink-0 text-[var(--muted-foreground)]"
-                    />
-                    {editingFolderId === group.id && group.id ? (
-                      <input
-                        autoFocus
-                        value={folderDraft}
-                        maxLength={50}
-                        onChange={(event) => setFolderDraft(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter")
-                            void handleRenameFolder(group.id as string);
-                          if (event.key === "Escape") setEditingFolderId(null);
-                        }}
-                        className="min-w-0 flex-1 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-[12px] outline-none focus:border-[var(--ring)]"
-                      />
-                    ) : (
-                      <h3 className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--foreground)]">
-                        {group.name}
-                      </h3>
-                    )}
-                    <span className="text-[11px] text-[var(--muted-foreground)]">
-                      {group.sessions.length}
-                    </span>
-                    {folder && editingFolderId === folder.id && (
-                      <button
-                        type="button"
-                        onClick={() => void handleRenameFolder(folder.id)}
-                        className="rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                        aria-label={t("Save folder name")}
-                      >
-                        <Check size={12} />
-                      </button>
-                    )}
-                    {folder && editingFolderId !== folder.id && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingFolderId(folder.id);
-                            setFolderDraft(folder.name);
-                            setFolderError(null);
-                          }}
-                          className="rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--foreground)]"
-                          aria-label={t("Rename folder")}
-                        >
-                          <Pencil size={12} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteFolder(folder)}
-                          className="rounded p-1 text-[var(--muted-foreground)] hover:bg-[var(--background)] hover:text-[var(--destructive)]"
-                          aria-label={t("Delete folder")}
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      </>
-                    )}
-                  </div>
-                  {!collapsed && group.sessions.length > 0 ? (
-                    <OrganizedSessionList
-                      sessions={group.sessions}
-                      courses={courses}
-                      activeSessionId={activeSessionId}
-                      onSelect={handleSelect}
-                      onRename={handleRename}
-                      onDelete={handleDelete}
-                      onOrganize={handleOrganize}
-                      folderOptions={folders}
-                      onMove={handleMove}
-                    />
-                  ) : !collapsed ? (
-                    <div className="rounded-lg border border-dashed border-[var(--border)]/60 px-3 py-4 text-center text-[11px] text-[var(--muted-foreground)]/70">
-                      {query.trim()
-                        ? t("No matching conversations")
-                        : t("No conversations in this folder")}
-                    </div>
-                  ) : null}
-                </section>
-              );
-            })
+            <OrganizedSessionList
+              sessions={filteredSessions}
+              courses={[]}
+              activeSessionId={activeSessionId}
+              onSelect={handleSelect}
+              onRename={handleRename}
+              onDelete={handleDelete}
+              onOrganize={handleOrganize}
+            />
           )}
         </div>
       </section>

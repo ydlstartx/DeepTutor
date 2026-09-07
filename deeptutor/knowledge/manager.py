@@ -27,6 +27,7 @@ from deeptutor.knowledge.kb_types import (
     MARGINNOTE4_KB_TYPE,
     OBSIDIAN_KB_TYPE,
     SUBAGENT_KB_TYPE,
+    WEKNORA_KB_TYPE,
     external_root_of,
     is_connected_kb,
 )
@@ -41,9 +42,11 @@ from deeptutor.services.rag.factory import (
     DEFAULT_PROVIDER,
     IMA_PROVIDER,
     KNOWN_PROVIDERS,
+    LIGHTRAG_PROVIDER,
     LIGHTRAG_SERVER_PROVIDER,
     PAGEINDEX_OSS_PROVIDER,
     PAGEINDEX_PROVIDER,
+    WEKNORA_PROVIDER,
     has_ready_provider_index,
     normalize_provider_name,
     provider_uses_embedding_versions,
@@ -1291,6 +1294,50 @@ class KnowledgeBaseManager:
         }
         return self._register_entry(name, entry)
 
+    def register_weknora_kb(
+        self,
+        name: str,
+        server_url: str,
+        api_key: str,
+        knowledge_base_id: str,
+        *,
+        description: str = "",
+    ) -> dict:
+        """Register a self-hosted WeKnora knowledge base as a pointer KB."""
+        name = (name or "").strip()
+        server_url = (server_url or "").strip().rstrip("/")
+        api_key = (api_key or "").strip()
+        knowledge_base_id = (knowledge_base_id or "").strip()
+        if not name:
+            raise ValueError("Knowledge base name is required.")
+        if not server_url or not knowledge_base_id:
+            raise ValueError("WeKnora server URL and knowledge base ID are required.")
+        if not api_key:
+            raise ValueError("A WeKnora API key is required.")
+
+        self.config = self._load_config()
+        knowledge_bases = self.config.setdefault("knowledge_bases", {})
+        if name in knowledge_bases:
+            raise ValueError(f"A knowledge base named '{name}' already exists.")
+
+        now = datetime.now().isoformat()
+        entry: dict[str, Any] = {
+            "path": name,
+            "type": WEKNORA_KB_TYPE,
+            "rag_provider": WEKNORA_PROVIDER,
+            "server_url": server_url,
+            "api_key": api_key,
+            "knowledge_base_id": knowledge_base_id,
+            "description": description or f"WeKnora knowledge base: {name}",
+            "status": "ready",
+            "needs_reindex": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        knowledge_bases[name] = entry
+        self._save_config()
+        return entry
+
     def get_knowledge_base_path(self, name: str | None = None) -> Path:
         """Get path to a knowledge base.
 
@@ -1606,6 +1653,21 @@ class KnowledgeBaseManager:
         # Same split for IMA: the library id is shown, the credentials are not.
         if kb_config.get("knowledge_base_id"):
             metadata["knowledge_base_id"] = kb_config.get("knowledge_base_id")
+
+        if rag_provider == LIGHTRAG_PROVIDER:
+            from deeptutor.services.rag.pipelines.lightrag.storage import (
+                latest_published_root,
+                read_published_policy,
+            )
+
+            published_root = latest_published_root(kb_dir) if dir_exists else None
+            indexing_policy = read_published_policy(published_root)
+            if indexing_policy is None:
+                pending = kb_config.get("pending_indexing_policy")
+                indexing_policy = (
+                    pending if isinstance(pending, dict) else {"policy": "legacy_unpinned"}
+                )
+            metadata["indexing_policy"] = indexing_policy
 
         metadata.update(self._embedding_fields(kb_config))
 
@@ -2085,16 +2147,7 @@ class KnowledgeBaseManager:
             raise ValueError(f"Linked folder not found: {folder_id}")
 
         folder_path = Path(folder_info["path"]).expanduser().resolve()
-        last_sync = folder_info.get("last_sync")
         synced_files = folder_info.get("synced_files", {})
-
-        # Parse last sync timestamp
-        last_sync_time = None
-        if last_sync:
-            try:
-                last_sync_time = datetime.fromisoformat(last_sync)
-            except Exception:
-                pass
 
         new_files = []
         modified_files = []

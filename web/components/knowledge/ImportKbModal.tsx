@@ -18,7 +18,7 @@ import {
   type KnowledgeImportFolderListing,
   type KnowledgeImportProbe,
   type KnowledgeImportResult,
-} from "@/lib/knowledge-api";
+} from "@/features/knowledge/api/client";
 
 interface ImportKbModalProps {
   isOpen: boolean;
